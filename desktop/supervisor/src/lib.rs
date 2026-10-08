@@ -267,25 +267,63 @@ pub fn terminate_child(child: &mut std::process::Child) {
     }
 }
 
-/// A 64px ink tile. Zero is `ea`. A count is the number, and over 99 is `99+`.
+/// A 64px screen-face. Zero is the head. A count blits the number in the corner.
 pub fn draw_icon(count: i64) -> (Vec<u8>, u32, u32) {
     const SIZE: usize = 64;
     let mut pixels = vec![0u8; SIZE * SIZE * 4];
-    for y in 2..SIZE - 2 {
-        for x in 2..SIZE - 2 {
-            put(&mut pixels, x, y, 28, 27, 25, 255);
+    paint_head(&mut pixels);
+    if count > 0 {
+        let label = icon_label(count);
+        let scale = 2;
+        let width = label.chars().count() * (5 * scale + scale);
+        let origin_x = SIZE.saturating_sub(width + 4);
+        let origin_y = SIZE.saturating_sub(7 * scale + 4);
+        fill(
+            &mut pixels,
+            origin_x.saturating_sub(2),
+            origin_y.saturating_sub(2),
+            width + 4,
+            7 * scale + 4,
+            28,
+            27,
+            25,
+            255,
+        );
+        for (index, ch) in label.chars().enumerate() {
+            blit(
+                &mut pixels,
+                origin_x + index * (5 * scale + scale),
+                origin_y,
+                ch,
+                scale,
+            );
         }
     }
-    let label = icon_label(count);
-    let scale = if label.len() > 2 { 3 } else { 4 };
-    let width = label.chars().count() * (5 * scale + scale);
-    let height = 7 * scale;
-    let origin_x = SIZE.saturating_sub(width) / 2;
-    let origin_y = SIZE.saturating_sub(height) / 2;
-    for (index, ch) in label.chars().enumerate() {
-        blit(&mut pixels, origin_x + index * (5 * scale + scale), origin_y, ch, scale);
-    }
     (pixels, SIZE as u32, SIZE as u32)
+}
+
+fn fill(pixels: &mut [u8], x: usize, y: usize, w: usize, h: usize, r: u8, g: u8, b: u8, a: u8) {
+    for yy in y..y.saturating_add(h) {
+        for xx in x..x.saturating_add(w) {
+            put(pixels, xx, yy, r, g, b, a);
+        }
+    }
+}
+
+fn paint_head(pixels: &mut [u8]) {
+    fill(pixels, 28, 6, 8, 8, 28, 27, 25, 255);
+    fill(pixels, 31, 8, 2, 1, 246, 244, 239, 255);
+    fill(pixels, 30, 9, 3, 1, 246, 244, 239, 255);
+    fill(pixels, 31, 10, 2, 3, 246, 244, 239, 255);
+    fill(pixels, 30, 13, 4, 1, 246, 244, 239, 255);
+    fill(pixels, 31, 14, 2, 4, 28, 27, 25, 255);
+    fill(pixels, 18, 20, 28, 26, 28, 27, 25, 255);
+    fill(pixels, 22, 26, 20, 14, 246, 244, 239, 255);
+    fill(pixels, 26, 30, 4, 4, 28, 27, 25, 255);
+    fill(pixels, 36, 30, 4, 4, 28, 27, 25, 255);
+    fill(pixels, 28, 36, 2, 2, 28, 27, 25, 255);
+    fill(pixels, 36, 36, 2, 2, 28, 27, 25, 255);
+    fill(pixels, 30, 38, 6, 2, 28, 27, 25, 255);
 }
 
 fn put(pixels: &mut [u8], x: usize, y: usize, r: u8, g: u8, b: u8, a: u8) {

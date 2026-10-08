@@ -56,6 +56,7 @@ from easyagent.subagent import (
 from easyagent.tunnel import relay_loop
 from easyagent.unread import mark_chat_read, mark_room_read, unread_snapshot
 from easyagent.skills import RESERVED_SLUGS, extract_skills, pack_skills, slugify
+from easyagent.mascot import clean_face_color, face_color_for
 from easyagent.store import Store, StoreError, message_index, new_id, now_iso, reaction_signal
 from easyagent.limits import MAX_CONTEXT_TOKENS, MAX_STORED_MESSAGE_CHARS, MIN_CONTEXT_TOKENS
 from easyagent.selfinfo import ensure_own_files, own_files_prompt
@@ -114,6 +115,7 @@ def public_bot(store: Store, bot: dict) -> dict:
         endpoint = store.get_endpoint(bot["endpoint_id"])
     except StoreError:
         endpoint = None
+    stored = _stored_face_color(bot)
     return {
         "id": bot["id"],
         "name": bot["name"],
@@ -124,7 +126,20 @@ def public_bot(store: Store, bot: dict) -> dict:
         "context_tokens": bot_context_tokens(bot),
         "context_chars": bot_context_chars(bot),
         "created_at": bot.get("created_at"),
+        "face_color": stored or face_color_for(bot["id"]),
+        "face_color_set": bool(stored),
     }
+
+
+def _stored_face_color(bot: dict) -> str:
+    """A saved palette color. A missing or unknown value stays off the file."""
+    raw = bot.get("face_color")
+    if not isinstance(raw, str):
+        return ""
+    try:
+        return clean_face_color(raw)
+    except StoreError:
+        return ""
 
 
 def make_title(content: str) -> str:
@@ -235,6 +250,7 @@ class BotPatch(BaseModel):
     endpoint_id: str | None = None
     model: str | None = None
     context_tokens: int | None = None
+    face_color: str | None = None
 
 
 class MessageIn(BaseModel):
@@ -476,6 +492,8 @@ def create_app(data_dir: str | Path | None = None) -> FastAPI:
             model_set="model" in fields,
             context_tokens=clean_context_tokens(body.context_tokens) if "context_tokens" in fields else None,
             context_tokens_set="context_tokens" in fields,
+            face_color=clean_face_color(body.face_color) if "face_color" in fields else None,
+            face_color_set="face_color" in fields,
         )
         chats_after = _snapshot_chats(store, bot_id)
         if chats_before != chats_after:
@@ -2105,6 +2123,22 @@ def _save_live_thinking(store: Store, bot_id: str, chat_id: str, text: str) -> N
     _write_live(store, bot_id, chat_id, thinking=text, step="Thinking")
 
 
+def _replace_live_thinking(store: Store, bot_id: str, chat_id: str, text: str) -> None:
+    """A replayed model turn replaces thinking from the attempt that dropped."""
+    try:
+        chat = store.get_chat(bot_id, chat_id)
+        message = _live_slot(chat)
+        cleaned = text or ""
+        if cleaned.strip():
+            message["thinking"] = cleaned
+        else:
+            message.pop("thinking", None)
+        chat["updated_at"] = now_iso()
+        store.save_chat(chat)
+    except OSError as exc:
+        _log.warning("Live thinking replace skipped: %s", exc)
+
+
 def _stopped_transport(detail: str) -> bool:
     """A client abort shows up as an incomplete chunked read. It is a stop."""
     return "incomplete chunked read" in (detail or "").lower()
@@ -2641,6 +2675,12 @@ async def _stream_reply(store: Store, bot_id: str, chat_id: str):
                 yield _sse({"type": "status", "text": text})
                 if saved_run:
                     yield _sse({"type": "run", "run": saved_run})
+                continue
+            if kind == "replay":
+                thought = text or ""
+                thought_saved = False
+                _replace_live_thinking(store, bot_id, chat_id, thought)
+                yield _sse({"type": "replay", "text": thought})
                 continue
             if kind == "final":
                 final = text

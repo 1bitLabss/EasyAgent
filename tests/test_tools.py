@@ -2906,7 +2906,7 @@ def test_a_missing_picture_is_drawn_instead_of_asking(tmp_path, monkeypatch):
 
 
 def test_a_timeout_after_the_page_is_written_answers_from_the_file(tmp_path, monkeypatch):
-    """A timeout is tried once more. If the page is already on disk, that timeout is not the reply."""
+    """A timeout is retried for the window. If the page is already on disk, that timeout is not the reply."""
     from easyagent.llm import ProviderError
     from easyagent.tools import _RESEARCH_CACHE
 
@@ -2941,7 +2941,7 @@ def test_a_timeout_after_the_page_is_written_answers_from_the_file(tmp_path, mon
     message = sent.json()["chat"]["messages"][-1]
     answer = message["content"]
     assert message.get("error") is not True
-    assert calls["n"] == 3
+    assert calls["n"] > 3
     assert "Timed out" not in answer
     assert "localhost:8080" not in answer
     assert "A bay hotel, written as one page." in answer
@@ -3017,7 +3017,7 @@ def test_the_goal_is_in_the_chat_before_the_model_replies(tmp_path, monkeypatch)
         assert response.status_code == 200, response.read()
         body = response.read().decode()
     assert seen["goal_before_model"] is True
-    assert seen["calls"] == 3
+    assert seen["calls"] > 3
     assert '"type": "error"' not in body
     assert "Timed out" not in body
     stored = client.get(f"/api/bots/{bot['id']}/chats/{chat['id']}").json()

@@ -108,7 +108,7 @@ button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-
 .brand {
   display: flex;
   gap: 8px;
-  align-items: baseline;
+  align-items: center;
   margin: 0 2px 8px;
   padding-bottom: 8px;
   border-bottom: 1px solid var(--line);
@@ -335,13 +335,15 @@ button:disabled { opacity: 0.45; cursor: not-allowed; }
 }
 
 .bot-live {
-  width: 8px;
-  height: 8px;
-  border-radius: 50%;
-  background: var(--accent);
-  box-shadow: 0 0 0 0 rgba(92, 77, 154, 0.45);
   flex: none;
-  animation: run-pulse 1.2s ease-in-out infinite;
+}
+
+.buddy-face.bot-live {
+  width: auto;
+  height: auto;
+  background: none;
+  box-shadow: none;
+  animation: none;
 }
 
 .endpoint-row {
@@ -454,7 +456,8 @@ h3 { font-size: 14px; }
 #screen-connections,
 #screen-computers,
 #screen-projects,
-#screen-direction {
+#screen-direction,
+#screen-about {
   overflow: auto;
   padding: 16px 20px 40px;
   background: var(--paper);
@@ -489,12 +492,19 @@ h3 { font-size: 14px; }
 
 .chat-head {
   display: flex;
-  align-items: baseline;
+  align-items: center;
   justify-content: space-between;
   gap: 12px;
   padding: 8px 14px;
   border-bottom: 1px solid var(--line);
   background: var(--paper);
+}
+
+.chat-head-main {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
 }
 
 .chat-head h1 { font-size: 16px; }
@@ -768,6 +778,9 @@ h3 { font-size: 14px; }
 }
 
 .message .who {
+  display: flex;
+  align-items: center;
+  gap: 6px;
   margin: 0 10px;
   font-size: 12px;
   letter-spacing: 0;
@@ -869,7 +882,8 @@ h3 { font-size: 14px; }
   --run-shine: #d5ccf3;
 }
 
-.run-indicator.is-waiting {
+.run-indicator.is-waiting,
+.run-indicator.is-reconnecting {
   --run-orb: #d0892a;
   --run-glow: rgba(208, 137, 42, 0.5);
   --run-ink: #8a5a12;
@@ -1005,6 +1019,11 @@ h3 { font-size: 14px; }
   .run-indicator:not(.is-halted) .run-step-text,
   .bot-live {
     animation: run-fade 2.4s ease-in-out infinite;
+  }
+
+  .buddy-face,
+  .buddy-face * {
+    animation: none !important;
   }
 
   .run-indicator:not(.is-halted) .run-step-text {
@@ -1418,3 +1437,194 @@ pre.skill-body {
   #messages .message, #room-messages .message { max-width: min(90%, 38rem); }
   .model-thinking summary { min-height: 44px; display: flex; align-items: center; }
 }
+
+.brand-mascot {
+  width: 36px;
+  height: 46px;
+  flex: none;
+  display: block;
+}
+
+#phone-bar .brand-mascot { width: 22px; height: 28px; }
+
+.mascot {
+  width: 168px;
+  height: auto;
+  display: block;
+  margin: 0 0 10px;
+}
+
+.mascot-small { width: 96px; }
+
+.tagline {
+  margin: 2px 0 8px;
+  font-weight: 600;
+  font-size: 15px;
+  color: var(--ink);
+}
+
+.buddy-face {
+  --face: #1c1b19;
+  --state: var(--face);
+  display: inline-flex;
+  flex: none;
+  line-height: 0;
+  border-radius: 3px;
+}
+
+.buddy-face svg {
+  width: 28px;
+  height: 24px;
+  display: block;
+}
+
+.buddy-face.is-large svg { width: 40px; height: 34px; }
+.buddy-face.is-tiny svg { width: 20px; height: 17px; }
+
+.buddy-face .shell { fill: var(--face); }
+.buddy-face.is-waiting,
+.buddy-face.is-reconnecting { --state: #d0892a; }
+.buddy-face.is-waiting .shell,
+.buddy-face.is-reconnecting .shell { fill: #d0892a; }
+.buddy-face.is-thinking { --state: #5c4d9a; }
+.buddy-face.is-thinking .shell { fill: #5c4d9a; }
+.buddy-face.is-tool { --state: #2a6fdb; }
+.buddy-face.is-tool .shell { fill: #2a6fdb; }
+.buddy-face.is-halted { --state: #8f2d28; }
+.buddy-face.is-halted .shell { fill: #8f2d28; }
+.buddy-face .bulb { fill: var(--state); }
+
+.buddy-face.is-selected {
+  box-shadow: 0 0 0 2px var(--rail), 0 0 0 4px var(--face);
+}
+
+.buddy-face .eyes,
+.buddy-face .mouth,
+.buddy-face .blink,
+.buddy-face .blink-line,
+.buddy-face .bulb,
+.buddy-face .thought {
+  visibility: hidden;
+}
+
+.buddy-face.is-idle .eyes-mid,
+.buddy-face.is-idle .mouth-smile,
+.buddy-face.is-waiting .eyes-mid,
+.buddy-face.is-waiting .mouth-smile,
+.buddy-face.is-reconnecting .eyes-mid,
+.buddy-face.is-reconnecting .mouth-smile,
+.buddy-face.is-thinking .eyes-up,
+.buddy-face.is-thinking .mouth-smile,
+.buddy-face.is-thinking .thought-3,
+.buddy-face.is-tool .eyes-squint,
+.buddy-face.is-tool .mouth-flat,
+.buddy-face.is-talking .eyes-mid,
+.buddy-face.is-talking .mouth-open,
+.buddy-face.is-halted .eyes-x,
+.buddy-face.is-halted .mouth-flat {
+  visibility: visible;
+}
+
+.buddy-face.is-idle .blink,
+.buddy-face.is-idle .blink-line { animation: idle-blink 4.8s steps(1, end) infinite; }
+.buddy-face.is-waiting .eyes-mid,
+.buddy-face.is-reconnecting .eyes-mid { animation: wait-mid 2.4s steps(1, end) infinite; }
+.buddy-face.is-waiting .eyes-left,
+.buddy-face.is-reconnecting .eyes-left { animation: wait-left 2.4s steps(1, end) infinite; }
+.buddy-face.is-waiting .eyes-right,
+.buddy-face.is-reconnecting .eyes-right { animation: wait-right 2.4s steps(1, end) infinite; }
+.buddy-face.is-waiting .blink,
+.buddy-face.is-waiting .blink-line,
+.buddy-face.is-reconnecting .blink,
+.buddy-face.is-reconnecting .blink-line { animation: wait-blink 2.4s steps(1, end) infinite; }
+.buddy-face.is-reconnecting .bulb { animation: bulb-fast 0.28s steps(1, end) infinite; }
+.buddy-face.is-thinking .bulb { animation: bulb-slow 1.2s steps(1, end) infinite; }
+.buddy-face.is-thinking .thought-1 { animation: thought-a 1.2s steps(1, end) infinite; }
+.buddy-face.is-thinking .thought-2 { animation: thought-b 1.2s steps(1, end) infinite; }
+.buddy-face.is-thinking .thought-3 { animation: thought-c 1.2s steps(1, end) infinite; }
+.buddy-face.is-tool .eyes-squint { animation: tool-on 0.4s steps(1, end) infinite; }
+.buddy-face.is-tool .eyes-mid { animation: tool-off 0.4s steps(1, end) infinite; }
+.buddy-face.is-tool .mouth-flat { animation: tool-on 0.4s steps(1, end) infinite; }
+.buddy-face.is-tool .mouth-open { animation: tool-off 0.4s steps(1, end) infinite; }
+.buddy-face.is-tool .bulb { animation: bulb-fast 0.28s steps(1, end) infinite; }
+.buddy-face.is-talking .mouth-open { animation: tool-on 0.36s steps(1, end) infinite; }
+.buddy-face.is-talking .mouth-smile { animation: tool-off 0.36s steps(1, end) infinite; }
+
+@keyframes idle-blink {
+  0%, 88% { visibility: hidden; }
+  89%, 96% { visibility: visible; }
+  97%, 100% { visibility: hidden; }
+}
+@keyframes wait-mid {
+  0%, 19% { visibility: hidden; }
+  20%, 39% { visibility: visible; }
+  40%, 59% { visibility: hidden; }
+  60%, 79% { visibility: visible; }
+  80%, 100% { visibility: hidden; }
+}
+@keyframes wait-left {
+  0%, 19% { visibility: visible; }
+  20%, 100% { visibility: hidden; }
+}
+@keyframes wait-right {
+  0%, 39% { visibility: hidden; }
+  40%, 59% { visibility: visible; }
+  60%, 100% { visibility: hidden; }
+}
+@keyframes wait-blink {
+  0%, 79% { visibility: hidden; }
+  80%, 100% { visibility: visible; }
+}
+@keyframes bulb-slow {
+  0%, 49% { visibility: visible; }
+  50%, 100% { visibility: hidden; }
+}
+@keyframes thought-a {
+  0%, 100% { visibility: visible; }
+}
+@keyframes thought-b {
+  0%, 32% { visibility: hidden; }
+  33%, 100% { visibility: visible; }
+}
+@keyframes thought-c {
+  0%, 65% { visibility: hidden; }
+  66%, 100% { visibility: visible; }
+}
+@keyframes tool-on {
+  0%, 49% { visibility: visible; }
+  50%, 100% { visibility: hidden; }
+}
+@keyframes tool-off {
+  0%, 49% { visibility: hidden; }
+  50%, 100% { visibility: visible; }
+}
+@keyframes bulb-fast {
+  0%, 40% { visibility: visible; }
+  41%, 100% { visibility: hidden; }
+}
+
+.face-colors {
+  border: none;
+  margin: 0;
+  padding: 0;
+}
+
+.face-colors legend {
+  font-size: 13px;
+  margin-bottom: 6px;
+}
+
+.face-swatches {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.swatch {
+  background: transparent;
+  border: none;
+  padding: 4px;
+  border-radius: 6px;
+}
+
+.swatch.is-selected { box-shadow: 0 0 0 2px var(--ink); }

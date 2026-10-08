@@ -1,5 +1,9 @@
 # EasyAgent
 
+![EasyAgent mascot](assets/mascot.svg)
+
+**AI agents, made easy.**
+
 EasyAgent is a free local agent harness for any OpenAI-compatible model. You run it on your own computer. It gives you multiple bots, real tools, markdown memory, and a goal, plan, build, and check loop. It does not include a model, an account, or a cloud copy of your chats.
 
 Version 0.1.0. [MIT license](LICENSE). Copyright Nathan / 1bitLabs.
@@ -70,7 +74,7 @@ One bot can ask one other existing bot to do a single task. The asking chat gets
 
 Each connection has a limit, **At once**, for how many replies may use it together. The default is 1. You can set it from 1 to 32. Extra chats wait in a first-in line. The waiting chat says it is queued, names the connection and who is using it, and shows how long it has waited. It starts on its own when a slot is free. Stop while it is waiting leaves the line.
 
-A server that disconnects without a response, or resets the connection, is tried once more before the chat says Stopped. The slot is held only during a model request, not while a tool is running.
+A model server that refuses the connection, times out before the first token, returns 502, 503, or 504, or says it is busy, is retried with a growing pause for up to 3 minutes. The chat stays open and shows that it is reconnecting. The slot is free during that pause, and it is held only during a model request, not while a tool is running. Stop still stops at once. A stream that drops after the reply has started is tried once more from the start of that reply. Set `EASYAGENT_MODEL_RETRY_SECONDS` to change the 3 minutes.
 
 A failed request names the connection and the address it used. An old error line in the transcript is not sent back to the model, so a previous address cannot leak into a later turn.
 

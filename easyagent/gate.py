@@ -35,7 +35,7 @@ def clamp_parallel(value) -> int:
 
 
 def is_dropped_connection(detail: str) -> bool:
-    """The server hung up, or the socket was reset. One retry is worth it."""
+    """The server hung up, or the socket was reset."""
     lowered = (detail or "").lower()
     return (
         "disconnected without sending a response" in lowered

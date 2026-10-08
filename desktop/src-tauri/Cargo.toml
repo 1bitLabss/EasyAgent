@@ -1,7 +1,7 @@
 [package]
 name = "easyagent-desktop"
 version = "0.1.0"
-description = "Native window for the local EasyAgent server."
+description = "AI agents, made easy."
 authors = ["Nathan / 1bitLabs"]
 edition = "2021"
 license = "MIT"

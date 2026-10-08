@@ -16,6 +16,7 @@ from pathlib import Path
 import httpx
 
 from easyagent import gate
+from easyagent import retry
 from easyagent import turn as turn_mod
 
 
@@ -523,6 +524,125 @@ def _message_text(content) -> str:
     return str(content)
 
 
+def _http_timeout(timeout: float, *, stream: bool) -> httpx.Timeout:
+    """Connect fails fast. A stream that has started may think quietly. A whole reply still has a limit."""
+    return httpx.Timeout(
+        connect=retry.CONNECT_TIMEOUT,
+        read=None if stream else timeout,
+        write=timeout,
+        pool=retry.CONNECT_TIMEOUT,
+    )
+
+
+def _raise_transport(exc: BaseException, base_url: str) -> None:
+    if isinstance(exc, turn_mod.TurnCancelled):
+        raise exc
+    if turn_mod.cancelled():
+        raise turn_mod.TurnCancelled() from exc
+    if isinstance(exc, asyncio.TimeoutError) or isinstance(exc, httpx.TimeoutException):
+        raise ProviderError(f"Timed out calling {base_url}") from exc
+    if isinstance(exc, httpx.HTTPError):
+        raise ProviderError(f"Could not reach {base_url}: {exc}") from exc
+    raise exc
+
+
+async def _complete_once(
+    *,
+    base_url: str,
+    api_key: str | None,
+    model: str | None,
+    messages: list[dict],
+    timeout: float,
+) -> str:
+    """One non-streaming completion. The caller decides whether to retry."""
+    _native_calls.set(None)
+    url = base_url.rstrip("/") + "/chat/completions"
+    payload = _completion_payload(messages, model, stream=False)
+    headers = {"Content-Type": "application/json"}
+    if api_key:
+        headers["Authorization"] = f"Bearer {api_key}"
+    client = httpx.AsyncClient(timeout=_http_timeout(timeout, stream=False))
+    turn_mod.attach_client(client)
+    try:
+        turn_mod.raise_if_cancelled()
+        try:
+            response = await client.post(url, json=payload, headers=headers)
+        except (httpx.HTTPError, asyncio.TimeoutError) as exc:
+            _raise_transport(exc, base_url)
+    finally:
+        turn_mod.detach_client(client)
+        await client.aclose()
+    if response.status_code >= 400:
+        detail = " ".join(response.text.split())[:300]
+        raise ProviderError(f"{response.status_code} from {base_url}: {detail}")
+    try:
+        data = response.json()
+    except ValueError as exc:
+        raise ProviderError(f"Endpoint did not return JSON: {response.text[:200]}") from exc
+    try:
+        message = data["choices"][0]["message"]
+    except (KeyError, IndexError, TypeError) as exc:
+        raise ProviderError("Endpoint returned no choices.") from exc
+    field = _reasoning_field(message if isinstance(message, dict) else {})
+    body = _message_text(message.get("content") if isinstance(message, dict) else None)
+    hidden, answer = peel_thinking(body)
+    _note_split(field, hidden)
+    calls: dict[int, dict] = {}
+    if isinstance(message, dict):
+        _collect_calls(calls, {"message": message})
+    _store_native_calls(calls)
+    fence = calls_to_fences(list(calls.values()))
+    prose = answer.strip()
+    if fence and prose:
+        return prose + "\n" + fence
+    if fence:
+        return fence
+    if not prose:
+        raise ProviderError("Endpoint returned an empty message.")
+    return answer
+
+
+async def _complete_window(
+    *,
+    base_url: str,
+    api_key: str | None,
+    model: str | None,
+    messages: list[dict],
+    timeout: float,
+) -> str:
+    """Retry a completion that never returned, and free the slot during the pause."""
+    window = retry.Window()
+    while True:
+        permit = await gate.reserve()
+        hold = True
+        try:
+            await permit.acquire()
+            try:
+                return await _complete_once(
+                    base_url=base_url,
+                    api_key=api_key,
+                    model=model,
+                    messages=messages,
+                    timeout=timeout,
+                )
+            except turn_mod.TurnCancelled:
+                raise
+            except ProviderError as exc:
+                kind = window.plan(str(exc), started=False)
+                if kind is None:
+                    message = window.failure_message(str(exc))
+                    if message:
+                        raise ProviderError(message) from exc
+                    raise
+                _label, delay = window.arm(kind, str(exc))
+                await permit.release()
+                hold = False
+                await retry.pause(delay)
+        finally:
+            if hold:
+                await permit.release()
+
+
 async def complete(
     *,
     base_url: str,
@@ -531,73 +651,26 @@ async def complete(
     messages: list[dict],
     timeout: float = 120.0,
 ) -> str:
-    _native_calls.set(None)
-    url = base_url.rstrip("/") + "/chat/completions"
-    payload = _completion_payload(messages, model, stream=False)
-    headers = {"Content-Type": "application/json"}
-    if api_key:
-        headers["Authorization"] = f"Bearer {api_key}"
-    permit = await gate.reserve()
-    try:
-        await permit.acquire()
-        response = None
-        attempts = 2 if gate.inner_retry_allowed() else 1
-        for attempt in range(1, attempts + 1):
-            client = httpx.AsyncClient(timeout=timeout)
-            turn_mod.attach_client(client)
-            try:
-                turn_mod.raise_if_cancelled()
-                response = await client.post(url, json=payload, headers=headers)
-                break
-            except turn_mod.TurnCancelled:
-                raise
-            except httpx.TimeoutException as exc:
-                if turn_mod.cancelled():
-                    raise turn_mod.TurnCancelled() from exc
-                raise ProviderError(f"Timed out calling {base_url}") from exc
-            except httpx.HTTPError as exc:
-                if turn_mod.cancelled():
-                    raise turn_mod.TurnCancelled() from exc
-                message = f"Could not reach {base_url}: {exc}"
-                if attempt < attempts and gate.is_dropped_connection(message):
-                    await gate.pause_retry()
-                    continue
-                raise ProviderError(message) from exc
-            finally:
-                turn_mod.detach_client(client)
-                await client.aclose()
-        if response is None:
-            raise ProviderError(f"Could not reach {base_url}")
-        if response.status_code >= 400:
-            detail = " ".join(response.text.split())[:300]
-            raise ProviderError(f"{response.status_code} from {base_url}: {detail}")
+    if not gate.inner_retry_allowed():
+        permit = await gate.reserve()
         try:
-            data = response.json()
-        except ValueError as exc:
-            raise ProviderError(f"Endpoint did not return JSON: {response.text[:200]}") from exc
-        try:
-            message = data["choices"][0]["message"]
-        except (KeyError, IndexError, TypeError) as exc:
-            raise ProviderError("Endpoint returned no choices.") from exc
-        field = _reasoning_field(message if isinstance(message, dict) else {})
-        body = _message_text(message.get("content") if isinstance(message, dict) else None)
-        hidden, answer = peel_thinking(body)
-        _note_split(field, hidden)
-        calls: dict[int, dict] = {}
-        if isinstance(message, dict):
-            _collect_calls(calls, {"message": message})
-        _store_native_calls(calls)
-        fence = calls_to_fences(list(calls.values()))
-        prose = answer.strip()
-        if fence and prose:
-            return prose + "\n" + fence
-        if fence:
-            return fence
-        if not prose:
-            raise ProviderError("Endpoint returned an empty message.")
-        return answer
-    finally:
-        await permit.release()
+            await permit.acquire()
+            return await _complete_once(
+                base_url=base_url,
+                api_key=api_key,
+                model=model,
+                messages=messages,
+                timeout=timeout,
+            )
+        finally:
+            await permit.release()
+    return await _complete_window(
+        base_url=base_url,
+        api_key=api_key,
+        model=model,
+        messages=messages,
+        timeout=timeout,
+    )
 
 
 def _choice_text(choice: dict) -> str:
@@ -771,9 +844,94 @@ async def _iter_completion_body(response: httpx.Response) -> AsyncIterator[str]:
         yield "".join(held)
 
 
-def _stream_timeout(timeout: float) -> httpx.Timeout:
-    """Connect can fail. A pause between chunks does not. A closed socket still does."""
-    return httpx.Timeout(timeout, read=None)
+async def _stream_once(
+    *,
+    base_url: str,
+    api_key: str | None,
+    model: str | None,
+    messages: list[dict],
+    timeout: float,
+) -> AsyncIterator[str]:
+    """One streaming attempt. A pause after the headers is not a failure. No headers in time is."""
+    url = base_url.rstrip("/") + "/chat/completions"
+    payload = _completion_payload(messages, model, stream=True)
+    headers = {"Content-Type": "application/json"}
+    if api_key:
+        headers["Authorization"] = f"Bearer {api_key}"
+    client = httpx.AsyncClient(timeout=_http_timeout(timeout, stream=True))
+    turn_mod.attach_client(client)
+    yielded = False
+    opened = None
+    try:
+        turn_mod.raise_if_cancelled()
+        opened = client.stream("POST", url, json=payload, headers=headers)
+        try:
+            response = await asyncio.wait_for(opened.__aenter__(), timeout)
+        except (httpx.HTTPError, asyncio.TimeoutError) as exc:
+            _raise_transport(exc, base_url)
+        try:
+            if response.status_code >= 400:
+                detail = " ".join((await response.aread()).decode("utf-8", "replace").split())[:300]
+                raise ProviderError(f"{response.status_code} from {base_url}: {detail}")
+            async for piece in _iter_completion_body(response):
+                turn_mod.raise_if_cancelled()
+                if piece:
+                    yielded = True
+                    yield piece
+        except (httpx.HTTPError, asyncio.TimeoutError) as exc:
+            _raise_transport(exc, base_url)
+        finally:
+            await opened.__aexit__(None, None, None)
+            opened = None
+    finally:
+        turn_mod.detach_client(client)
+        await client.aclose()
+    if not yielded:
+        raise ProviderError("Endpoint returned an empty message.")
+
+
+async def _stream_window(
+    *,
+    base_url: str,
+    api_key: str | None,
+    model: str | None,
+    messages: list[dict],
+    timeout: float,
+) -> AsyncIterator[str]:
+    """Retry until the first token, then let a later drop surface to the caller."""
+    window = retry.Window()
+    while True:
+        permit = await gate.reserve()
+        hold = True
+        started = False
+        try:
+            await permit.acquire()
+            try:
+                async for piece in _stream_once(
+                    base_url=base_url,
+                    api_key=api_key,
+                    model=model,
+                    messages=messages,
+                    timeout=timeout,
+                ):
+                    started = True
+                    yield piece
+                return
+            except turn_mod.TurnCancelled:
+                raise
+            except ProviderError as exc:
+                if started or window.plan(str(exc), started=False) is None:
+                    message = None if started else window.failure_message(str(exc))
+                    if message:
+                        raise ProviderError(message) from exc
+                    raise
+                _label, delay = window.arm("again", str(exc))
+                await permit.release()
+                hold = False
+                await retry.pause(delay)
+        finally:
+            if hold:
+                await permit.release()
 
 
 async def stream_complete(
@@ -784,50 +942,17 @@ async def stream_complete(
     messages: list[dict],
     timeout: float = 120.0,
 ) -> AsyncIterator[str]:
-    """Yield the reply as it arrives. Waiting on an open socket is not a failure."""
-    url = base_url.rstrip("/") + "/chat/completions"
-    payload = _completion_payload(messages, model, stream=True)
-    headers = {"Content-Type": "application/json"}
-    if api_key:
-        headers["Authorization"] = f"Bearer {api_key}"
-    permit = await gate.reserve()
-    try:
-        await permit.acquire()
-        yielded = False
-        attempts = 2 if gate.inner_retry_allowed() else 1
-        for attempt in range(1, attempts + 1):
-            client = httpx.AsyncClient(timeout=_stream_timeout(timeout))
-            turn_mod.attach_client(client)
-            try:
-                turn_mod.raise_if_cancelled()
-                async with client.stream("POST", url, json=payload, headers=headers) as response:
-                    if response.status_code >= 400:
-                        detail = " ".join((await response.aread()).decode("utf-8", "replace").split())[:300]
-                        raise ProviderError(f"{response.status_code} from {base_url}: {detail}")
-                    async for piece in _iter_completion_body(response):
-                        turn_mod.raise_if_cancelled()
-                        if piece:
-                            yielded = True
-                            yield piece
-                break
-            except turn_mod.TurnCancelled:
-                raise
-            except httpx.TimeoutException as exc:
-                if turn_mod.cancelled():
-                    raise turn_mod.TurnCancelled() from exc
-                raise ProviderError(f"Timed out calling {base_url}") from exc
-            except httpx.HTTPError as exc:
-                if turn_mod.cancelled():
-                    raise turn_mod.TurnCancelled() from exc
-                message = f"Could not reach {base_url}: {exc}"
-                if attempt < attempts and not yielded and gate.is_dropped_connection(message):
-                    await gate.pause_retry()
-                    continue
-                raise ProviderError(message) from exc
-            finally:
-                turn_mod.detach_client(client)
-                await client.aclose()
-        if not yielded:
-            raise ProviderError("Endpoint returned an empty message.")
-    finally:
-        await permit.release()
+    """Yield the reply as it arrives. Waiting on an open socket is not a failure.
+
+    A caller that already retries passes one attempt through. On its own, this
+    keeps trying until the first token or the retry window runs out.
+    """
+    producer = _stream_window if gate.inner_retry_allowed() else _stream_once
+    async for piece in producer(
+        base_url=base_url,
+        api_key=api_key,
+        model=model,
+        messages=messages,
+        timeout=timeout,
+    ):
+        yield piece

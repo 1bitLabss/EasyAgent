@@ -2,7 +2,7 @@
   "name": "easyagent-desktop",
   "private": true,
   "version": "0.1.0",
-  "description": "Tauri window around the EasyAgent server.",
+  "description": "AI agents, made easy.",
   "scripts": {
     "dev": "tauri dev",
     "build": "tauri build",

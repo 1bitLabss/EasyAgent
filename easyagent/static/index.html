@@ -4,11 +4,14 @@
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>EasyAgent</title>
-  <link rel="stylesheet" href="/static/app.css?v=30" />
+  <link rel="icon" href="/static/favicon.png" type="image/png" />
+  <link rel="stylesheet" href="/static/app.css?v=32" />
 </head>
 <body>
   <div id="token-gate" class="gate" hidden>
     <form id="token-form" class="gate-card">
+      <img class="mascot mascot-small" src="/static/mascot.svg" alt="" width="96" height="122" />
+      <p class="tagline">AI agents, made easy.</p>
       <p class="eyebrow">Shared token</p>
       <h1>Type the shared token.</h1>
       <p class="lede">Chats stay on the computer running EasyAgent. This phone does not keep a copy.</p>
@@ -24,13 +27,15 @@
     <p id="offline-banner" class="offline-banner" hidden>The computer running EasyAgent is offline.</p>
     <div id="phone-bar">
       <button type="button" id="phone-menu">Bots</button>
+      <img class="brand-mascot" src="/static/mascot.svg" alt="" width="22" height="28" />
       <strong>EasyAgent</strong>
     </div>
     <aside id="rail">
       <header class="brand">
+        <img class="brand-mascot" src="/static/mascot.svg" alt="" width="36" height="46" />
         <div>
           <strong>EasyAgent</strong>
-          <em>This screen is the conversation.</em>
+          <em>AI agents, made easy.</em>
         </div>
       </header>
 
@@ -93,6 +98,7 @@
         <button type="button" id="nav-projects" data-screen="projects">Projects</button>
         <button type="button" id="nav-computers" data-screen="computers">Computers</button>
         <button type="button" id="show-direction" data-screen="direction">Direction</button>
+        <button type="button" id="nav-about" data-screen="about">About</button>
         <button type="button" id="show-skills">Skills</button>
       </nav>
     </aside>
@@ -100,18 +106,24 @@
     <main id="stage">
       <section id="screen-chat" class="screen">
         <header class="chat-head" id="chat-head" hidden>
-          <div>
-            <p class="eyebrow" id="bot-kicker">Chat</p>
-            <h1 id="bot-title"></h1>
+          <div class="chat-head-main">
+            <span id="chat-face"></span>
+            <div>
+              <p class="eyebrow" id="bot-kicker">Chat</p>
+              <h1 id="bot-title"></h1>
+            </div>
           </div>
           <button type="button" id="open-settings-chat" class="text-btn">Settings</button>
         </header>
         <section id="empty-stage">
-          <p class="eyebrow">Chat</p>
-          <h1>Pick a bot.</h1>
-          <p class="lede">The conversation fills this screen. A bot's settings, connections, rooms, projects, and computers are on their own screens.</p>
+          <img class="mascot" src="/static/mascot.svg" alt="" width="168" height="214" />
+          <p class="eyebrow">EasyAgent</p>
+          <h1 id="empty-title">Add a bot.</h1>
+          <p class="tagline">AI agents, made easy.</p>
+          <p class="lede" id="empty-copy">The conversation fills this screen. A bot's settings, connections, rooms, projects, and computers are on their own screens.</p>
         </section>
         <div id="thread-empty" hidden>
+          <img class="mascot mascot-small" src="/static/mascot.svg" alt="" width="96" height="122" />
           <h2 id="thread-empty-title">No chat open</h2>
           <p id="thread-empty-copy">Start a new chat, or open one from this bot's list. The list is only this bot's.</p>
         </div>
@@ -171,6 +183,10 @@
             <input id="settings-context" type="number" min="512" max="1000000" step="1" inputmode="numeric" />
           </label>
           <p class="form-note">Older messages stay saved. This number is only how much of the recent chat is sent with the next reply.</p>
+          <fieldset class="face-colors" id="face-colors">
+            <legend>Face color</legend>
+            <div id="face-swatches" class="face-swatches"></div>
+          </fieldset>
           <div class="form-actions">
             <button type="submit">Save</button>
           </div>
@@ -566,6 +582,13 @@
         <p id="direction-note" class="form-note"></p>
         <p id="direction-error" class="form-error" role="alert" hidden></p>
       </section>
+
+      <section id="screen-about" class="screen" hidden>
+        <img class="mascot" src="/static/mascot.svg" alt="" width="168" height="214" />
+        <h1>EasyAgent</h1>
+        <p class="tagline">AI agents, made easy.</p>
+        <p class="lede">Version 0.1.0. A local harness for any OpenAI-compatible model. Chats stay on this computer.</p>
+      </section>
     </main>
   </div>
 
@@ -616,6 +639,6 @@
     <div id="info-body"></div>
   </dialog>
 
-  <script src="/static/app.js?v=35"></script>
+  <script src="/static/app.js?v=37"></script>
 </body>
 </html>

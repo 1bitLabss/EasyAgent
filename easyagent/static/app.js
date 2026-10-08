@@ -36,6 +36,7 @@ const state = {
   memoryTopic: null,
   memoryBotId: null,
   busyBots: new Set(),
+  pendingFace: null,
 };
 
 function streamKey(botId, chatId) {
@@ -146,11 +147,23 @@ function showOffline(on, message) {
   show(node, on);
 }
 
+function mascotImg(className) {
+  return el("img", {
+    class: className || "mascot",
+    src: "/static/mascot.svg",
+    alt: "",
+    width: "168",
+    height: "214",
+  });
+}
+
 function offlineStage(message) {
   showOffline(true, message);
   $("empty-stage").replaceChildren(
+    mascotImg(),
     el("p", { class: "eyebrow" }, ["Offline"]),
     el("h1", {}, ["The computer at home is not connected."]),
+    el("p", { class: "tagline" }, ["AI agents, made easy."]),
     el("p", { class: "lede" }, [message || "Chats stay on that computer. Reload when it is back."]),
   );
 }
@@ -543,14 +556,14 @@ function renderBots() {
   show($("bot-empty"), state.bots.length === 0);
   for (const bot of state.bots) {
     const selected = state.view !== "room" && bot.id === state.botId;
-    const live = botIsLive(bot.id);
-    const kids = [];
-    if (live) kids.push(el("span", { class: "bot-live", "aria-hidden": "true" }));
-    kids.push(el("strong", {}, [bot.name]));
+    const kids = [
+      makeFace(bot, { live: true, selected }),
+      el("strong", {}, [bot.name]),
+    ];
     list.append(el("li", {}, [
       el("button", {
         type: "button",
-        class: `entity bot-btn${selected ? " is-selected" : ""}${live ? " is-live" : ""}`,
+        class: `entity bot-btn${selected ? " is-selected" : ""}${botIsLive(bot.id) ? " is-live" : ""}`,
         "data-bot-id": bot.id,
         "aria-current": selected ? "true" : null,
         onclick: () => selectBot(bot.id),
@@ -672,11 +685,12 @@ function renderStage() {
   show($("project-picker"), screen === "projects" && !state.groupProjectId);
   show($("project-open"), screen === "projects" && Boolean(state.groupProjectId));
   show($("screen-direction"), screen === "direction");
+  show($("screen-about"), screen === "about");
   show($("room-picker"), screen === "rooms" && !showRoom);
   show($("room-stage"), Boolean(showRoom));
   show($("side-chats"), Boolean(state.botId) && state.view !== "room");
   show($("chat-head"), onChat && Boolean(bot));
-  for (const id of ["nav-connections", "nav-rooms", "nav-projects", "nav-computers", "show-direction"]) {
+  for (const id of ["nav-connections", "nav-rooms", "nav-projects", "nav-computers", "show-direction", "nav-about"]) {
     const node = $(id);
     if (!node) continue;
     const on = node.dataset.screen === screen;
@@ -687,6 +701,7 @@ function renderStage() {
   if (showRoom) renderRoom();
   if (screen === "projects") renderOpenGroupProject();
   show($("empty-stage"), onChat && !bot);
+  if ($("empty-title")) $("empty-title").textContent = state.bots.length ? "Pick a bot." : "Add a bot.";
   if (!bot) {
     if (onChat) {
       show($("thread-empty"), false);
@@ -695,6 +710,7 @@ function renderStage() {
     return;
   }
   $("bot-title").textContent = bot.name;
+  if (onChat) mountChatFace(bot);
   if ($("settings-heading")) $("settings-heading").textContent = bot.name;
   renderAskChoices(bot);
   const model = modelLabel(bot);
@@ -702,6 +718,7 @@ function renderStage() {
   const contextTokens = bot.context_tokens || 24000;
   const chats = state.chats.length;
   $("bot-meta").textContent = `${endpoint}. ${model}. Sees up to ${formatCount(contextTokens)} tokens of each chat. ${chats} saved chat${chats === 1 ? "" : "s"}.`;
+  if (state.pendingFace && state.pendingFace.botId !== bot.id) state.pendingFace = null;
   if (state.renderedBotId !== bot.id) {
     fillEndpointSelect($("settings-endpoint"), bot.endpoint_id, false);
     $("settings-name").value = bot.name || "";
@@ -709,6 +726,7 @@ function renderStage() {
     $("settings-context").value = String(contextTokens);
     state.renderedBotId = bot.id;
   }
+  paintFaceSwatches();
   renderChatList();
   const chat = state.chat;
   const wrongBot = chat && chat.bot_id && chat.bot_id !== bot.id;
@@ -802,6 +820,7 @@ function currentRun() {
 function runTone(step, status) {
   if (status === "stopped" || status === "error") return "halted";
   const text = String(step || "");
+  if (text.startsWith("Model not answering")) return "reconnecting";
   if (text.startsWith("Queued:") || text.startsWith("Waiting") || text.startsWith("still waiting")) return "waiting";
   if (
     text.startsWith("Running") ||
@@ -829,15 +848,140 @@ function botIsLive(botId) {
   return Boolean(state.busyBots && state.busyBots.has(botId));
 }
 
+const FACE_PALETTE = ["#c4532a", "#2a6fdb", "#1f8a4c", "#c43b7a", "#b86e12", "#5c4d9a", "#0e7c86", "#8f2d28", "#3d6b4f", "#a34b2e", "#3a4f8a", "#6b4a2a"];
+const FACE_FRAMES = ["eyes-mid", "eyes-left", "eyes-right", "eyes-up", "eyes-squint", "eyes-x", "mouth-smile", "mouth-flat", "mouth-open"];
+let faceTemplate = null;
+
+function faceMarkupOk(svg) {
+  return FACE_FRAMES.every((name) => svg.querySelector("." + name));
+}
+
+async function loadFaceTemplate() {
+  try {
+    const response = await fetch("/static/face.svg?v=1");
+    if (!response.ok) return;
+    const doc = new DOMParser().parseFromString(await response.text(), "image/svg+xml");
+    const root = doc.documentElement;
+    if (root && root.localName === "svg" && faceMarkupOk(root)) faceTemplate = root;
+  } catch {
+    faceTemplate = null;
+  }
+}
+
+function applyFaceState(node, name) {
+  node.classList.toggle("bot-live", name !== "idle" && name !== "halted");
+  if (node.dataset.faceState === name) return;
+  node.dataset.faceState = name;
+  node.classList.remove("is-idle", "is-waiting", "is-reconnecting", "is-thinking", "is-tool", "is-talking", "is-halted");
+  node.classList.add(`is-${name}`);
+}
+
+function faceStateFor(botId) {
+  if (!botId) return "idle";
+  let stream = null;
+  for (const item of streams.values()) {
+    if (item.botId !== botId || item.replaced) continue;
+    const status = item.live && item.live.run && item.live.run.status;
+    if (item.sending || status === "running") stream = item;
+  }
+  if (stream) {
+    const live = stream.live || {};
+    const run = live.run || {};
+    const status = run.status || (stream.sending ? "running" : "");
+    if (live.phase === "stopped" || live.phase === "error" || status === "stopped" || status === "error") return "halted";
+    const tone = runTone(live.label || run.current_step || "", status);
+    if (tone === "reconnecting") return "reconnecting";
+    if ((live.text || "").length) return "talking";
+    return tone;
+  }
+  if (state.botId === botId) {
+    const run = (state.live && state.live.run) || (state.chat && state.chat.run);
+    const live = state.live || {};
+    if (live.phase === "stopped" || live.phase === "error") return "halted";
+    if (run && run.status === "running") {
+      const tone = runTone(live.label || run.current_step || "", run.status);
+      if (tone === "reconnecting") return "reconnecting";
+      if ((live.text || "").length) return "talking";
+      return tone;
+    }
+  }
+  if (state.busyBots && state.busyBots.has(botId)) return "thinking";
+  return "idle";
+}
+
+function makeFace(bot, options = {}) {
+  const wrap = document.createElement("span");
+  wrap.className = "buddy-face";
+  if (options.large) wrap.classList.add("is-large");
+  if (options.tiny) wrap.classList.add("is-tiny");
+  if (options.selected) wrap.classList.add("is-selected");
+  wrap.style.setProperty("--face", (bot && bot.face_color) || "#5c4d9a");
+  if (bot && bot.id) wrap.dataset.faceBot = bot.id;
+  const halted = Boolean(options.halted);
+  const live = Boolean(options.live) && !halted;
+  if (live) wrap.dataset.faceLive = "1";
+  applyFaceState(wrap, halted ? "halted" : live ? faceStateFor(bot && bot.id) : "idle");
+  if (faceTemplate) wrap.append(document.importNode(faceTemplate, true));
+  wrap.setAttribute("aria-hidden", "true");
+  return wrap;
+}
+
+function syncBotFaces() {
+  document.querySelectorAll("[data-face-live]").forEach((node) => {
+    const bot = state.bots.find((item) => item.id === node.dataset.faceBot);
+    if (bot && bot.face_color) node.style.setProperty("--face", bot.face_color);
+    applyFaceState(node, faceStateFor(node.dataset.faceBot));
+  });
+}
+
 function syncBotLive() {
   const buttons = document.querySelectorAll("#bot-list .bot-btn");
   buttons.forEach((button) => {
-    const live = botIsLive(button.dataset.botId);
-    const dot = button.querySelector(".bot-live");
-    button.classList.toggle("is-live", live);
-    if (live && !dot) button.prepend(el("span", { class: "bot-live", "aria-hidden": "true" }));
-    if (!live && dot) dot.remove();
+    button.classList.toggle("is-live", botIsLive(button.dataset.botId));
   });
+  syncBotFaces();
+}
+
+function whoLine(label, bot, options) {
+  const kids = [];
+  if (bot) kids.push(makeFace(bot, options || {}));
+  kids.push(document.createTextNode(label));
+  return el("p", { class: "who" }, kids);
+}
+
+function mountChatFace(bot) {
+  const host = $("chat-face");
+  if (!host || !bot) return;
+  const face = host.querySelector("[data-face-live]");
+  if (face && face.dataset.faceBot === bot.id) {
+    face.style.setProperty("--face", bot.face_color || "#5c4d9a");
+    face.classList.add("is-selected");
+    return;
+  }
+  host.replaceChildren(makeFace(bot, { live: true, selected: true, large: true }));
+}
+
+function paintFaceSwatches() {
+  const bot = currentBot();
+  const host = $("face-swatches");
+  if (!host || !bot) return;
+  const pending = state.pendingFace && state.pendingFace.botId === bot.id ? state.pendingFace.color : "";
+  const current = (pending || bot.face_color || "").toLowerCase();
+  host.replaceChildren();
+  for (const color of FACE_PALETTE) {
+    const picked = color === current;
+    host.append(el("button", {
+      type: "button",
+      class: picked ? "swatch is-selected" : "swatch",
+      title: color,
+      "aria-label": `Face color ${color}`,
+      "aria-pressed": picked ? "true" : "false",
+      onclick: () => {
+        state.pendingFace = { botId: bot.id, color };
+        paintFaceSwatches();
+      },
+    }, [makeFace({ id: bot.id, face_color: color }, { selected: picked })]));
+  }
 }
 
 function describeRun(run, now) {
@@ -848,7 +992,13 @@ function describeRun(run, now) {
   const server = Date.parse((run && run.last_activity_at) || "");
   const last = Math.max(heard || 0, Number.isNaN(server) ? 0 : server);
   let words = step;
-  if (run && run.status === "running" && last && !String(step).startsWith("Queued:")) {
+  if (
+    run &&
+    run.status === "running" &&
+    last &&
+    !String(step).startsWith("Queued:") &&
+    !String(step).startsWith("Model not answering")
+  ) {
     const quiet = Math.floor((now - last) / 1000);
     if (quiet >= 60) words = `still waiting on the model (${quiet}s)`;
   }
@@ -890,7 +1040,7 @@ function paintRun(run) {
   if (elapsed) elapsed.textContent = view.elapsed;
   if (row && run) {
     const tone = runTone(view.words, run.status);
-    row.classList.remove("is-waiting", "is-thinking", "is-tool", "is-halted");
+    row.classList.remove("is-waiting", "is-reconnecting", "is-thinking", "is-tool", "is-halted");
     row.classList.add(`is-${tone}`);
   }
   syncBotLive();
@@ -960,7 +1110,7 @@ function replyBubble(who, text, reasoning, options = {}) {
     main.append(body);
   }
   return el("li", { class: options.className || "message assistant", id: options.id || null }, [
-    el("p", { class: "who" }, [who]),
+    whoLine(who, options.bot || null, { live: Boolean(options.live), halted: Boolean(options.halted) }),
     main,
   ]);
 }
@@ -974,6 +1124,7 @@ function renderLive(messages, bot) {
   if (showReply) {
     messages.append(replyBubble(who, live.text || "", reasoning, {
       live: true,
+      bot,
       forceBody: live.phase === "reply" || Boolean(live.text),
       id: "live-reply",
     }));
@@ -1002,7 +1153,7 @@ function renderRunIndicator(messages, bot) {
     role: "status",
     "aria-live": "polite",
   }, [
-    el("p", { class: "who" }, [who]),
+    whoLine(who, bot, { live: true }),
     el("div", { class: "message-main run-main" }, [
       el("span", { class: "run-pulse", "aria-hidden": "true" }),
       el("p", { class: "body run-step" }, [
@@ -1031,7 +1182,7 @@ function renderStopped(messages) {
     id: "stopped-row",
     role: "status",
   }, [
-    el("p", { class: "who" }, [who]),
+    whoLine(who, currentBot(), { halted: true }),
     el("div", { class: "message-main run-main" }, [
       el("span", { class: "run-pulse", "aria-hidden": "true" }),
       el("p", { class: "body run-step" }, [
@@ -1203,8 +1354,9 @@ function renderThread() {
       && Array.isArray(message.choices) && message.choices.length > 1;
     if (open) main.append(choiceRow(message.choices));
     if (message.id) main.append(reactionControl(message, false));
+    const speaker = message.role === "user" ? null : bot;
     const item = el("li", { class: `message ${message.role}${failed ? " error" : ""}` }, [
-      el("p", { class: "who" }, [who]),
+      whoLine(who, speaker, { halted: failed }),
       main,
     ]);
     messages.append(item);
@@ -1615,6 +1767,19 @@ function applyStreamEvent(event, stream) {
       label: event.text || "Thinking",
       text: live.text || "",
       reasoning: live.reasoning || "",
+      run,
+      heardAt: Date.now(),
+    });
+    paintStream(stream, $("run-step") ? "run" : "thread");
+    return;
+  }
+  if (event.type === "replay") {
+    const run = live.run || null;
+    rememberLive(stream, {
+      phase: "thinking",
+      label: live.label || "Model not answering, retrying…",
+      text: live.text || "",
+      reasoning: event.text || "",
       run,
       heardAt: Date.now(),
     });
@@ -2134,11 +2299,14 @@ async function saveSettings(event) {
     show($("settings-note"), true);
     return;
   }
+  const body = { name, endpoint_id: endpointId, model: model || null, context_tokens: contextTokens };
+  if (state.pendingFace && state.pendingFace.botId === botId) body.face_color = state.pendingFace.color;
   try {
     await api(`/api/bots/${botId}`, {
       method: "PATCH",
-      body: JSON.stringify({ name, endpoint_id: endpointId, model: model || null, context_tokens: contextTokens }),
+      body: JSON.stringify(body),
     });
+    state.pendingFace = null;
     await refreshBots();
     if (state.botId !== botId) return;
     const count = state.chat ? (state.chat.messages || []).length : 0;
@@ -2247,7 +2415,9 @@ function renderRoom() {
   const members = $("room-members");
   members.replaceChildren();
   for (const member of room.members || []) {
+    const memberBot = state.bots.find((item) => item.id === member.id);
     const chip = el("li", { class: "member-chip" }, [
+      memberBot ? makeFace(memberBot, { tiny: true, selected: false }) : el("span"),
       el("span", {}, [member.name]),
       el("button", {
         type: "button",
@@ -2283,8 +2453,9 @@ function renderRoom() {
       el("p", { class: "body" }, [message.content || ""]),
     ]);
     if (message.id) main.append(reactionControl(message, true));
+    const speakerBot = mine ? null : state.bots.find((item) => item.id === message.speaker);
     const item = el("li", { class: `message ${mine ? "user" : "assistant"}${error ? " error" : ""}${speaker}` }, [
-      el("p", { class: "who" }, [who]),
+      whoLine(who, speakerBot, { halted: error, tiny: true }),
       main,
     ]);
     list.append(item);
@@ -2829,7 +3000,7 @@ function wire() {
       },
     });
   });
-  for (const id of ["nav-connections", "nav-rooms", "nav-projects", "nav-computers"]) {
+  for (const id of ["nav-connections", "nav-rooms", "nav-projects", "nav-computers", "nav-about"]) {
     $(id).addEventListener("click", () => openPlainScreen($(id).dataset.screen));
   }
   $("save-direction").addEventListener("click", async () => {
@@ -3043,6 +3214,7 @@ function wire() {
 async function boot() {
   wire();
   captureTokenFromUrl();
+  await loadFaceTemplate();
   try {
     await api("/api/health");
   } catch (error) {
@@ -3058,8 +3230,10 @@ async function boot() {
       return;
     }
     $("empty-stage").replaceChildren(
+      mascotImg(),
       el("p", { class: "eyebrow" }, ["Could not load"]),
       el("h1", {}, ["The data directory did not load."]),
+      el("p", { class: "tagline" }, ["AI agents, made easy."]),
       el("p", { class: "lede" }, [error.message]),
     );
     return;
@@ -3091,8 +3265,10 @@ async function loadApp() {
       return;
     }
     $("empty-stage").replaceChildren(
+      mascotImg(),
       el("p", { class: "eyebrow" }, ["Could not load"]),
       el("h1", {}, ["The data directory did not load."]),
+      el("p", { class: "tagline" }, ["AI agents, made easy."]),
       el("p", { class: "lede" }, [error.message]),
     );
   }

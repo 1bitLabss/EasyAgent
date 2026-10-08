@@ -25,6 +25,7 @@ from pathlib import Path
 
 from easyagent import gate
 from easyagent import llm
+from easyagent import retry
 from easyagent import search as search_mod
 from easyagent import turn as turn_mod
 from easyagent.paths import default_deliverable_dir, deliverable_file, display_path
@@ -4676,14 +4677,8 @@ def join_segments(parts: list[str]) -> str:
 
 
 def _retryable_provider(exc: llm.ProviderError) -> bool:
-    """A timeout, a dropped connection, or a 5xx can be tried once more."""
-    text = str(exc)
-    if text == "Endpoint returned an empty message.":
-        return False
-    lowered = text.lower()
-    if lowered.startswith("timed out") or lowered.startswith("could not reach"):
-        return True
-    return bool(re.match(r"5\d\d\b", text))
+    """A connect failure, a timeout before any token, or a busy server."""
+    return retry.retryable_before_token(str(exc))
 
 
 async def _iter_streamed_model(
@@ -4745,6 +4740,12 @@ async def _iter_streamed_model(
             task.cancel()
 
 
+def _abandon_model_error(exc: llm.ProviderError) -> None:
+    """Stop is immediate. A client abort is a stop. Anything else is the caller's choice."""
+    if turn_mod.cancelled() or "incomplete chunked read" in str(exc).lower():
+        raise turn_mod.TurnCancelled() from exc
+
+
 async def _pull_model(
     *,
     stream: bool,
@@ -4755,20 +4756,23 @@ async def _pull_model(
 ):
     """One model call. Reasoning is its own event. An empty answer is blank.
 
-    The connection's line is held for this call only. A chat that is waiting
-    says so before it blocks. A dropped socket is tried once more.
+    The connection's line is held for the request itself. A flaky server is
+    retried with the slot released, so another chat can use it during the pause.
+    A stream that dies after text has started is replayed once.
     """
-    permit = await gate.reserve()
-    try:
-        if permit.waiting:
-            yield "status", permit.label
-        await permit.acquire()
-        retry = gate.suppress_inner_retry()
+    window = retry.Window()
+    while True:
+        turn_mod.raise_if_cancelled()
+        permit = await gate.reserve()
+        hold = True
         try:
-            for attempt in (1, 2):
-                turn_mod.raise_if_cancelled()
-                got_text = False
-                bucket: list[str] = []
+            if permit.waiting:
+                yield "status", permit.label
+            await permit.acquire()
+            inner = gate.suppress_inner_retry()
+            started = False
+            bucket: list[str] = []
+            try:
                 try:
                     if not stream:
                         token = llm.attach_reasoning_sink(bucket.append)
@@ -4780,37 +4784,47 @@ async def _pull_model(
                             llm.detach_reasoning_sink(token)
                         turn_mod.raise_if_cancelled()
                         if bucket:
+                            started = True
                             yield "thinking", join_segments(bucket)
                         if text:
+                            started = True
                             yield "text", text
                         return
                     async for kind, piece in _iter_streamed_model(
                         base_url=base_url, api_key=api_key, model=model, messages=messages
                     ):
                         turn_mod.raise_if_cancelled()
-                        if kind == "text":
-                            got_text = True
+                        if kind in {"text", "thinking"} and piece:
+                            started = True
                         yield kind, piece
                     turn_mod.raise_if_cancelled()
                     return
                 except turn_mod.TurnCancelled:
                     raise
                 except llm.ProviderError as exc:
-                    if turn_mod.cancelled() or "incomplete chunked read" in str(exc).lower():
-                        raise turn_mod.TurnCancelled() from exc
+                    _abandon_model_error(exc)
                     if str(exc) == "Endpoint returned an empty message.":
                         if bucket:
                             yield "thinking", join_segments(bucket)
                         raise
-                    if not got_text and attempt == 1 and _retryable_provider(exc):
-                        if gate.is_dropped_connection(str(exc)):
-                            await gate.pause_retry()
-                        continue
-                    raise
+                    kind = window.plan(str(exc), started=started)
+                    if kind is None:
+                        message = window.failure_message(str(exc))
+                        if message:
+                            raise llm.ProviderError(message) from exc
+                        raise
+                    label, delay = window.arm(kind, str(exc))
+                    yield "status", label
+                    if kind == "replay":
+                        yield "replay", ""
+                    await permit.release()
+                    hold = False
+                    await retry.pause(delay)
+            finally:
+                gate.restore_inner_retry(inner)
         finally:
-            gate.restore_inner_retry(retry)
-    finally:
-        await permit.release()
+            if hold:
+                await permit.release()
 
 
 def _partial_stream(text_bits: list[str]):
@@ -5523,6 +5537,7 @@ async def run_turn(
         parts: list[str] | None = None
         text_bits: list[str] = []
         new_thought = True
+        thought_at = len(thought)
         try:
             async for kind, piece in _pull_model(
                 stream=stream,
@@ -5538,6 +5553,12 @@ async def run_turn(
                 elif kind == "status":
                     if piece:
                         yield "status", piece
+                elif kind == "replay":
+                    text_bits.clear()
+                    if len(thought) > thought_at:
+                        thought = thought[:thought_at]
+                    new_thought = True
+                    yield "replay", thought
                 else:
                     text_bits.append(piece)
         except turn_mod.TurnCancelled:

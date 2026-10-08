@@ -33,31 +33,10 @@ def title_for(count: int) -> str:
 
 
 def draw_icon(count: int):
-    """A 64px ink tile. Zero is a quiet mark. A positive count is the number."""
-    from PIL import Image, ImageDraw, ImageFont
+    """A 64px buddy. Zero is the face. A positive count paints the number on it."""
+    from easyagent.mascot import tray_image
 
-    size = 64
-    image = Image.new("RGBA", (size, size), (0, 0, 0, 0))
-    draw = ImageDraw.Draw(image)
-    draw.rounded_rectangle((1, 1, size - 2, size - 2), radius=6, fill=(28, 27, 25, 255))
-    if count <= 0:
-        label = "ea"
-        font_size = 28
-    elif count > 99:
-        label = "99+"
-        font_size = 20
-    else:
-        label = str(int(count))
-        font_size = 32 if count < 10 else 26
-    try:
-        font = ImageFont.load_default(size=font_size)
-    except TypeError:
-        font = ImageFont.load_default()
-    bbox = draw.textbbox((0, 0), label, font=font)
-    x = (size - (bbox[2] - bbox[0])) / 2 - bbox[0]
-    y = (size - (bbox[3] - bbox[1])) / 2 - bbox[1]
-    draw.text((x, y), label, fill=(246, 244, 239, 255), font=font)
-    return image
+    return tray_image(count)
 
 
 def apply_count(icon: Any, count: int) -> None:

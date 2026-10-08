@@ -523,6 +523,8 @@ class Store:
         model_set: bool = False,
         context_tokens: int | None = None,
         context_tokens_set: bool = False,
+        face_color: str | None = None,
+        face_color_set: bool = False,
     ) -> dict:
         """Change settings. Chat files in this bot are not opened or rewritten."""
         bot = self.get_bot(bot_id)
@@ -542,6 +544,11 @@ class Store:
                 bot["context_tokens"] = context_tokens
             # The old character budget is no longer read. Drop it when the budget is saved.
             bot.pop("context_chars", None)
+        if face_color_set:
+            if face_color:
+                bot["face_color"] = face_color
+            else:
+                bot.pop("face_color", None)
         atomic_write_json(self._bot_dir(bot["id"]) / "bot.json", bot)
         return bot
 

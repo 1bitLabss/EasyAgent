@@ -1,8 +1,8 @@
 """One connection serves a limited number of chats at once.
 
 With max_parallel 1, the second chat waits and then runs. With 2, both run
-together. Stop while waiting leaves the line. A server that hangs up is tried
-once more.
+together. Stop while waiting leaves the line. A server that hangs up is retried
+for the retry window.
 """
 
 import asyncio
@@ -92,8 +92,8 @@ def test_a_new_connection_allows_one_at_a_time_and_the_setting_can_change(tmp_pa
         assert (tmp_path / "endpoints.json").read_text() == before
 
         page = client.get("/")
-        assert "app.js?v=35" in page.text
-        script = client.get("/static/app.js?v=35").text
+        assert "app.js?v=37" in page.text
+        script = client.get("/static/app.js?v=37").text
     assert 'id="endpoint-parallel"' in page.text
     assert "max_parallel" in script
     assert 'startsWith("Queued:")' in script
@@ -291,10 +291,9 @@ def test_stop_while_queued_leaves_the_line(tmp_path, monkeypatch):
     asyncio.run(scenario())
 
 
-def test_a_dropped_connection_is_tried_once_then_says_stopped(tmp_path, monkeypatch):
+def test_a_dropped_connection_is_retried_then_says_stopped(tmp_path, monkeypatch):
     gate.reset_lanes()
     calls = []
-    pauses = []
 
     async def reply(**kwargs):
         calls.append(_who(kwargs.get("messages")))
@@ -303,12 +302,7 @@ def test_a_dropped_connection_is_tried_once_then_says_stopped(tmp_path, monkeypa
         )
         yield ""
 
-    async def pause():
-        pauses.append(gate.RETRY_PAUSE)
-        turn_mod.raise_if_cancelled()
-
     monkeypatch.setattr("easyagent.llm.stream_complete", reply)
-    monkeypatch.setattr(gate, "pause_retry", pause)
 
     async def scenario():
         client, _endpoint, bot_a, _bot_b, chat_a, _chat_b = await _pair(tmp_path, parallel=1)
@@ -318,19 +312,21 @@ def test_a_dropped_connection_is_tried_once_then_says_stopped(tmp_path, monkeypa
                 json={"content": "PING-A"},
                 headers={"Accept": "text/event-stream"},
             )
+            body = sent.text
             stored = (await client.get(f"/api/bots/{bot_a['id']}/chats/{chat_a['id']}")).json()
         finally:
             await client.aclose()
         assert sent.status_code == 200, sent.text
-        assert calls == ["A", "A"]
-        assert pauses == [gate.RETRY_PAUSE]
+        assert len(calls) > 2
+        assert calls == ["A"] * len(calls)
+        assert "Model not answering, retrying (attempt 2)" in body
         text = stored["messages"][-1]["content"]
         assert text.startswith("Stopped:")
         assert "Server disconnected without sending a response" in text
+        assert "Retried for" in text
         assert stored["messages"][-1]["error"] is True
 
     asyncio.run(scenario())
-    assert 0 < gate.RETRY_PAUSE <= 1
 
 
 def test_a_dropped_connection_recovers_on_the_second_try(tmp_path, monkeypatch):
@@ -345,11 +341,7 @@ def test_a_dropped_connection_recovers_on_the_second_try(tmp_path, monkeypatch):
             )
         yield "back"
 
-    async def pause():
-        return None
-
     monkeypatch.setattr("easyagent.llm.stream_complete", reply)
-    monkeypatch.setattr(gate, "pause_retry", pause)
 
     async def scenario():
         client, _endpoint, bot_a, _bot_b, chat_a, _chat_b = await _pair(tmp_path, parallel=1)
@@ -404,16 +396,10 @@ class _Hangup:
         return None
 
 
-def test_stream_complete_retries_a_hangup_once(monkeypatch):
+def test_stream_complete_retries_a_hangup_for_the_window(monkeypatch):
     gate.reset_lanes()
     hangup = _Hangup(1, "Server disconnected without sending a response.")
-    pauses = []
-
-    async def pause():
-        pauses.append(1)
-
     monkeypatch.setattr(llm.httpx, "AsyncClient", lambda *args, **kwargs: hangup)
-    monkeypatch.setattr(gate, "pause_retry", pause)
 
     async def run():
         parts = []
@@ -428,9 +414,8 @@ def test_stream_complete_retries_a_hangup_once(monkeypatch):
 
     assert asyncio.run(run()) == "pong"
     assert hangup.calls == 2
-    assert pauses == [1]
 
-    again = _Hangup(2, "Connection reset by peer")
+    again = _Hangup(1000, "Connection reset by peer")
     monkeypatch.setattr(llm.httpx, "AsyncClient", lambda *args, **kwargs: again)
 
     async def fail():
@@ -444,9 +429,9 @@ def test_stream_complete_retries_a_hangup_once(monkeypatch):
 
     with pytest.raises(llm.ProviderError) as caught:
         asyncio.run(fail())
-    assert again.calls == 2
+    assert again.calls > 2
     assert "Connection reset by peer" in str(caught.value)
-    assert len(pauses) == 2
+    assert "Retried for" in str(caught.value)
 
 
 def test_stream_complete_does_not_retry_when_the_caller_already_will(monkeypatch):

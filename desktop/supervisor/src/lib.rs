@@ -275,9 +275,10 @@ pub fn spawn_server(port: u16) -> std::io::Result<std::process::Child> {
     #[cfg(unix)]
     {
         use std::os::unix::process::CommandExt;
+        // A new process group lets Quit stop the server on macOS and Linux.
         cmd.process_group(0);
-        // If the window is killed, the kernel signals this child. A new
-        // process group still lets Quit stop the server with the group.
+        // prctl is Linux-only. macOS has no PDEATHSIG; Quit still signals the group.
+        #[cfg(target_os = "linux")]
         unsafe {
             cmd.pre_exec(|| {
                 libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGTERM as libc::c_ulong);

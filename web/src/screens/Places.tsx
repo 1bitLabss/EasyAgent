@@ -462,9 +462,11 @@ export function DirectionScreen() {
 
 export function AboutScreen() {
   const theme = useApp((state) => state.theme);
+  const health = useQuery({ queryKey: ["health"], queryFn: () => api<{ version?: string }>("/api/health") });
   const [login, setLogin] = useState(false);
   const [desktop, setDesktop] = useState(false);
   const [note, setNote] = useState("");
+  const version = health.data?.version;
   useEffect(() => {
     const tauri = (window as Window & { __TAURI_INTERNALS__?: { invoke?: (cmd: string, args?: object) => Promise<unknown> } }).__TAURI_INTERNALS__;
     if (!tauri?.invoke) return;
@@ -476,7 +478,7 @@ export function AboutScreen() {
       <img src="/static/mascot.svg" alt="" width={168} height={168} />
       <h1 className="mt-3 text-3xl font-semibold">EasyAgent</h1>
       <p className="tagline mt-1 text-lg">AI agents, made easy.</p>
-      <p className="mt-3 max-w-lg text-sm text-muted">Version 0.1.0. A local harness for any OpenAI-compatible model. Chats stay on this computer. EasyAgent does not send telemetry.</p>
+      <p className="mt-3 max-w-lg text-sm text-muted">{version ? `Version ${version}. ` : ""}A local harness for any OpenAI-compatible model. Chats stay on this computer. EasyAgent does not send telemetry.</p>
       <p className="mt-3 max-w-lg text-sm text-muted">The earlier page is still here at /classic. Set EASYAGENT_UI=classic to make that the page at /.</p>
       {desktop ? (
         <label className="mt-4 flex items-center gap-3 text-sm">

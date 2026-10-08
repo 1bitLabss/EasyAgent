@@ -3456,6 +3456,15 @@ async function boot() {
 }
 
 async function loadApp() {
+  try {
+    const health = await api("/api/health");
+    const about = $("about-version");
+    if (about && health && health.version) {
+      about.textContent = `Version ${health.version}. A local harness for any OpenAI-compatible model. Chats stay on this computer.`;
+    }
+  } catch {
+    // About stays without a number until /api/health answers.
+  }
   watchUnread();
   try {
     await refreshEndpoints();

@@ -17,6 +17,7 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Response, StreamingResponse
 from pydantic import BaseModel, ConfigDict, Field
 
+from easyagent import __version__
 from easyagent import gate
 from easyagent import llm
 from easyagent import turn as turn_mod
@@ -474,7 +475,7 @@ def create_app(data_dir: str | Path | None = None) -> FastAPI:
 
     @app.get("/api/health")
     def health():
-        return {"ok": True, "data_dir": str(store.root)}
+        return {"ok": True, "data_dir": str(store.root), "version": __version__}
 
     @app.get("/api/unread")
     def get_unread():

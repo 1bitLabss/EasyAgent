@@ -19,3 +19,12 @@ jobs:
       - name: Attach and spawn tests
         working-directory: desktop
         run: cargo test -p easyagent-supervisor
+
+  supervisor-macos:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: macOS check so a Linux-only syscall cannot ship
+        working-directory: desktop
+        run: cargo check -p easyagent-supervisor

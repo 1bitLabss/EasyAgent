@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.2.1
+
+- A version tag publishes a GitHub Release and attaches the Windows `.exe` and `.msi`, the macOS `.dmg`, and the Linux `.deb`, AppImage, and `.rpm`. The installers are taken from `desktop/target`, which is where the cargo workspace writes them. The notes on that release are this section. The macOS supervisor build no longer calls the Linux-only `prctl` death signal. About reads the version from the app.
+
+## 0.2.0
+
+- Unsigned installers for Windows (NSIS and MSI), macOS (one universal disk image), and Linux (deb, AppImage, and rpm). The desktop window loads this same local page. Closing the window hides it, and Quit in the tray is what exits.
+
 ## Changed
 
 - While a bot is idle, overnight by default, it updates eight notes in its own folder: mistakes, promises, unknowns, predictions, habits, a playbook, a map of the setup, and dreams. It uses the model that bot is already connected to. A running chat skips the pass. Notes you wrote are left alone. Secrets are not written. Digested transcripts older than 30 days can be removed after the notes and the search index have been checked, and the bot's settings show what would go. Pruning can be turned off, or transcripts can be kept forever. The Learning panel lists the eight files and what changed last night, and can roll a snapshot back.

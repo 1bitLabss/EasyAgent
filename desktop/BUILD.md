@@ -13,7 +13,7 @@ npm run dev
 npm run build
 ```
 
-`cargo test -p easyagent-supervisor` does not need a display or WebKit. It checks attach versus start, the health JSON, the tray title, and the icon bitmap. `npm test` runs that same command. `npm run dev` opens the window. `npm run build` is `cargo tauri build` and writes installers under `desktop/src-tauri/target/release/bundle/`. On macOS, `npm run build -- --target universal-apple-darwin` builds one `.dmg` for both Apple silicon and Intel. The targets are NSIS and MSI on Windows, `.app` and `.dmg` on macOS, and `.deb`, AppImage, and `.rpm` on Linux.
+`cargo test -p easyagent-supervisor` does not need a display or WebKit. It checks attach versus start, the health JSON, the tray title, and the icon bitmap. `npm test` runs that same command. `npm run dev` opens the window. `npm run build` is `cargo tauri build` and writes installers under `desktop/target/release/bundle/`, because `desktop/` is the cargo workspace. On macOS, `npm run build -- --target universal-apple-darwin` builds one `.dmg` for both Apple silicon and Intel, under `desktop/target/universal-apple-darwin/release/bundle/dmg/`. The targets are NSIS and MSI on Windows, `.app` and `.dmg` on macOS, and `.deb`, AppImage, and `.rpm` on Linux.
 
 `pytest` from the repo root includes `tests/test_desktop_contract.py`, which checks that `GET /api/health` and `GET /api/unread` still have the shape the window reads. That does not compile the window.
 
@@ -36,7 +36,7 @@ npm install
 npm run build
 ```
 
-The installer lands under `src-tauri/target/release/bundle/` (NSIS and MSI).
+The installer lands under `desktop/target/release/bundle/` (NSIS and MSI).
 
 That installer is unsigned. Signing it needs an Authenticode certificate and `signtool`, wired through Tauri's Windows bundle `signCommand` or certificate thumbprint. The certificate is not in this repo.
 
@@ -62,4 +62,4 @@ The README section **Desktop window** is the user-facing description. In short:
 
 ## CI
 
-`.github/workflows/desktop.yml` runs `cargo test -p easyagent-supervisor` when the desktop crate changes. `.github/workflows/desktop-installers.yml` runs on a version tag (`v*`) and builds the unsigned Windows, macOS, and Linux installers. The macOS job targets `universal-apple-darwin`. Those jobs do not sign anything. Signed installers need the Windows and macOS certificates named above. If this forge does not run GitHub Actions, those files are still the commands to keep.
+`.github/workflows/desktop.yml` runs `cargo test -p easyagent-supervisor` on Ubuntu and `cargo check -p easyagent-supervisor` on macOS when the desktop crate changes. `.github/workflows/desktop-installers.yml` runs on a version tag (`v*`), builds the unsigned Windows, macOS, and Linux installers from `desktop/target`, and attaches them to a GitHub Release. The notes are the matching section of `CHANGELOG.md`. The macOS job targets `universal-apple-darwin`. Those jobs do not sign anything. Signed installers need the Windows and macOS certificates named above. If this forge does not run GitHub Actions, those files are still the commands to keep.

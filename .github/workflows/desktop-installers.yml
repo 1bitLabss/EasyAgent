@@ -1,5 +1,7 @@
 # Unsigned installers. Signing keys are not in this repo.
-# Windows: NSIS and MSI. macOS: a universal dmg. Linux: deb and AppImage.
+# Windows: NSIS and MSI. macOS: a universal dmg. Linux: deb, AppImage, and rpm.
+# The cargo workspace root is desktop/, so bundles land in desktop/target,
+# not desktop/src-tauri/target. CARGO_TARGET_DIR makes that directory explicit.
 name: desktop installers
 
 on:
@@ -7,9 +9,14 @@ on:
     tags:
       - "v*"
 
+permissions:
+  contents: write
+
 jobs:
   windows:
     runs-on: windows-latest
+    env:
+      CARGO_TARGET_DIR: ${{ github.workspace }}/desktop/target
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@1.90.0
@@ -22,15 +29,24 @@ jobs:
       - name: Build unsigned NSIS and MSI
         working-directory: desktop
         run: npm run build
+      - name: Collect installers
+        shell: bash
+        run: |
+          mkdir -p dist
+          find desktop/target -type f \( -name '*.exe' -o -name '*.msi' \) -path '*/release/bundle/*' -exec cp {} dist/ \;
+          ls -l dist
+          test -n "$(find dist -name '*.exe' | head -n 1)"
+          test -n "$(find dist -name '*.msi' | head -n 1)"
       - uses: actions/upload-artifact@v4
         with:
           name: easyagent-windows
-          path: |
-            desktop/src-tauri/target/release/bundle/nsis/*.exe
-            desktop/src-tauri/target/release/bundle/msi/*.msi
+          path: dist/*
+          if-no-files-found: error
 
   macos:
     runs-on: macos-latest
+    env:
+      CARGO_TARGET_DIR: ${{ github.workspace }}/desktop/target
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@1.90.0
@@ -45,13 +61,22 @@ jobs:
       - name: Build an unsigned universal dmg
         working-directory: desktop
         run: npm run build -- --target universal-apple-darwin
+      - name: Collect installers
+        run: |
+          mkdir -p dist
+          find desktop/target -type f -name '*.dmg' -path '*/release/bundle/*' -exec cp {} dist/ \;
+          ls -l dist
+          test -n "$(find dist -name '*.dmg' | head -n 1)"
       - uses: actions/upload-artifact@v4
         with:
           name: easyagent-macos
-          path: desktop/src-tauri/target/release/bundle/dmg/*.dmg
+          path: dist/*
+          if-no-files-found: error
 
   linux:
     runs-on: ubuntu-latest
+    env:
+      CARGO_TARGET_DIR: ${{ github.workspace }}/desktop/target
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@1.90.0
@@ -59,16 +84,71 @@ jobs:
         with:
           node-version: "22"
       - name: Install webview libraries
-        run: sudo apt-get update && sudo apt-get install -y libwebkit2gtk-4.1-dev libgtk-3-dev libayatana-appindicator3-dev librsvg2-dev patchelf build-essential pkg-config libssl-dev file
+        run: sudo apt-get update && sudo apt-get install -y libwebkit2gtk-4.1-dev libgtk-3-dev libayatana-appindicator3-dev librsvg2-dev patchelf build-essential pkg-config libssl-dev file rpm
       - name: Install the desktop CLI
         working-directory: desktop
         run: npm install
-      - name: Build unsigned deb and AppImage
+      - name: Build unsigned deb, AppImage, and rpm
         working-directory: desktop
         run: npm run build
+      - name: Collect installers
+        run: |
+          mkdir -p dist
+          find desktop/target -type f \( -name '*.deb' -o -name '*.AppImage' -o -name '*.rpm' \) -path '*/release/bundle/*' -exec cp {} dist/ \;
+          ls -l dist
+          test -n "$(find dist -name '*.deb' | head -n 1)"
+          test -n "$(find dist -name '*.AppImage' | head -n 1)"
+          test -n "$(find dist -name '*.rpm' | head -n 1)"
       - uses: actions/upload-artifact@v4
         with:
           name: easyagent-linux
-          path: |
-            desktop/src-tauri/target/release/bundle/deb/*.deb
-            desktop/src-tauri/target/release/bundle/appimage/*.AppImage
+          path: dist/*
+          if-no-files-found: error
+
+  release:
+    needs: [windows, macos, linux]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          path: release-assets
+      - name: Notes for this tag
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          python3 << 'PY'
+          import os
+          import pathlib
+          import re
+          tag = os.environ["TAG"]
+          version = tag[1:] if tag.startswith("v") else tag
+          text = pathlib.Path("CHANGELOG.md").read_text(encoding="utf-8")
+          match = re.search(
+              rf"^## (?:\[)?{re.escape(version)}(?:\])?[^\n]*\n(.*?)(?=^## |\Z)",
+              text,
+              re.M | re.S,
+          )
+          notes = match.group(1).strip() if match else f"EasyAgent {version}."
+          pathlib.Path("release-notes.md").write_text(notes + "\n", encoding="utf-8")
+          PY
+      - name: Require every installer
+        run: |
+          find release-assets -type f -print
+          missing=0
+          for ext in exe msi dmg deb AppImage rpm; do
+            if ! find release-assets -type f -name "*.${ext}" | grep -q .; then
+              echo "missing *.${ext}"
+              missing=1
+            fi
+          done
+          test "$missing" -eq 0
+      - uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name }}
+          name: EasyAgent ${{ github.ref_name }}
+          body_path: release-notes.md
+          files: release-assets/**/*
+          fail_on_unmatched_files: true
+          draft: false
+          prerelease: false

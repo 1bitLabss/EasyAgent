@@ -153,7 +153,7 @@ function mascotImg(className) {
     src: "/static/mascot.svg",
     alt: "",
     width: "168",
-    height: "214",
+    height: "168",
   });
 }
 
@@ -851,21 +851,28 @@ function botIsLive(botId) {
 const FACE_PALETTE = ["#c4532a", "#2a6fdb", "#1f8a4c", "#c43b7a", "#b86e12", "#5c4d9a", "#0e7c86", "#8f2d28", "#3d6b4f", "#a34b2e", "#3a4f8a", "#6b4a2a"];
 const FACE_FRAMES = ["eyes-mid", "eyes-left", "eyes-right", "eyes-up", "eyes-squint", "eyes-x", "mouth-smile", "mouth-flat", "mouth-open"];
 let faceTemplate = null;
+let faceSmallTemplate = null;
 
 function faceMarkupOk(svg) {
   return FACE_FRAMES.every((name) => svg.querySelector("." + name));
 }
 
-async function loadFaceTemplate() {
+async function fetchFace(url) {
   try {
-    const response = await fetch("/static/face.svg?v=1");
-    if (!response.ok) return;
+    const response = await fetch(url);
+    if (!response.ok) return null;
     const doc = new DOMParser().parseFromString(await response.text(), "image/svg+xml");
     const root = doc.documentElement;
-    if (root && root.localName === "svg" && faceMarkupOk(root)) faceTemplate = root;
+    if (root && root.localName === "svg" && faceMarkupOk(root)) return root;
   } catch {
-    faceTemplate = null;
+    return null;
   }
+  return null;
+}
+
+async function loadFaceTemplate() {
+  faceTemplate = await fetchFace("/static/face.svg?v=2");
+  faceSmallTemplate = await fetchFace("/static/face-small.svg?v=1");
 }
 
 function applyFaceState(node, name) {
@@ -921,7 +928,8 @@ function makeFace(bot, options = {}) {
   const live = Boolean(options.live) && !halted;
   if (live) wrap.dataset.faceLive = "1";
   applyFaceState(wrap, halted ? "halted" : live ? faceStateFor(bot && bot.id) : "idle");
-  if (faceTemplate) wrap.append(document.importNode(faceTemplate, true));
+  const template = options.large ? faceTemplate : (faceSmallTemplate || faceTemplate);
+  if (template) wrap.append(document.importNode(template, true));
   wrap.setAttribute("aria-hidden", "true");
   return wrap;
 }

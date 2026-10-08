@@ -1,7 +1,11 @@
 """The EasyAgent screen-face buddy, and the color of each bot's face.
 
-The drawing is a pixel grid: integer rects, crisp edges, no traced photo.
-The full body is the welcome mark. A bot avatar is only the head.
+The full body is the measured trace of assets/mascot-original.jpg: 42 cells
+wide and 44 tall, one square cell per sample. '#' is black and '.' is empty.
+A '.' that does not touch the outside of the grid is white: the badge, the
+line inside the outline, the face screen, or the 101. The face keeps that
+head. 'F' is the fill inside the outline and takes the bot's color. 'A' is
+the antenna 1, 'E' the eyes, and 'M' the smile.
 """
 
 from __future__ import annotations
@@ -29,6 +33,78 @@ INK = "#1c1b19"
 PAPER = "#f6f4ef"
 TAGLINE = "AI agents, made easy."
 
+# Measured 42x44 trace. Do not redraw it. The raised arm is the viewer's left.
+BODY = """\
+....................######................
+...................#..##..#...............
+...................#...#..#...............
+...................#...#..#...............
+...................#..###.#...............
+...................#......#...............
+....................######................
+......................##..................
+......................##..................
+................###############...........
+.............###...............##.........
+............#...##############...#........
+...........#..##################..#.......
+..........#..####################..#......
+..........#.######################.#......
+..........#.######################.#......
+.........#..######################..#.....
+.##......#.####................####.#.....
+##.#.....#.###..................###.#.....
+#.####...#.###..................###.#.....
+#.##.#...#.###...###......###...###.#.....
+#.###.#..#.###...###......###...###.#.....
+.#.###.#.#.###...###......###...###.#.....
+..#####.##.###..................###.#.....
+...#####.#.###......#....#......###.#.....
+...#.#####.###.......####.......###.##....
+....#.####.####................####.#.#...
+.....#.###.########################.##.#..
+......#..#.########################.##.#..
+.......###.######.####.####.#######.###.#.
+.........#.#####..###.#.##..#######.###.#.
+.........#.######.###.#.###.#######.####.#
+.........#.######.###.#.###.#######.####.#
+.........#.#####...###.###...######.####.#
+.........#..######################..#.##.#
+.........##.######################.##.##.#
+..........#..####################..#.#..#.
+..........##......................##..##..
+...........########################.......
+.............#.###.#......#.###.#.........
+............#.####.#......#.####.#........
+...........#.#######......#######.#.......
+...........#.#######......#######.#.......
+...........########........########.......
+"""
+
+# Head for drawings up to about 32px. Same outline and squared corners.
+FACE_SMALL = """\
+....########....
+....#..AA..#....
+....#...A..#....
+....#...A..#....
+....#..AAA.#....
+....########....
+......##........
+..############..
+.#............#.
+.#.FFFFFFFFFF.#.
+.#.#........#.#.
+.#.#.EE..EE.#.#.
+.#.#.EE..EE.#.#.
+.#.#..M..M..#.#.
+.#.#...MM...#.#.
+.#.FFFFFFFFFF.#.
+.#............#.
+..############..
+"""
+
+_INK_CHARS = "#AEMF"
+
 
 def face_color_for(bot_id: str) -> str:
     """A stable palette color for a bot that has not chosen one."""
@@ -51,113 +127,204 @@ def clean_face_color(value: str | None):
     raise StoreError("Pick a face color from the row. The bot was not changed.", 400)
 
 
+def _rows(text: str) -> list[str]:
+    return [line for line in text.strip("\n").split("\n")]
+
+
+def _points(rows: list[str], chars: str) -> list[tuple[int, int]]:
+    found = []
+    for y, line in enumerate(rows):
+        for x, ch in enumerate(line):
+            if ch in chars:
+                found.append((x, y))
+    return found
+
+
+def _merge(cells: list[tuple[int, int]]) -> list[tuple[int, int, int, int]]:
+    """Unit cells into horizontal runs, then stacked runs of the same width."""
+    remaining = set(cells)
+    runs: list[tuple[int, int, int]] = []
+    for y in sorted({point[1] for point in remaining}):
+        xs = sorted(x for x, yy in remaining if yy == y)
+        if not xs:
+            continue
+        start = prev = xs[0]
+        for x in xs[1:]:
+            if x == prev + 1:
+                prev = x
+                continue
+            runs.append((start, y, prev - start + 1))
+            start = prev = x
+        runs.append((start, y, prev - start + 1))
+    runs.sort()
+    used = [False] * len(runs)
+    rects = []
+    for index, (x, y, width) in enumerate(runs):
+        if used[index]:
+            continue
+        height = 1
+        used[index] = True
+        next_y = y + 1
+        while True:
+            match = None
+            for other, (ox, oy, owidth) in enumerate(runs):
+                if not used[other] and ox == x and oy == next_y and owidth == width:
+                    match = other
+                    break
+            if match is None:
+                break
+            used[match] = True
+            height += 1
+            next_y += 1
+        rects.append((x, y, width, height))
+    return rects
+
+
+def _enclosed(rows: list[str]) -> list[tuple[int, int]]:
+    """Empty cells that do not touch the outside of the grid."""
+    height = len(rows)
+    width = len(rows[0])
+    seen = [[False] * width for _ in range(height)]
+    holes: list[tuple[int, int]] = []
+
+    def ink(x: int, y: int) -> bool:
+        return rows[y][x] in _INK_CHARS
+
+    for y in range(height):
+        for x in range(width):
+            if ink(x, y) or seen[y][x]:
+                continue
+            stack = [(x, y)]
+            seen[y][x] = True
+            cells: list[tuple[int, int]] = []
+            touches = False
+            while stack:
+                cx, cy = stack.pop()
+                cells.append((cx, cy))
+                if cx in (0, width - 1) or cy in (0, height - 1):
+                    touches = True
+                for dx, dy in ((1, 0), (-1, 0), (0, 1), (0, -1)):
+                    nx, ny = cx + dx, cy + dy
+                    if 0 <= nx < width and 0 <= ny < height and not seen[ny][nx] and not ink(nx, ny):
+                        seen[ny][nx] = True
+                        stack.append((nx, ny))
+            if not touches:
+                holes.extend(cells)
+    return holes
+
+
+def _clusters(cells: list[tuple[int, int]]) -> list[list[tuple[int, int]]]:
+    """Split cells into groups separated by a horizontal gap."""
+    if not cells:
+        return []
+    xs = sorted({x for x, _ in cells})
+    groups_x: list[list[int]] = []
+    current = [xs[0]]
+    for x in xs[1:]:
+        if x > current[-1] + 1:
+            groups_x.append(current)
+            current = [x]
+        else:
+            current.append(x)
+    groups_x.append(current)
+    grouped = []
+    for group in groups_x:
+        allowed = set(group)
+        grouped.append([(x, y) for x, y in cells if x in allowed])
+    return grouped
+
+
+def _shift(cells: list[tuple[int, int]], dx: int, dy: int) -> list[tuple[int, int]]:
+    return [(x + dx, y + dy) for x, y in cells]
+
+
+def _squint(cells: list[tuple[int, int]]) -> list[tuple[int, int]]:
+    """The bottom row of each eye, so the squares close to a line."""
+    line = []
+    for group in _clusters(cells):
+        bottom = max(y for _, y in group)
+        line.extend((x, bottom) for x, y in group if y == bottom)
+    return line
+
+
+def _exes(cells: list[tuple[int, int]]) -> list[tuple[int, int]]:
+    marks = []
+    for group in _clusters(cells):
+        xs = [x for x, _ in group]
+        ys = [y for _, y in group]
+        x0, x1 = min(xs), max(xs)
+        y0, y1 = min(ys), max(ys)
+        marks.extend(((x0, y0), (x1, y0), (x0, y1), (x1, y1)))
+        if x1 - x0 >= 2 and y1 - y0 >= 2:
+            marks.append(((x0 + x1) // 2, (y0 + y1) // 2))
+    return marks
+
+
+def _mouths(rows: list[str]):
+    cells = _points(rows, "M")
+    bar_y = max(y for _, y in cells)
+    bar = [(x, y) for x, y in cells if y == bar_y]
+    xs = [x for x, _ in bar]
+    span = range(min(xs), max(xs) + 1)
+    flat = [(x, bar_y) for x in span]
+    opened = flat + [(x, bar_y - 1) for x in span]
+    return cells, flat, opened
+
+
+def _blink(cells: list[tuple[int, int]]):
+    paper: list[tuple[int, int]] = []
+    line: list[tuple[int, int]] = []
+    for group in _clusters(cells):
+        xs = [x for x, _ in group]
+        ys = [y for _, y in group]
+        x0, x1 = min(xs), max(xs)
+        y0, y1 = min(ys), max(ys)
+        for y in range(y0, y1 + 1):
+            for x in range(x0, x1 + 1):
+                paper.append((x, y))
+        mid = (y0 + y1) // 2
+        for x in range(x0, x1 + 1):
+            line.append((x, mid))
+    return paper, line
+
+
+def _bulb(rows: list[str]) -> tuple[int, int, int, int]:
+    """A small lamp in the badge, beside the 1, not on top of it."""
+    stem = _points(rows, "A")
+    holes = set(_enclosed(rows))
+    near = []
+    for x, y in stem:
+        for dx, dy in ((1, 0), (-1, 0), (0, 1), (0, -1)):
+            if (x + dx, y + dy) in holes:
+                near.append((x + dx, y + dy))
+    badge = set()
+    stack = list(near)
+    while stack:
+        cell = stack.pop()
+        if cell in badge or cell not in holes:
+            continue
+        badge.add(cell)
+        x, y = cell
+        stack.extend(((x + 1, y), (x - 1, y), (x, y + 1), (x, y - 1)))
+    ax = sum(point[0] for point in stem) / len(stem)
+    ay = sum(point[1] for point in stem) / len(stem)
+    best = None
+    height, width = len(rows), len(rows[0])
+    for y in range(height - 1):
+        for x in range(width - 1):
+            cells = ((x, y), (x + 1, y), (x, y + 1), (x + 1, y + 1))
+            if not all(cell in badge for cell in cells):
+                continue
+            dist = abs(x + 0.5 - ax) + abs(y + 0.5 - ay)
+            if best is None or dist < best[0]:
+                best = (dist, x, y)
+    if best is not None:
+        return (best[1], best[2], 2, 2)
+    return (min(point[0] for point in stem) + 1, min(point[1] for point in stem) - 1, 2, 2)
+
+
 def _rects(parts: list[tuple[int, int, int, int]]) -> str:
     return "".join(f'<rect x="{x}" y="{y}" width="{w}" height="{h}"/>' for x, y, w, h in parts)
-
-
-def _badge() -> tuple[list[tuple[int, int, int, int]], list[tuple[int, int, int, int]]]:
-    """Antenna badge. The shell is ink; the '1' is paper cut out of it."""
-    shell = [(14, 0, 8, 8), (17, 8, 2, 3)]
-    # Interior of the badge, then the digit is punched by not covering it.
-    # Drawn as paper first is wrong: shell is a solid block, paper draws the 1.
-    one = [
-        (16, 2, 1, 1),
-        (15, 3, 2, 1),
-        (16, 4, 1, 1),
-        (16, 5, 1, 1),
-        (15, 6, 3, 1),
-    ]
-    return shell, one
-
-
-def _head_shell() -> list[tuple[int, int, int, int]]:
-    badge, _one = _badge()
-    return badge + [
-        (10, 11, 16, 1),
-        (8, 12, 20, 1),
-        (7, 13, 22, 12),
-        (8, 25, 20, 1),
-        (10, 26, 16, 1),
-    ]
-
-
-def _screen() -> list[tuple[int, int, int, int]]:
-    return [
-        (11, 14, 14, 1),
-        (9, 15, 18, 8),
-        (11, 23, 14, 1),
-    ]
-
-
-def _eyes(kind: str) -> list[tuple[int, int, int, int]]:
-    if kind == "mid":
-        return [(12, 17, 2, 2), (22, 17, 2, 2)]
-    if kind == "left":
-        return [(10, 17, 2, 2), (20, 17, 2, 2)]
-    if kind == "right":
-        return [(14, 17, 2, 2), (24, 17, 2, 2)]
-    if kind == "up":
-        return [(12, 15, 2, 2), (22, 15, 2, 2)]
-    if kind == "squint":
-        return [(12, 18, 2, 1), (22, 18, 2, 1)]
-    if kind == "x":
-        return [
-            (12, 16, 1, 1), (14, 16, 1, 1), (13, 17, 1, 1), (12, 18, 1, 1), (14, 18, 1, 1),
-            (22, 16, 1, 1), (24, 16, 1, 1), (23, 17, 1, 1), (22, 18, 1, 1), (24, 18, 1, 1),
-        ]
-    return []
-
-
-def _mouth(kind: str) -> list[tuple[int, int, int, int]]:
-    if kind == "smile":
-        return [(13, 20, 1, 1), (23, 20, 1, 1), (14, 21, 1, 1), (22, 21, 1, 1), (15, 22, 6, 1)]
-    if kind == "flat":
-        return [(14, 21, 8, 1)]
-    if kind == "open":
-        return [(15, 20, 6, 2)]
-    return []
-
-
-def _blink() -> list[tuple[int, int, int, int]]:
-    """Paper over the eyes, then a shut line."""
-    return [(10, 15, 16, 5)]
-
-
-def _blink_line() -> list[tuple[int, int, int, int]]:
-    return [(12, 18, 2, 1), (22, 18, 2, 1)]
-
-
-def _body() -> tuple[list[tuple[int, int, int, int]], list[tuple[int, int, int, int]], list[tuple[int, int, int, int]]]:
-    """Ink body, paper belly, ink digits. The raised arm is the viewer's left."""
-    ink = [
-        (15, 27, 6, 2),
-        (10, 29, 16, 1),
-        (8, 30, 20, 8),
-        (10, 38, 16, 1),
-        # waving arm
-        (5, 24, 4, 3),
-        (3, 21, 4, 4),
-        (2, 19, 3, 3),
-        # hanging arm
-        (26, 31, 3, 6),
-        (27, 36, 3, 2),
-        # legs and feet
-        (12, 39, 4, 4),
-        (20, 39, 4, 4),
-        (10, 43, 7, 2),
-        (19, 43, 7, 2),
-    ]
-    belly = [(11, 32, 14, 5)]
-    digits = [
-        # 1
-        (12, 32, 1, 1), (11, 33, 2, 1), (12, 34, 1, 1), (12, 35, 1, 1), (11, 36, 3, 1),
-        # 0
-        (16, 32, 3, 1), (16, 33, 1, 1), (18, 33, 1, 1), (16, 34, 1, 1), (18, 34, 1, 1),
-        (16, 35, 1, 1), (18, 35, 1, 1), (16, 36, 3, 1),
-        # 1
-        (21, 32, 1, 1), (20, 33, 2, 1), (21, 34, 1, 1), (21, 35, 1, 1), (20, 36, 3, 1),
-    ]
-    return ink, belly, digits
 
 
 def _group(cls: str, fill: str, parts: list[tuple[int, int, int, int]]) -> str:
@@ -166,60 +333,188 @@ def _group(cls: str, fill: str, parts: list[tuple[int, int, int, int]]) -> str:
     return f'<g class="{cls}" fill="{fill}">{_rects(parts)}</g>'
 
 
-def svg_face() -> str:
-    """Head only: antenna, screen, and the frames a run can show."""
-    _shell_badge, one = _badge()
+def _by_outside(outside, x: int, y: int, width: int, height: int) -> bool:
+    for dx, dy in ((1, 0), (-1, 0), (0, 1), (0, -1)):
+        nx, ny = x + dx, y + dy
+        if not (0 <= nx < width and 0 <= ny < height) or outside[ny][nx]:
+            return True
+    return False
+
+
+def _head_rows() -> list[str]:
+    """Antenna and monitor from the traced grid, without the arms or the feet.
+
+    Rows 0-38 and columns 9-36. Row 38 is the monitor's bottom edge. The
+    feet start on the next row. Black pixels outside that outline are the
+    arms, and they go. The fill inside the outline is 'F'.
+    """
+    source = _rows(BODY)
+    height, width = len(source), len(source[0])
+    outside = [[False] * width for _ in range(height)]
+    stack = [(x, y) for x in range(width) for y in (0, height - 1)]
+    stack += [(x, y) for y in range(height) for x in (0, width - 1)]
+    while stack:
+        x, y = stack.pop()
+        if not (0 <= x < width and 0 <= y < height) or outside[y][x] or source[y][x] == "#":
+            continue
+        outside[y][x] = True
+        stack.extend(((x + 1, y), (x - 1, y), (x, y + 1), (x, y - 1)))
+    seen = [[False] * width for _ in range(height)]
+    holes = []
+    for y in range(height):
+        for x in range(width):
+            if source[y][x] == "#" or outside[y][x] or seen[y][x]:
+                continue
+            pile = [(x, y)]
+            seen[y][x] = True
+            cells = []
+            while pile:
+                cx, cy = pile.pop()
+                cells.append((cx, cy))
+                for nx, ny in ((cx + 1, cy), (cx - 1, cy), (cx, cy + 1), (cx, cy - 1)):
+                    if (
+                        0 <= nx < width
+                        and 0 <= ny < height
+                        and not seen[ny][nx]
+                        and source[ny][nx] != "#"
+                        and not outside[ny][nx]
+                    ):
+                        seen[ny][nx] = True
+                        pile.append((nx, ny))
+            holes.append(cells)
+    ring = set(max((cells for cells in holes if min(y for _, y in cells) <= 12 and max(y for _, y in cells) >= 30), key=len))
+    seen = [[False] * width for _ in range(height)]
+    ink_parts = []
+    for y in range(height):
+        for x in range(width):
+            if source[y][x] != "#" or seen[y][x]:
+                continue
+            pile = [(x, y)]
+            seen[y][x] = True
+            cells = []
+            while pile:
+                cx, cy = pile.pop()
+                cells.append((cx, cy))
+                for nx, ny in ((cx + 1, cy), (cx - 1, cy), (cx, cy + 1), (cx, cy - 1)):
+                    if 0 <= nx < width and 0 <= ny < height and not seen[ny][nx] and source[ny][nx] == "#":
+                        seen[ny][nx] = True
+                        pile.append((nx, ny))
+            ink_parts.append(cells)
+    fill = set(max(ink_parts, key=len))
+    eyes = set()
+    smile = set()
+    for cells in ink_parts:
+        xs = [x for x, _ in cells]
+        ys = [y for _, y in cells]
+        if min(xs) >= 17 and max(xs) <= 30 and min(ys) >= 19 and max(ys) <= 23 and len(cells) <= 12:
+            eyes.update(cells)
+        if min(xs) >= 19 and max(xs) <= 26 and min(ys) >= 23 and max(ys) <= 26 and len(cells) <= 8:
+            smile.update(cells)
+    antenna = {(x, y) for y in range(1, 5) for x in range(20, 26) if source[y][x] == "#"}
+
+    def touches_ring(x: int, y: int) -> bool:
+        for dy in (-1, 0, 1):
+            for dx in (-1, 0, 1):
+                if (dx or dy) and (x + dx, y + dy) in ring:
+                    return True
+        return False
+
+    face = []
+    for y in range(0, 39):
+        line = []
+        for x in range(9, 37):
+            if source[y][x] != "#":
+                line.append(".")
+                continue
+            if (x, y) in eyes:
+                line.append("E")
+            elif (x, y) in smile:
+                line.append("M")
+            elif (x, y) in antenna:
+                line.append("A")
+            elif y <= 8 or (touches_ring(x, y) and (x, y) not in fill):
+                line.append("#")
+            elif (x, y) in fill or not _by_outside(outside, x, y, width, height):
+                # Interior black, including the middle of the 0.
+                line.append("F")
+            else:
+                line.append(".")
+        face.append("".join(line))
+    return face
+
+
+def _svg_head(rows: list[str]) -> str:
+    width = len(rows[0])
+    height = len(rows)
+    eyes = _points(rows, "E")
+    smile, flat, opened = _mouths(rows)
+    blink, blink_line = _blink(eyes)
+    bulb = _bulb(rows)
+    thoughts = [
+        (width + 1, 6, 2, 2),
+        (width + 2, 10, 2, 2),
+        (width + 1, 14, 2, 2),
+    ]
     groups = [
-        _group("shell", INK, _head_shell()),
-        _group("screen", PAPER, _screen()),
-        _group("mark", PAPER, one),
-        _group("eyes eyes-mid", INK, _eyes("mid")),
-        _group("eyes eyes-left", INK, _eyes("left")),
-        _group("eyes eyes-right", INK, _eyes("right")),
-        _group("eyes eyes-up", INK, _eyes("up")),
-        _group("eyes eyes-squint", INK, _eyes("squint")),
-        _group("eyes eyes-x", INK, _eyes("x")),
-        _group("mouth mouth-smile", INK, _mouth("smile")),
-        _group("mouth mouth-flat", INK, _mouth("flat")),
-        _group("mouth mouth-open", INK, _mouth("open")),
-        _group("blink", PAPER, _blink()),
-        _group("blink-line", INK, _blink_line()),
-        _group("bulb", "#d0892a", [(21, 2, 2, 2)]),
-        _group("thought thought-1", INK, [(31, 8, 2, 2)]),
-        _group("thought thought-2", INK, [(33, 12, 2, 2)]),
-        _group("thought thought-3", INK, [(31, 16, 2, 2)]),
+        _group("shell", INK, _merge(_points(rows, "F"))),
+        _group("line", INK, _merge(_points(rows, "#"))),
+        _group("screen", PAPER, _merge(_enclosed(rows))),
+        _group("mark", INK, _merge(_points(rows, "A"))),
+        _group("eyes eyes-mid", INK, _merge(eyes)),
+        _group("eyes eyes-left", INK, _merge(_shift(eyes, -1, 0))),
+        _group("eyes eyes-right", INK, _merge(_shift(eyes, 1, 0))),
+        _group("eyes eyes-up", INK, _merge(_shift(eyes, 0, -1))),
+        _group("eyes eyes-squint", INK, _merge(_squint(eyes))),
+        _group("eyes eyes-x", INK, _merge(_exes(eyes))),
+        _group("mouth mouth-smile", INK, _merge(smile)),
+        _group("mouth mouth-flat", INK, _merge(flat)),
+        _group("mouth mouth-open", INK, _merge(opened)),
+        _group("blink", PAPER, _merge(blink)),
+        _group("blink-line", INK, _merge(blink_line)),
+        _group("bulb", "#d0892a", [bulb]),
+        _group("thought thought-1", INK, [thoughts[0]]),
+        _group("thought thought-2", INK, [thoughts[1]]),
+        _group("thought thought-3", INK, [thoughts[2]]),
     ]
     body = "".join(groups)
     return (
-        '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 36 30" '
+        f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {width + 5} {height}" '
         'shape-rendering="crispEdges" role="img" aria-hidden="true">'
         f"{body}</svg>"
     )
 
 
+def svg_face() -> str:
+    """Head only: antenna, screen, and the frames a run can show."""
+    return _svg_head(_head_rows())
+
+
+def svg_face_small() -> str:
+    """The same head, drawn for a sidebar row or a phone header."""
+    return _svg_head(_rows(FACE_SMALL))
+
+
 def svg_mascot() -> str:
     """Full-body buddy. Fixed ink on a clear background. Idle face."""
-    _shell_badge, one = _badge()
-    ink_body, belly, digits = _body()
+    rows = _rows(BODY)
     groups = [
-        _group("shell", INK, _head_shell() + ink_body),
-        _group("screen", PAPER, _screen() + belly),
-        _group("mark", PAPER, one),
-        _group("eyes-mid", INK, _eyes("mid")),
-        _group("mouth-smile", INK, _mouth("smile")),
-        _group("digits", INK, digits),
+        _group("shell", INK, _merge(_points(rows, "#"))),
+        _group("screen", PAPER, _merge(_enclosed(rows))),
+        _group("mark", INK, _merge(_points(rows, "A"))),
+        _group("eyes-mid", INK, _merge(_points(rows, "E"))),
+        _group("mouth-smile", INK, _merge(_points(rows, "M"))),
     ]
     body = "".join(groups)
     return (
-        '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 36 46" '
+        f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {len(rows[0])} {len(rows)}" '
         'shape-rendering="crispEdges" role="img">'
         "<title>EasyAgent</title>"
         f"{body}</svg>"
     )
 
 
-def _paint(size: int, parts: list[tuple[str, list[tuple[int, int, int, int]]]], canvas=(36, 46)):
-    from PIL import Image
+def _paint(size: int, parts: list[tuple[str, list[tuple[int, int, int, int]]]], canvas=(45, 45)):
+    from PIL import Image, ImageDraw
 
     image = Image.new("RGBA", (size, size), (0, 0, 0, 0))
     grid_w, grid_h = canvas
@@ -228,9 +523,6 @@ def _paint(size: int, parts: list[tuple[str, list[tuple[int, int, int, int]]]], 
     scale = min(inner / grid_w, inner / grid_h)
     offset_x = margin + (inner - grid_w * scale) / 2
     offset_y = margin + (inner - grid_h * scale) / 2
-    # Paper tile so the ink reads on a dark dock. The margin stays clear.
-    from PIL import ImageDraw
-
     draw = ImageDraw.Draw(image)
     tile = (
         int(offset_x),
@@ -254,17 +546,17 @@ def _paint(size: int, parts: list[tuple[str, list[tuple[int, int, int, int]]]], 
 
 
 def mascot_layers():
-    _badge_shell, one = _badge()
-    ink_body, belly, digits = _body()
+    rows = _rows(BODY)
     return [
-        (INK, _head_shell() + ink_body),
-        (PAPER, _screen() + belly + one),
-        (INK, _eyes("mid") + _mouth("smile") + digits),
+        (INK, _merge(_points(rows, "#"))),
+        (PAPER, _merge(_enclosed(rows))),
+        (INK, _merge(_points(rows, "AEM"))),
     ]
 
 
 def icon_image(size: int):
-    return _paint(size, mascot_layers())
+    rows = _rows(BODY)
+    return _paint(size, mascot_layers(), canvas=(len(rows[0]), len(rows)))
 
 
 def write_icns(path: Path, pngs: list[tuple[str, bytes]]) -> None:
@@ -339,21 +631,30 @@ def write_assets(root: Path) -> None:
     root = Path(root)
     mascot = svg_mascot()
     face = svg_face()
+    small = svg_face_small()
     (root / "assets").mkdir(parents=True, exist_ok=True)
     (root / "assets" / "mascot.svg").write_text(mascot, encoding="utf-8")
     static = root / "easyagent" / "static"
     static.mkdir(parents=True, exist_ok=True)
     (static / "mascot.svg").write_text(mascot, encoding="utf-8")
     (static / "face.svg").write_text(face, encoding="utf-8")
+    (static / "face-small.svg").write_text(small, encoding="utf-8")
     write_icons(root / "desktop" / "src-tauri" / "icons", static / "favicon.png")
+
+
+def _block(draw, scale, fill, rects):
+    color = tuple(int(fill[i : i + 2], 16) for i in (1, 3, 5)) + (255,)
+    for x, y, w, h in rects:
+        draw.rectangle((x * scale, y * scale, (x + w) * scale, (y + h) * scale), fill=color)
 
 
 def face_frame(state: str, tick: int):
     """One crisp frame of a run state, for the strip and the GIF."""
     from PIL import Image, ImageDraw
 
+    rows = _head_rows()
     scale = 8
-    width, height = 36 * scale, 30 * scale
+    width, height = (len(rows[0]) + 5) * scale, len(rows) * scale
     image = Image.new("RGBA", (width, height), (0, 0, 0, 0))
     draw = ImageDraw.Draw(image)
     colors = {
@@ -365,52 +666,55 @@ def face_frame(state: str, tick: int):
         "halted": "#8f2d28",
     }
     shell = "#c4532a" if state == "talking" else colors.get(state, INK)
-
-    def block(fill, rects):
-        color = tuple(int(fill[i : i + 2], 16) for i in (1, 3, 5)) + (255,)
-        for x, y, w, h in rects:
-            draw.rectangle((x * scale, y * scale, (x + w) * scale, (y + h) * scale), fill=color)
-
-    _badge_shell, one = _badge()
-    block(shell, _head_shell())
-    block(PAPER, _screen())
-    block(PAPER, one)
+    _block(draw, scale, shell, _merge(_points(rows, "F")))
+    _block(draw, scale, INK, _merge(_points(rows, "#")))
+    _block(draw, scale, PAPER, _merge(_enclosed(rows)))
+    _block(draw, scale, INK, _merge(_points(rows, "A")))
+    eyes_cells = _points(rows, "E")
+    smile, flat, opened = _mouths(rows)
     eyes = "mid"
-    mouth = "smile"
+    mouth = smile
     bulb = False
     thoughts = 0
     if state == "waiting":
         eyes = ("left", "mid", "right", "mid", "blink")[tick % 5]
-        mouth = "smile"
     elif state == "thinking":
         eyes = "up"
-        mouth = "smile"
         bulb = tick % 2 == 0
         thoughts = (tick % 3) + 1
     elif state == "tool":
         eyes = "squint" if tick % 2 == 0 else "mid"
-        mouth = "flat" if tick % 2 == 0 else "open"
-        bulb = True
+        mouth = flat if tick % 2 == 0 else opened
     elif state == "talking":
-        eyes = "mid"
-        mouth = "open" if tick % 2 == 0 else "smile"
+        mouth = opened if tick % 2 == 0 else smile
     elif state == "halted":
         eyes = "x"
-        mouth = "flat"
+        mouth = flat
     elif state == "idle":
         eyes = "blink" if tick % 6 == 5 else "mid"
-        mouth = "smile"
     if eyes == "blink":
-        block(PAPER, _blink())
-        block(INK, _blink_line())
+        paper, line = _blink(eyes_cells)
+        _block(draw, scale, PAPER, _merge(paper))
+        _block(draw, scale, INK, _merge(line))
+    elif eyes == "left":
+        _block(draw, scale, INK, _merge(_shift(eyes_cells, -1, 0)))
+    elif eyes == "right":
+        _block(draw, scale, INK, _merge(_shift(eyes_cells, 1, 0)))
+    elif eyes == "up":
+        _block(draw, scale, INK, _merge(_shift(eyes_cells, 0, -1)))
+    elif eyes == "squint":
+        _block(draw, scale, INK, _merge(_squint(eyes_cells)))
+    elif eyes == "x":
+        _block(draw, scale, INK, _merge(_exes(eyes_cells)))
     else:
-        block(INK, _eyes(eyes))
-    block(INK, _mouth(mouth))
+        _block(draw, scale, INK, _merge(eyes_cells))
+    _block(draw, scale, INK, _merge(mouth))
     if bulb:
-        block(colors.get(state, INK), [(21, 2, 2, 2)])
+        _block(draw, scale, colors.get(state, INK), [_bulb(rows)])
+    grid_w = len(rows[0])
+    spots = [(grid_w + 1, 6, 2, 2), (grid_w + 2, 10, 2, 2), (grid_w + 1, 14, 2, 2)]
     for index in range(thoughts):
-        spots = [(31, 8, 2, 2), (33, 12, 2, 2), (31, 16, 2, 2)]
-        block(INK, [spots[index]])
+        _block(draw, scale, INK, [spots[index]])
     return image
 
 

@@ -1439,13 +1439,14 @@ pre.skill-body {
 }
 
 .brand-mascot {
-  width: 36px;
-  height: 46px;
+  width: 44px;
+  height: 44px;
   flex: none;
   display: block;
+  object-fit: contain;
 }
 
-#phone-bar .brand-mascot { width: 22px; height: 28px; }
+#phone-bar .brand-mascot { width: 26px; height: 26px; }
 
 .mascot {
   width: 168px;
@@ -1474,12 +1475,12 @@ pre.skill-body {
 
 .buddy-face svg {
   width: 28px;
-  height: 24px;
+  height: auto;
   display: block;
 }
 
-.buddy-face.is-large svg { width: 40px; height: 34px; }
-.buddy-face.is-tiny svg { width: 20px; height: 17px; }
+.buddy-face.is-large svg { width: 40px; height: auto; }
+.buddy-face.is-tiny svg { width: 20px; height: auto; }
 
 .buddy-face .shell { fill: var(--face); }
 .buddy-face.is-waiting,

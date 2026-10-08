@@ -5,12 +5,12 @@
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>EasyAgent</title>
   <link rel="icon" href="/static/favicon.png" type="image/png" />
-  <link rel="stylesheet" href="/static/app.css?v=32" />
+  <link rel="stylesheet" href="/static/app.css?v=33" />
 </head>
 <body>
   <div id="token-gate" class="gate" hidden>
     <form id="token-form" class="gate-card">
-      <img class="mascot mascot-small" src="/static/mascot.svg" alt="" width="96" height="122" />
+      <img class="mascot mascot-small" src="/static/mascot.svg" alt="" width="96" height="96" />
       <p class="tagline">AI agents, made easy.</p>
       <p class="eyebrow">Shared token</p>
       <h1>Type the shared token.</h1>
@@ -27,12 +27,12 @@
     <p id="offline-banner" class="offline-banner" hidden>The computer running EasyAgent is offline.</p>
     <div id="phone-bar">
       <button type="button" id="phone-menu">Bots</button>
-      <img class="brand-mascot" src="/static/mascot.svg" alt="" width="22" height="28" />
+      <img class="brand-mascot" src="/static/face-small.svg" alt="" width="26" height="26" />
       <strong>EasyAgent</strong>
     </div>
     <aside id="rail">
       <header class="brand">
-        <img class="brand-mascot" src="/static/mascot.svg" alt="" width="36" height="46" />
+        <img class="brand-mascot" src="/static/mascot.svg" alt="" width="44" height="44" />
         <div>
           <strong>EasyAgent</strong>
           <em>AI agents, made easy.</em>
@@ -116,14 +116,14 @@
           <button type="button" id="open-settings-chat" class="text-btn">Settings</button>
         </header>
         <section id="empty-stage">
-          <img class="mascot" src="/static/mascot.svg" alt="" width="168" height="214" />
+          <img class="mascot" src="/static/mascot.svg" alt="" width="168" height="168" />
           <p class="eyebrow">EasyAgent</p>
           <h1 id="empty-title">Add a bot.</h1>
           <p class="tagline">AI agents, made easy.</p>
           <p class="lede" id="empty-copy">The conversation fills this screen. A bot's settings, connections, rooms, projects, and computers are on their own screens.</p>
         </section>
         <div id="thread-empty" hidden>
-          <img class="mascot mascot-small" src="/static/mascot.svg" alt="" width="96" height="122" />
+          <img class="mascot mascot-small" src="/static/mascot.svg" alt="" width="96" height="96" />
           <h2 id="thread-empty-title">No chat open</h2>
           <p id="thread-empty-copy">Start a new chat, or open one from this bot's list. The list is only this bot's.</p>
         </div>
@@ -584,7 +584,7 @@
       </section>
 
       <section id="screen-about" class="screen" hidden>
-        <img class="mascot" src="/static/mascot.svg" alt="" width="168" height="214" />
+        <img class="mascot" src="/static/mascot.svg" alt="" width="168" height="168" />
         <h1>EasyAgent</h1>
         <p class="tagline">AI agents, made easy.</p>
         <p class="lede">Version 0.1.0. A local harness for any OpenAI-compatible model. Chats stay on this computer.</p>
@@ -639,6 +639,6 @@
     <div id="info-body"></div>
   </dialog>
 
-  <script src="/static/app.js?v=37"></script>
+  <script src="/static/app.js?v=38"></script>
 </body>
 </html>

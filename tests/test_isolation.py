@@ -72,7 +72,7 @@ def test_the_page_keeps_a_stream_per_chat(tmp_path):
     from fastapi.testclient import TestClient
 
     with TestClient(create_app(tmp_path)) as client:
-        script = client.get("/static/app.js?v=37")
+        script = client.get("/static/app.js?v=38")
     assert script.status_code == 200
     text = script.text
     assert "const streams = new Map()" in text

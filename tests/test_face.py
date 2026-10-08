@@ -77,8 +77,8 @@ def test_mascot_svg_is_crisp_and_the_page_uses_the_tagline(tmp_path):
         avatar = client.get("/static/face.svg")
         assert mascot.status_code == 200 and avatar.status_code == 200
         assert "crispEdges" in mascot.text and "<rect" in avatar.text
-        script = client.get("/static/app.js?v=37").text
-        css = client.get("/static/app.css?v=32").text
+        script = client.get("/static/app.js?v=38").text
+        css = client.get("/static/app.css?v=33").text
         for color in PALETTE:
             assert color in script
         for needle in ("function makeFace", "function faceStateFor", "is-talking", "is-reconnecting", "eyes-left", "eyes-up", "eyes-x", "mouth-open"):

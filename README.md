@@ -2,6 +2,8 @@
 
 ![EasyAgent mascot](assets/mascot.svg)
 
+The pixel drawing is traced from [mascot-original.jpg](assets/mascot-original.jpg). The banner with the wordmark is [banner.jpg](assets/banner.jpg). Both are the reference for the character.
+
 **AI agents, made easy.**
 
 EasyAgent is a free local agent harness for any OpenAI-compatible model. You run it on your own computer. It gives you multiple bots, real tools, markdown memory, and a goal, plan, build, and check loop. It does not include a model, an account, or a cloud copy of your chats.

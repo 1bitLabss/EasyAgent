@@ -311,19 +311,91 @@ fn fill(pixels: &mut [u8], x: usize, y: usize, w: usize, h: usize, r: u8, g: u8,
 }
 
 fn paint_head(pixels: &mut [u8]) {
-    fill(pixels, 28, 6, 8, 8, 28, 27, 25, 255);
-    fill(pixels, 31, 8, 2, 1, 246, 244, 239, 255);
-    fill(pixels, 30, 9, 3, 1, 246, 244, 239, 255);
-    fill(pixels, 31, 10, 2, 3, 246, 244, 239, 255);
-    fill(pixels, 30, 13, 4, 1, 246, 244, 239, 255);
-    fill(pixels, 31, 14, 2, 4, 28, 27, 25, 255);
-    fill(pixels, 18, 20, 28, 26, 28, 27, 25, 255);
-    fill(pixels, 22, 26, 20, 14, 246, 244, 239, 255);
-    fill(pixels, 26, 30, 4, 4, 28, 27, 25, 255);
-    fill(pixels, 36, 30, 4, 4, 28, 27, 25, 255);
-    fill(pixels, 28, 36, 2, 2, 28, 27, 25, 255);
-    fill(pixels, 36, 36, 2, 2, 28, 27, 25, 255);
-    fill(pixels, 30, 38, 6, 2, 28, 27, 25, 255);
+    // The small face from easyagent/mascot.py, scaled into the 64px icon.
+    const ROWS: &[&[u8]] = &[
+        b"....########....",
+        b"....#..AA..#....",
+        b"....#...A..#....",
+        b"....#...A..#....",
+        b"....#..AAA.#....",
+        b"....########....",
+        b"......##........",
+        b"..############..",
+        b".#............#.",
+        b".#.FFFFFFFFFF.#.",
+        b".#.#........#.#.",
+        b".#.#.EE..EE.#.#.",
+        b".#.#.EE..EE.#.#.",
+        b".#.#..M..M..#.#.",
+        b".#.#...MM...#.#.",
+        b".#.FFFFFFFFFF.#.",
+        b".#............#.",
+        b"..############..",
+    ];
+    const W: usize = 16;
+    const H: usize = 18;
+    const SCALE: usize = 3;
+    let origin_x = (64 - W * SCALE) / 2;
+    let origin_y = (64 - H * SCALE) / 2;
+    let mut outside = [false; W * H];
+    let mut stack = Vec::with_capacity(W * 2);
+    for x in 0..W {
+        stack.push((x, 0usize));
+        stack.push((x, H - 1));
+    }
+    for y in 0..H {
+        stack.push((0usize, y));
+        stack.push((W - 1, y));
+    }
+    while let Some((x, y)) = stack.pop() {
+        if x >= W || y >= H {
+            continue;
+        }
+        let index = y * W + x;
+        let cell = ROWS[y][x];
+        if outside[index] || cell == b'#' || cell == b'A' || cell == b'E' || cell == b'M' || cell == b'F' {
+            continue;
+        }
+        outside[index] = true;
+        if x > 0 {
+            stack.push((x - 1, y));
+        }
+        if x + 1 < W {
+            stack.push((x + 1, y));
+        }
+        if y > 0 {
+            stack.push((x, y - 1));
+        }
+        if y + 1 < H {
+            stack.push((x, y + 1));
+        }
+    }
+    for y in 0..H {
+        for x in 0..W {
+            let cell = ROWS[y][x];
+            let ink = cell == b'#' || cell == b'A' || cell == b'E' || cell == b'M' || cell == b'F';
+            let (r, g, b, a) = if ink {
+                (28, 27, 25, 255)
+            } else if !outside[y * W + x] {
+                (246, 244, 239, 255)
+            } else {
+                continue;
+            };
+            for dy in 0..SCALE {
+                for dx in 0..SCALE {
+                    put(
+                        pixels,
+                        origin_x + x * SCALE + dx,
+                        origin_y + y * SCALE + dy,
+                        r,
+                        g,
+                        b,
+                        a,
+                    );
+                }
+            }
+        }
+    }
 }
 
 fn put(pixels: &mut [u8], x: usize, y: usize, r: u8, g: u8, b: u8, a: u8) {

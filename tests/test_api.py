@@ -1695,11 +1695,11 @@ def test_reasoning_stays_out_of_the_answer_and_out_of_the_next_call(world, monke
     assert [item["content"] for item in stored["messages"]] == ["hi there", "Hello", "and then", "Next"]
     assert "thinking" not in stored["messages"][-1]
     page = world.client.get("/")
-    assert 'app.js?v=37' in page.text
-    assert 'app.css?v=32' in page.text
+    assert 'app.js?v=38' in page.text
+    assert 'app.css?v=33' in page.text
     assert 'id="stop"' in page.text
     assert 'id="continue"' in page.text
-    script = world.client.get("/static/app.js?v=37")
+    script = world.client.get("/static/app.js?v=38")
     assert script.status_code == 200
     assert "model-thinking" in script.text
     assert "function setProse" in script.text
@@ -1719,7 +1719,7 @@ def test_reasoning_stays_out_of_the_answer_and_out_of_the_next_call(world, monke
     assert "function continueRun" in script.text
     send_fn = script.text.split("async function sendDraft")[1].split("async function retry")[0]
     assert '$("send").disabled' not in send_fn
-    css = world.client.get("/static/app.css?v=32")
+    css = world.client.get("/static/app.css?v=33")
     assert css.status_code == 200
     assert ".model-thinking" in css.text
     assert ".model-thinking-p" in css.text
@@ -1981,8 +1981,8 @@ def test_debug_raw_saves_the_first_chunks_only_when_asked(tmp_path, monkeypatch)
 def test_adding_a_bot_opens_its_first_chat(world):
     """A new bot is selected, its first chat is created, and the message box is focused."""
     page = world.client.get("/")
-    assert 'app.js?v=37' in page.text
-    script = world.client.get("/static/app.js?v=37")
+    assert 'app.js?v=38' in page.text
+    script = world.client.get("/static/app.js?v=38")
     assert script.status_code == 200
     submit = script.text.split('$("bot-form").addEventListener("submit"')[1].split('$("toggle-room")')[0]
     assert 'api(`/api/bots/${bot.id}/chats`' in submit

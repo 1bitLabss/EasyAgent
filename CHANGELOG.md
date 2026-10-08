@@ -1,5 +1,10 @@
 # Changelog
 
+## Changed
+
+- The mascot is the measured trace of the original character, cell for cell. The face is that head without the arms and feet, and the fill inside the outline takes the bot's color. A smaller face keeps the antenna, the white line, the screen, the eyes, and the smile.
+- The mascot is traced from the approved character. The pixel drawing keeps the rounded monitor, the face screen, the boxed 1, the waving arm, and the 101. A small face is used in the sidebar and the phone header, where the full drawing would be too small to read.
+
 ## Fixed
 
 - A flaky model server does not stop the run on the first missed connection. Connect errors, a timeout before the first token, 502, 503, 504, and a busy or unavailable slot are retried with a pause that grows from 1 second to 15 seconds, for up to 3 minutes (`EASYAGENT_MODEL_RETRY_SECONDS`). The run stays up, and the face and the step show reconnecting in amber. The connection slot is free during that pause. A stream that drops after text has started is tried once more, and text already shown is replaced. Stop still stops at once. When the window runs out, the chat says Stopped and how long it retried.

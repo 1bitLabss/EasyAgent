@@ -92,8 +92,8 @@ def test_a_new_connection_allows_one_at_a_time_and_the_setting_can_change(tmp_pa
         assert (tmp_path / "endpoints.json").read_text() == before
 
         page = client.get("/")
-        assert "app.js?v=37" in page.text
-        script = client.get("/static/app.js?v=37").text
+        assert "app.js?v=38" in page.text
+        script = client.get("/static/app.js?v=38").text
     assert 'id="endpoint-parallel"' in page.text
     assert "max_parallel" in script
     assert 'startsWith("Queued:")' in script

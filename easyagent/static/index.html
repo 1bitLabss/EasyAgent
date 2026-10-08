@@ -1,0 +1,621 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>EasyAgent</title>
+  <link rel="stylesheet" href="/static/app.css?v=30" />
+</head>
+<body>
+  <div id="token-gate" class="gate" hidden>
+    <form id="token-form" class="gate-card">
+      <p class="eyebrow">Shared token</p>
+      <h1>Type the shared token.</h1>
+      <p class="lede">Chats stay on the computer running EasyAgent. This phone does not keep a copy.</p>
+      <label>Token
+        <input id="token-input" type="password" autocomplete="off" required />
+      </label>
+      <button type="submit">Open</button>
+      <p id="token-error" class="form-error" role="alert" hidden></p>
+    </form>
+  </div>
+
+  <div id="app">
+    <p id="offline-banner" class="offline-banner" hidden>The computer running EasyAgent is offline.</p>
+    <div id="phone-bar">
+      <button type="button" id="phone-menu">Bots</button>
+      <strong>EasyAgent</strong>
+    </div>
+    <aside id="rail">
+      <header class="brand">
+        <div>
+          <strong>EasyAgent</strong>
+          <em>This screen is the conversation.</em>
+        </div>
+      </header>
+
+      <section class="rail-section" aria-labelledby="bots-heading">
+        <div class="section-head">
+          <h2 id="bots-heading">Bots</h2>
+          <button type="button" id="toggle-bot" class="text-btn">Add</button>
+        </div>
+        <form id="bot-form" class="stack-form" hidden>
+          <label>Name
+            <input id="bot-name" name="name" maxlength="80" required placeholder="Ada" />
+          </label>
+          <label>Connection
+            <select id="bot-endpoint" name="endpoint_id" required></select>
+          </label>
+          <div id="bot-new-connection" hidden>
+            <label>Connection name
+              <input id="bot-conn-name" maxlength="80" placeholder="Home server" />
+            </label>
+            <label>Address
+              <input id="bot-conn-url" type="url" placeholder="http://localhost:8080/v1" />
+            </label>
+            <label>Key <span class="hint">optional</span>
+              <input id="bot-conn-key" type="password" autocomplete="off" />
+            </label>
+            <label>Model name <span class="hint">optional</span>
+              <input id="bot-conn-model" maxlength="120" />
+            </label>
+          </div>
+          <label>Model name for this bot <span class="hint">optional</span>
+            <input id="bot-model" name="model" maxlength="120" placeholder="only if it should differ" />
+          </label>
+          <label>How much chat it sees <span class="hint">tokens (default 24000)</span>
+            <input id="bot-context" name="context_tokens" type="number" min="512" max="1000000" step="1" value="24000" />
+          </label>
+          <p class="form-note">A bot is one chat partner. Its chats stay private. You can change these later in its settings.</p>
+          <div class="form-actions">
+            <button type="submit" id="bot-submit">Add bot</button>
+            <button type="button" id="cancel-bot" class="ghost">Cancel</button>
+          </div>
+          <p id="bot-error" class="form-error" role="alert" hidden></p>
+        </form>
+        <ul id="bot-list" class="entity-list"></ul>
+        <p id="bot-empty" class="empty-inline">No bots yet. Add one to start a conversation.</p>
+      </section>
+
+      <section id="side-chats" class="rail-section" hidden>
+        <div class="section-head">
+          <h2>Chats</h2>
+          <button type="button" id="new-chat" class="text-btn">New</button>
+        </div>
+        <ul id="chat-list" class="chat-list"></ul>
+        <p id="chat-empty" class="empty-inline" hidden>No chats for this bot yet.</p>
+        <button type="button" id="open-settings" class="text-btn side-settings">This bot's settings</button>
+      </section>
+
+      <nav class="side-nav" aria-label="Other screens">
+        <button type="button" id="nav-connections" data-screen="connections">Connections</button>
+        <button type="button" id="nav-rooms" data-screen="rooms">Rooms</button>
+        <button type="button" id="nav-projects" data-screen="projects">Projects</button>
+        <button type="button" id="nav-computers" data-screen="computers">Computers</button>
+        <button type="button" id="show-direction" data-screen="direction">Direction</button>
+        <button type="button" id="show-skills">Skills</button>
+      </nav>
+    </aside>
+
+    <main id="stage">
+      <section id="screen-chat" class="screen">
+        <header class="chat-head" id="chat-head" hidden>
+          <div>
+            <p class="eyebrow" id="bot-kicker">Chat</p>
+            <h1 id="bot-title"></h1>
+          </div>
+          <button type="button" id="open-settings-chat" class="text-btn">Settings</button>
+        </header>
+        <section id="empty-stage">
+          <p class="eyebrow">Chat</p>
+          <h1>Pick a bot.</h1>
+          <p class="lede">The conversation fills this screen. A bot's settings, connections, rooms, projects, and computers are on their own screens.</p>
+        </section>
+        <div id="thread-empty" hidden>
+          <h2 id="thread-empty-title">No chat open</h2>
+          <p id="thread-empty-copy">Start a new chat, or open one from this bot's list. The list is only this bot's.</p>
+        </div>
+        <div id="thread" hidden>
+          <div class="thread-scroll" id="thread-scroll">
+            <details id="summary-block">
+              <summary>Earlier turns, compacted</summary>
+              <p id="summary-text"></p>
+            </details>
+            <ol id="messages"></ol>
+          </div>
+          <div class="composer-wrap">
+            <p id="thread-error" class="form-error" role="alert" hidden></p>
+            <p id="context-note" class="context-note"></p>
+            <form id="composer">
+              <label class="sr-only" for="draft">Message</label>
+              <textarea id="draft" rows="3" placeholder="Write a message. Enter to send."></textarea>
+              <div class="composer-actions">
+                <label class="attach-label">Attach
+                  <input id="attach-file" type="file" />
+                </label>
+                <label class="ask-bot">Ask one bot
+                  <select id="ask-bot"></select>
+                </label>
+                <button type="button" id="ask-go" class="ghost">Ask</button>
+                <button type="button" id="retry" class="ghost" hidden>Retry</button>
+                <button type="button" id="continue" class="ghost" hidden>Continue</button>
+                <button type="button" id="stop" hidden>Stop</button>
+                <button type="submit" id="send">Send</button>
+              </div>
+            </form>
+          </div>
+        </div>
+      </section>
+
+      <section id="screen-settings" class="screen" hidden>
+        <header class="screen-intro">
+          <p class="eyebrow">Bot settings</p>
+          <h1 id="settings-heading"></h1>
+          <p id="bot-meta" class="lede"></p>
+          <button type="button" id="close-settings" class="text-btn">Back to the chat</button>
+        </header>
+        <p class="lede">This screen is for the bot, not the conversation. Saving here does not rewrite its chats. Changing one memory line leaves the others.</p>
+        <p id="settings-note" class="settings-note" role="status" hidden></p>
+
+        <form id="settings-form" class="settings">
+          <label>Name
+            <input id="settings-name" maxlength="80" required />
+          </label>
+          <label>Connection
+            <select id="settings-endpoint"></select>
+          </label>
+          <label>Model name <span class="hint">optional</span>
+            <input id="settings-model" maxlength="120" placeholder="uses the connection" />
+          </label>
+          <label>How much chat it sees <span class="hint">tokens (default 24000)</span>
+            <input id="settings-context" type="number" min="512" max="1000000" step="1" inputmode="numeric" />
+          </label>
+          <p class="form-note">Older messages stay saved. This number is only how much of the recent chat is sent with the next reply.</p>
+          <div class="form-actions">
+            <button type="submit">Save</button>
+          </div>
+        </form>
+
+        <section id="memory" class="settings-block" aria-labelledby="memory-heading">
+          <h2 id="memory-heading">Memory</h2>
+          <p class="form-note">Memory is files on this computer. The index only points at topic files. Open a topic to read its lines. Change or drop one line. The other lines stay, and a chat is not rewritten.</p>
+          <ul id="memory-index-list" class="entity-list"></ul>
+          <p id="memory-empty" class="empty-inline">No topic files. A new line starts one. The index only points at those files.</p>
+          <div id="memory-topic" hidden>
+            <button type="button" id="memory-back" class="text-btn">Index</button>
+            <h3 id="memory-topic-title"></h3>
+            <ul id="memory-list" class="schedule-list"></ul>
+            <p id="memory-topic-empty" class="empty-inline" hidden>This topic file has no lines.</p>
+          </div>
+          <form id="memory-form" class="stack-form">
+            <label>A line
+              <input id="memory-text" maxlength="500" required placeholder="one line this bot should remember" />
+            </label>
+            <div class="form-actions">
+              <button type="submit">Remember</button>
+            </div>
+            <p id="memory-error" class="form-error" role="alert" hidden></p>
+          </form>
+        </section>
+
+        <section id="bot-projects" class="settings-block" aria-labelledby="bot-projects-heading">
+          <h2 id="bot-projects-heading">Projects</h2>
+          <p class="form-note">A project is a named pile of files for this bot only. The files stay on this computer. Uploading or removing one does not change a chat.</p>
+          <form id="bot-project-form" class="stack-form">
+            <label>Name
+              <input id="bot-project-name" maxlength="80" required placeholder="Kiln notes" />
+            </label>
+            <div class="form-actions">
+              <button type="submit">Create project</button>
+            </div>
+            <p id="bot-project-error" class="form-error" role="alert" hidden></p>
+          </form>
+          <ul id="bot-project-list" class="entity-list"></ul>
+          <p id="bot-project-empty" class="empty-inline">No projects for this bot. Create one, then upload files.</p>
+          <div id="bot-project-open" hidden>
+            <h3 id="bot-project-title"></h3>
+            <form id="bot-project-upload" class="stack-form">
+              <label>Files
+                <input id="bot-project-files" type="file" multiple />
+              </label>
+              <div class="form-actions">
+                <button type="submit">Upload</button>
+              </div>
+            </form>
+            <ul id="bot-project-files-list" class="schedule-list"></ul>
+            <p id="bot-project-files-empty" class="empty-inline">No files in this project yet.</p>
+            <div class="form-actions">
+              <button type="button" id="bot-project-remove" class="danger">Remove project</button>
+            </div>
+          </div>
+        </section>
+
+        <section id="schedules" class="settings-block" aria-labelledby="schedules-heading">
+          <div class="section-head">
+            <h2 id="schedules-heading">Schedules</h2>
+            <button type="button" id="toggle-schedule" class="text-btn">Add</button>
+          </div>
+          <p class="form-note">A schedule runs a saved prompt on a timer. It writes the job log, not a chat.</p>
+          <form id="schedule-form" class="stack-form" hidden>
+            <label>Prompt
+              <textarea id="schedule-prompt" rows="2" maxlength="4000" required placeholder="What should this bot do on its own?"></textarea>
+            </label>
+            <label>When
+              <select id="schedule-kind">
+                <option value="interval">Every N minutes</option>
+                <option value="cron">Cron, local time</option>
+              </select>
+            </label>
+            <label id="schedule-every-label">Minutes
+              <input id="schedule-every" type="number" min="1" max="1440" value="1" />
+            </label>
+            <label id="schedule-cron-label" hidden>Cron
+              <input id="schedule-cron" maxlength="80" placeholder="*/15 * * * *" spellcheck="false" />
+            </label>
+            <p class="form-note">Five fields are minute, hour, day, month, weekday, in local time. A stopped app runs a due slot once when it starts again, and does not run that slot twice.</p>
+            <div class="form-actions">
+              <button type="submit">Save schedule</button>
+              <button type="button" id="cancel-schedule" class="ghost">Cancel</button>
+            </div>
+            <p id="schedule-error" class="form-error" role="alert" hidden></p>
+          </form>
+          <ul id="schedule-list" class="schedule-list"></ul>
+          <p id="schedule-empty" class="empty-inline">No schedules. Add one to run a prompt on a timer. Chats are not part of the job.</p>
+          <h3 id="job-log-heading" class="job-heading">Job log</h3>
+          <ul id="job-log" class="job-log"></ul>
+          <p id="job-empty" class="empty-inline">Nothing has fired yet.</p>
+        </section>
+
+        <section id="watches" class="settings-block" aria-labelledby="watch-heading">
+          <h2 id="watch-heading">Tell me when</h2>
+          <form id="watch-form" class="stack-form">
+            <label>When
+              <select id="watch-kind">
+                <option value="message">A new message</option>
+                <option value="job_failed">A job that failed</option>
+              </select>
+            </label>
+            <p class="form-note">One notice, from this computer. It fires once. You do not have to leave this page open or watch for it.</p>
+            <div class="form-actions">
+              <button type="submit">Tell me</button>
+            </div>
+            <p id="watch-note" class="form-note"></p>
+            <p id="watch-error" class="form-error" role="alert" hidden></p>
+          </form>
+        </section>
+
+        <section id="skills" class="settings-block" aria-labelledby="skills-heading">
+          <div class="section-head">
+            <h2 id="skills-heading">Skills</h2>
+            <button type="button" id="toggle-skill" class="text-btn">Add</button>
+          </div>
+          <p class="form-note">A skill is a markdown note any bot can follow. Saving one does not change a chat.</p>
+          <form id="skill-form" class="stack-form" hidden>
+            <label>Name
+              <input id="skill-name" maxlength="48" required placeholder="desk-notes" />
+            </label>
+            <label>What it is for
+              <input id="skill-description" maxlength="200" placeholder="one plain line" />
+            </label>
+            <label>What to do
+              <textarea id="skill-body" rows="5" placeholder="Write the steps in markdown."></textarea>
+            </label>
+            <p class="form-note">Add one in markdown. The bot can use it on the next reply.</p>
+            <div class="form-actions">
+              <button type="submit">Save skill</button>
+              <button type="button" id="cancel-skill" class="ghost">Cancel</button>
+            </div>
+            <p id="skill-error" class="form-error" role="alert" hidden></p>
+          </form>
+          <ul id="skill-list" class="entity-list"></ul>
+          <p id="skill-empty" class="empty-inline">No skills yet. Add one in markdown. The bot can use it on the next reply.</p>
+
+          <div class="section-head">
+            <h2 id="proposals-heading">Proposals</h2>
+            <button type="button" id="run-night" class="text-btn">Run night pass</button>
+          </div>
+          <p class="form-note">A night pass can propose a skill or a memory line. It does not install it.</p>
+          <ul id="proposal-list" class="entity-list"></ul>
+          <p id="proposal-empty" class="empty-inline">No proposals.</p>
+          <p id="proposal-error" class="form-error" role="alert" hidden></p>
+        </section>
+
+        <section class="settings-block" aria-labelledby="tools-heading">
+          <h2 id="tools-heading">What it can do</h2>
+          <ul id="tool-list" class="plain-list">
+            <li>Files on this computer. List a folder, read a file, or write a file.</li>
+            <li>A command on this computer.</li>
+            <li>Web search on this computer.</li>
+            <li>A command on a Linux computer you saved.</li>
+            <li>A command on a Windows computer you saved.</li>
+            <li>A question with choices you can tap. You can still type.</li>
+            <li>A file or a picture in the chat.</li>
+            <li>Files in a project this bot can use. List them, or read one.</li>
+            <li>Memory files. Read the index, then one topic file.</li>
+          </ul>
+        </section>
+
+        <section class="settings-block">
+          <h2>Delete this bot</h2>
+          <p class="form-note">You have to type the bot's name. That deletes this bot and its chats. Other bots stay.</p>
+          <button type="button" id="remove-bot" class="danger">Remove bot</button>
+        </section>
+      </section>
+
+      <section id="screen-connections" class="screen" hidden>
+        <header class="screen-intro">
+          <p class="eyebrow">Connections</p>
+          <h1>Where a bot sends messages</h1>
+          <p class="lede">A connection is a server that can chat. It is not a conversation. Chats stay on this computer.</p>
+        </header>
+        <div class="section-head">
+          <h2 id="endpoints-heading">Saved connections</h2>
+          <button type="button" id="toggle-endpoint" class="text-btn">Add</button>
+        </div>
+        <form id="endpoint-form" class="stack-form" hidden>
+          <label>Name
+            <input id="endpoint-name" name="name" maxlength="80" required placeholder="Home server" />
+          </label>
+          <label>Address
+            <input id="endpoint-url" name="base_url" type="url" required placeholder="http://localhost:8080/v1" />
+          </label>
+          <label>Key <span class="hint">optional</span>
+            <input id="endpoint-key" name="api_key" type="password" autocomplete="off" placeholder="only if the server asks" />
+          </label>
+          <label class="check" id="endpoint-clear-key-label" hidden>
+            <input id="endpoint-clear-key" type="checkbox" />
+            Clear the saved key
+          </label>
+          <label>Model name <span class="hint">optional</span>
+            <input id="endpoint-model" name="model" maxlength="120" placeholder="your-model" />
+          </label>
+          <label>At once <span class="hint">1–32</span>
+            <input id="endpoint-parallel" name="max_parallel" type="number" min="1" max="32" step="1" value="1" required />
+          </label>
+          <p class="form-note">EasyAgent sends each message to this address. Leave the key blank to keep the one already saved. At once is how many replies may use this connection together. Extra chats wait in line.</p>
+          <div class="form-actions">
+            <button type="submit" id="endpoint-submit">Save</button>
+            <button type="button" id="cancel-endpoint" class="ghost">Cancel</button>
+          </div>
+          <p id="endpoint-error" class="form-error" role="alert" hidden></p>
+        </form>
+        <ul id="endpoint-list" class="entity-list"></ul>
+        <p id="endpoint-empty" class="empty-inline">No connections yet. Add the address of a server that can chat.</p>
+      </section>
+
+      <section id="screen-rooms" class="screen" hidden>
+        <div id="room-picker">
+          <header class="screen-intro">
+            <p class="eyebrow">Rooms</p>
+            <h1>A separate conversation</h1>
+            <p class="lede">A room is not a private chat. Each bot you add replies here, and their own chats stay as they were.</p>
+          </header>
+          <div class="section-head">
+            <h2 id="rooms-heading">Rooms</h2>
+            <button type="button" id="toggle-room" class="text-btn">Add</button>
+          </div>
+          <form id="room-form" class="stack-form" hidden>
+            <label>Name
+              <input id="room-name" name="name" maxlength="80" required placeholder="Desk" />
+            </label>
+            <p class="form-note">A room has its own transcript. The bots you add keep their private chats.</p>
+            <div class="form-actions">
+              <button type="submit">Create room</button>
+              <button type="button" id="cancel-room" class="ghost">Cancel</button>
+            </div>
+            <p id="room-form-error" class="form-error" role="alert" hidden></p>
+          </form>
+          <ul id="room-list" class="entity-list"></ul>
+          <p id="room-empty" class="empty-inline">No rooms yet. Create one, then add two or more bots.</p>
+        </div>
+        <section id="room-stage" hidden>
+          <header class="room-bar">
+            <div class="bot-identity">
+              <p class="eyebrow">Room</p>
+              <h1 id="room-title"></h1>
+              <p id="room-meta" class="meta"></p>
+              <button type="button" id="rooms-back" class="text-btn">All rooms</button>
+            </div>
+            <div class="room-members-wrap">
+              <ul id="room-members" class="member-row"></ul>
+              <form id="room-add-form" class="room-add">
+                <label>Add a bot
+                  <select id="room-add-bot"></select>
+                </label>
+                <button type="submit">Add</button>
+              </form>
+            </div>
+          </header>
+          <p id="room-error" class="form-error" role="alert" hidden></p>
+          <div id="room-thread">
+            <div class="thread-scroll" id="room-scroll">
+              <div id="room-empty-thread">
+                <h2>Nothing in this room yet</h2>
+                <p>Add the bots, then send. Each one replies here, in order. This does not write their private chats.</p>
+              </div>
+              <ol id="room-messages"></ol>
+            </div>
+            <div class="composer-wrap">
+              <p id="room-context" class="context-note"></p>
+              <form id="room-composer">
+                <label class="sr-only" for="room-draft">Message the room</label>
+                <textarea id="room-draft" rows="3" placeholder="Message the room. Enter to send. Each bot replies in turn."></textarea>
+                <div class="composer-actions">
+                  <button type="submit" id="room-send">Send</button>
+                </div>
+              </form>
+            </div>
+          </div>
+        </section>
+      </section>
+
+      <section id="screen-projects" class="screen" hidden>
+        <div id="project-picker">
+          <header class="screen-intro">
+            <p class="eyebrow">Projects</p>
+            <h1>A named pile of files</h1>
+            <p class="lede">A group project is not a room and not a chat. You choose which bots can use the files. The files stay on this computer.</p>
+          </header>
+          <div class="section-head">
+            <h2 id="projects-heading">Group projects</h2>
+            <button type="button" id="toggle-project" class="text-btn">Add</button>
+          </div>
+          <form id="project-form" class="stack-form" hidden>
+            <label>Name
+              <input id="project-name" maxlength="80" required placeholder="Shop manual" />
+            </label>
+            <p class="form-note">Create it, then open it to upload files and choose the bots. Rooms stay as they are.</p>
+            <div class="form-actions">
+              <button type="submit">Create project</button>
+              <button type="button" id="cancel-project" class="ghost">Cancel</button>
+            </div>
+            <p id="project-form-error" class="form-error" role="alert" hidden></p>
+          </form>
+          <ul id="project-list" class="entity-list"></ul>
+          <p id="project-empty" class="empty-inline">No group projects yet. Create one, then choose which bots can use it.</p>
+        </div>
+        <section id="project-open" hidden>
+          <header class="screen-intro">
+            <p class="eyebrow">Group project</p>
+            <h1 id="project-title"></h1>
+            <p class="lede">These files stay on this computer. A bot you add here can list and read them. Removing a bot from this project does not remove it from a room.</p>
+            <button type="button" id="projects-back" class="text-btn">All projects</button>
+          </header>
+          <p id="project-error" class="form-error" role="alert" hidden></p>
+          <section class="settings-block">
+            <h2>Files</h2>
+            <form id="project-upload" class="stack-form">
+              <label>Files
+                <input id="project-files" type="file" multiple />
+              </label>
+              <div class="form-actions">
+                <button type="submit">Upload</button>
+              </div>
+            </form>
+            <ul id="project-files-list" class="schedule-list"></ul>
+            <p id="project-files-empty" class="empty-inline">No files yet. Upload one or more. A chat is not changed.</p>
+          </section>
+          <section class="settings-block">
+            <h2>Bots who can use this</h2>
+            <form id="project-add-form" class="stack-form">
+              <label>Bot
+                <select id="project-add-bot"></select>
+              </label>
+              <div class="form-actions">
+                <button type="submit">Add bot</button>
+              </div>
+            </form>
+            <ul id="project-members" class="entity-list"></ul>
+            <p id="project-members-empty" class="empty-inline">No bots yet. A bot that is not added cannot read these files.</p>
+          </section>
+          <section class="settings-block">
+            <h2>Remove this project</h2>
+            <p class="form-note">You have to type the project's name. Rooms and chats stay.</p>
+            <button type="button" id="project-remove" class="danger">Remove project</button>
+          </section>
+        </section>
+      </section>
+
+      <section id="screen-computers" class="screen" hidden>
+        <header class="screen-intro">
+          <p class="eyebrow">Computers</p>
+          <h1>Machines a bot can use</h1>
+          <p class="lede">A saved computer is a Linux or Windows machine, not a chat. The sign-in prompt is not written into a transcript.</p>
+        </header>
+        <div class="section-head">
+          <h2 id="computers-heading">Saved computers</h2>
+          <button type="button" id="toggle-computer" class="text-btn">Add</button>
+        </div>
+        <form id="computer-form" class="stack-form" hidden>
+          <label>Name
+            <input id="computer-name" maxlength="80" required placeholder="Workshop" />
+          </label>
+          <label>Kind
+            <select id="computer-kind">
+              <option value="linux">Linux computer</option>
+              <option value="windows">Windows computer</option>
+            </select>
+          </label>
+          <label>Host
+            <input id="computer-host" maxlength="253" required placeholder="the name you use to reach it" />
+          </label>
+          <label>Port <span class="hint">optional</span>
+            <input id="computer-port" type="number" min="1" max="65535" step="1" />
+          </label>
+          <p class="form-note">Saving opens a sign-in prompt for the username and password. That prompt is not written into the chat.</p>
+          <div class="form-actions">
+            <button type="submit" id="computer-submit">Save</button>
+            <button type="button" id="cancel-computer" class="ghost">Cancel</button>
+          </div>
+          <p id="computer-error" class="form-error" role="alert" hidden></p>
+        </form>
+        <ul id="computer-list" class="entity-list"></ul>
+        <p id="computer-empty" class="empty-inline">No computers yet. Add a Linux or Windows computer the bot can use.</p>
+      </section>
+
+      <section id="screen-direction" class="screen" hidden>
+        <header class="screen-intro">
+          <p class="eyebrow">Direction</p>
+          <h1>What every bot is told</h1>
+          <p class="lede">This note is included in every request. Saving it does not change stored chats.</p>
+        </header>
+        <textarea id="direction-text" rows="16"></textarea>
+        <div class="form-actions">
+          <button type="button" id="save-direction">Save direction</button>
+        </div>
+        <p id="direction-note" class="form-note"></p>
+        <p id="direction-error" class="form-error" role="alert" hidden></p>
+      </section>
+    </main>
+  </div>
+
+  <dialog id="signin-dialog">
+    <form id="signin-form">
+      <p class="eyebrow">Sign in</p>
+      <h2>Username and password</h2>
+      <p class="form-note">This prompt only receives the sign-in. It is not written into the chat.</p>
+      <label>Username
+        <input id="signin-user" maxlength="80" autocomplete="off" />
+      </label>
+      <label>Password <span class="hint" id="signin-password-hint">or a key</span>
+        <input id="signin-password" type="password" autocomplete="off" />
+      </label>
+      <label id="signin-key-label">Key <span class="hint">Linux, if you sign in with a key</span>
+        <textarea id="signin-key" rows="4" spellcheck="false" autocomplete="off"></textarea>
+      </label>
+      <p class="form-note">Leave these blank when you are only changing the name or host, and the saved sign-in stays.</p>
+      <div class="form-actions">
+        <button type="submit">Save sign-in</button>
+        <button type="button" id="signin-cancel" class="ghost">Cancel</button>
+      </div>
+      <p id="signin-error" class="form-error" role="alert" hidden></p>
+    </form>
+  </dialog>
+
+  <dialog id="confirm-dialog">
+    <form id="confirm-form">
+      <p class="eyebrow" id="confirm-kicker">Confirm</p>
+      <h3 id="confirm-title"></h3>
+      <p id="confirm-copy"></p>
+      <label>Type <strong id="confirm-name"></strong> to confirm
+        <input id="confirm-input" autocomplete="off" />
+      </label>
+      <div class="form-actions">
+        <button type="button" id="confirm-cancel" class="ghost">Cancel</button>
+        <button type="submit" id="confirm-go" class="danger" disabled>Remove</button>
+      </div>
+      <p id="confirm-error" class="form-error" role="alert" hidden></p>
+    </form>
+  </dialog>
+
+  <dialog id="info-dialog">
+    <div class="dialog-head">
+      <h3 id="info-title"></h3>
+      <button type="button" id="info-close" class="ghost">Close</button>
+    </div>
+    <div id="info-body"></div>
+  </dialog>
+
+  <script src="/static/app.js?v=35"></script>
+</body>
+</html>

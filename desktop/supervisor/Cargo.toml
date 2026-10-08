@@ -1,0 +1,13 @@
+[package]
+name = "easyagent-supervisor"
+version = "0.1.0"
+description = "Start or attach to the local EasyAgent server."
+edition = "2021"
+license = "MIT"
+publish = false
+
+[dependencies]
+serde_json = "1"
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"

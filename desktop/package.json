@@ -1,0 +1,14 @@
+{
+  "name": "easyagent-desktop",
+  "private": true,
+  "version": "0.1.0",
+  "description": "Tauri window around the EasyAgent server.",
+  "scripts": {
+    "dev": "tauri dev",
+    "build": "tauri build",
+    "test": "cargo test -p easyagent-supervisor"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "^2"
+  }
+}

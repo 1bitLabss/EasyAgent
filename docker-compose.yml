@@ -1,0 +1,12 @@
+# This stack is the relay, not a second EasyAgent.
+# Set EASYAGENT_TOKEN in the host. Do not add a volume.
+services:
+  relay:
+    build: .
+    image: easyagent-relay
+    ports:
+      - "44731:44731"
+    environment:
+      PORT: "44731"
+      EASYAGENT_TOKEN: ${EASYAGENT_TOKEN:?set the shared token}
+    restart: unless-stopped

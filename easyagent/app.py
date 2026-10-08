@@ -30,7 +30,7 @@ from easyagent.context import (
     prepare_context,
 )
 from easyagent.prompt import build_system
-from easyagent.recall import scan_chats
+from easyagent.turnctx import model_turn, visible_prepare
 from easyagent.schedule import ScheduleError, describe, parse_cron, schedule_loop
 from easyagent.search import SearchError
 from easyagent.handoff import take_file
@@ -55,6 +55,21 @@ from easyagent.subagent import (
 )
 from easyagent.tunnel import relay_loop
 from easyagent.unread import mark_chat_read, mark_room_read, unread_snapshot
+from easyagent.learn import (
+    approve_candidate,
+    chats_active,
+    learn_loop,
+    lesson_block,
+    mark_origin,
+    panel as learning_panel,
+    rank_skills,
+    request_stop as request_learn_stop,
+    rollback_for_bot,
+    rollback_latest,
+    set_manual,
+    set_paused,
+    sleep_once,
+)
 from easyagent.skills import RESERVED_SLUGS, extract_skills, pack_skills, slugify
 from easyagent.mascot import clean_face_color, face_color_for
 from easyagent.store import Store, StoreError, message_index, new_id, now_iso, reaction_signal
@@ -62,6 +77,7 @@ from easyagent.limits import MAX_CONTEXT_TOKENS, MAX_STORED_MESSAGE_CHARS, MIN_C
 from easyagent.selfinfo import ensure_own_files, own_files_prompt
 
 STATIC_DIR = Path(__file__).resolve().parent / "static"
+UI_DIR = Path(__file__).resolve().parent / "ui"
 _STATIC_MEDIA = {
     ".html": "text/html; charset=utf-8",
     ".js": "text/javascript; charset=utf-8",
@@ -128,6 +144,9 @@ def public_bot(store: Store, bot: dict) -> dict:
         "created_at": bot.get("created_at"),
         "face_color": stored or face_color_for(bot["id"]),
         "face_color_set": bool(stored),
+        "check_enabled": bot.get("check_enabled") is not False,
+        "learn_paused": bot.get("learn_paused") is True,
+        "learn_manual": bot.get("learn_manual") is True,
     }
 
 
@@ -251,6 +270,22 @@ class BotPatch(BaseModel):
     model: str | None = None
     context_tokens: int | None = None
     face_color: str | None = None
+    check_enabled: bool | None = None
+
+
+class LearnFlag(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+    on: bool = False
+
+
+class RetentionIn(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+    retain_days: int | None = None
+    keep_forever: bool | None = None
+    pruning: bool | None = None
+    window_start: str | None = None
+    window_end: str | None = None
+    idle_minutes: int | None = None
 
 
 class MessageIn(BaseModel):
@@ -342,6 +377,7 @@ class ReadIn(BaseModel):
 async def _lifespan(app: FastAPI):
     stop = asyncio.Event()
     task = asyncio.create_task(schedule_loop(app.state.store, stop))
+    learn_task = asyncio.create_task(learn_loop(app.state.store, stop))
     relay_task = asyncio.create_task(relay_loop(app, stop))
     try:
         yield
@@ -351,12 +387,15 @@ async def _lifespan(app: FastAPI):
         for worker in running:
             worker.cancel()
         relay_task.cancel()
+        learn_task.cancel()
         task.cancel()
         for worker in running:
             with suppress(asyncio.CancelledError, Exception):
                 await worker
         with suppress(asyncio.CancelledError):
             await relay_task
+        with suppress(asyncio.CancelledError):
+            await learn_task
         with suppress(asyncio.CancelledError):
             await task
 
@@ -385,7 +424,7 @@ def create_app(data_dir: str | Path | None = None) -> FastAPI:
                 headers={"Cache-Control": "no-store"},
             )
         response = await call_next(request)
-        if request.url.path == "/" or request.url.path.startswith("/api"):
+        if request.url.path in {"/", "/classic"} or request.url.path.startswith("/api"):
             response.headers["Cache-Control"] = "no-store"
         return response
 
@@ -402,9 +441,32 @@ def create_app(data_dir: str | Path | None = None) -> FastAPI:
             parts.append(f"{loc}: {message}" if loc else message)
         return JSONResponse({"detail": "; ".join(parts) or "Invalid request."}, status_code=422)
 
+    def _classic_page():
+        return FileResponse(STATIC_DIR / "index.html", headers={"Cache-Control": "no-store"})
+
+    def _react_page() -> Path | None:
+        page = UI_DIR / "index.html"
+        if os.environ.get("EASYAGENT_UI", "").strip().lower() == "classic":
+            return None
+        return page if page.is_file() else None
+
     @app.get("/")
     def index():
-        return FileResponse(STATIC_DIR / "index.html", headers={"Cache-Control": "no-store"})
+        page = _react_page()
+        if page is None:
+            return _classic_page()
+        return FileResponse(page, headers={"Cache-Control": "no-store"})
+
+    @app.get("/classic")
+    def classic_index():
+        return _classic_page()
+
+    @app.get("/ui/{asset_path:path}")
+    def ui_asset(asset_path: str):
+        target = contained_file(UI_DIR, asset_path)
+        if target is None or not target.is_file():
+            raise HTTPException(404, "That file is not there.")
+        return FileResponse(target)
 
     @app.get("/favicon.ico")
     def favicon():
@@ -494,6 +556,8 @@ def create_app(data_dir: str | Path | None = None) -> FastAPI:
             context_tokens_set="context_tokens" in fields,
             face_color=clean_face_color(body.face_color) if "face_color" in fields else None,
             face_color_set="face_color" in fields,
+            check_enabled=body.check_enabled if "check_enabled" in fields else None,
+            check_enabled_set="check_enabled" in fields,
         )
         chats_after = _snapshot_chats(store, bot_id)
         if chats_before != chats_after:
@@ -567,13 +631,85 @@ def create_app(data_dir: str | Path | None = None) -> FastAPI:
     def list_chats(bot_id: str):
         return store.list_chats(bot_id)
 
+    @app.get("/api/bots/{bot_id}/ongoing")
+    def get_ongoing(bot_id: str, window: int | None = 80):
+        """The bot's one conversation. Older transcripts stay on disk."""
+        return _public_chat(store, store.ongoing_chat(bot_id), window=window)
+
     @app.post("/api/bots/{bot_id}/chats")
     def create_chat(bot_id: str):
         return _public_chat(store, store.get_chat(bot_id, store.create_chat(bot_id)["id"]))
 
+    @app.delete("/api/bots/{bot_id}/chats/{chat_id}")
+    def remove_chat(bot_id: str, chat_id: str):
+        """The person deletes one transcript. The model has no such action."""
+        safe_bot = _safe_id(bot_id)
+        safe_chat = _safe_id(chat_id)
+        bot_file = store.bots_dir / safe_bot / "bot.json"
+        if not bot_file.is_file():
+            raise HTTPException(404, "Bot not found.")
+        bot_before = bot_file.read_bytes()
+        chats_before = _snapshot_chats(store, bot_id)
+        target = f"{safe_chat}.json"
+        if target not in chats_before:
+            store.get_chat(bot_id, chat_id)
+        kept_before = {name: blob for name, blob in chats_before.items() if name != target}
+        other_bots = {
+            bot["id"]: _snapshot_chats(store, bot["id"])
+            for bot in store.list_bots()
+            if bot["id"] != safe_bot
+        }
+        rooms_before = _snapshot_rooms(store)
+        endpoints_before = store.endpoints_path.read_bytes()
+        skills_before = _snapshot_skills(store)
+        direction_before = store.direction_path.read_bytes() if store.direction_path.exists() else b""
+        deleted = store.delete_chat(bot_id, chat_id)
+        chats_after = _snapshot_chats(store, bot_id)
+        if target in chats_after:
+            raise HTTPException(500, "Deleting a chat left the transcript on disk.")
+        if chats_after != kept_before:
+            raise HTTPException(500, "Deleting a chat changed another chat.")
+        if bot_file.read_bytes() != bot_before:
+            raise HTTPException(500, "Deleting a chat changed the bot.")
+        for other_id, snapshot in other_bots.items():
+            if _snapshot_chats(store, other_id) != snapshot:
+                raise HTTPException(500, "Deleting a chat changed another bot's chats.")
+        if _snapshot_rooms(store) != rooms_before:
+            raise HTTPException(500, "Deleting a chat changed a room.")
+        if store.endpoints_path.read_bytes() != endpoints_before:
+            raise HTTPException(500, "Deleting a chat changed a connection.")
+        if _snapshot_skills(store) != skills_before or (
+            store.direction_path.read_bytes() if store.direction_path.exists() else b""
+        ) != direction_before:
+            raise HTTPException(500, "Deleting a chat changed skills or direction.")
+        return {"deleted": deleted["id"]}
+
     @app.get("/api/bots/{bot_id}/chats/{chat_id}")
-    def get_chat(bot_id: str, chat_id: str):
-        return _public_chat(store, store.get_chat(bot_id, chat_id))
+    def get_chat(bot_id: str, chat_id: str, window: int | None = None):
+        return _public_chat(store, store.get_chat(bot_id, chat_id), window=window)
+
+    @app.get("/api/bots/{bot_id}/chats/{chat_id}/messages")
+    def chat_messages(bot_id: str, chat_id: str, before: int = 0, limit: int = 80):
+        """Older messages, read only. `before` is the first index the page already has."""
+        chat = store.get_chat(bot_id, chat_id)
+        messages = list(chat.get("messages") or [])
+        end = before
+        if end < 0:
+            end = 0
+        if end > len(messages):
+            end = len(messages)
+        size = limit
+        if size < 1:
+            size = 1
+        if size > 200:
+            size = 200
+        start = max(0, end - size)
+        return {"messages": messages[start:end], "start": start, "end": end, "total": len(messages)}
+
+    @app.post("/api/bots/{bot_id}/chats/{chat_id}/fresh")
+    def fresh_chat(bot_id: str, chat_id: str):
+        """Clear what the model sees. The transcript is not deleted."""
+        return _public_chat(store, store.start_fresh(bot_id, chat_id))
 
     @app.post("/api/bots/{bot_id}/chats/{chat_id}/read")
     def read_chat(bot_id: str, chat_id: str, body: ReadIn | None = None):
@@ -658,6 +794,7 @@ def create_app(data_dir: str | Path | None = None) -> FastAPI:
                 raise HTTPException(500, "A reaction changed the message text.")
             if len(chat.get("messages") or []) != len(texts):
                 raise HTTPException(500, "A reaction changed the transcript.")
+            _note_thumb(store, bot_id, chat.get("messages") or [], message_id)
             landed = _reaction_on_latest(current.get("messages") or [], chat.get("messages") or [], message_id)
             if landed is not None:
                 await _ack_chat_reaction(store, bot_id, chat_id, landed)
@@ -800,6 +937,13 @@ def create_app(data_dir: str | Path | None = None) -> FastAPI:
                 raise HTTPException(500, "A reaction changed the transcript.")
             if _snapshot_bots(store) != bots_before:
                 raise HTTPException(500, "A reaction changed a bot's private chats.")
+            speaker = ""
+            for item in room.get("messages") or []:
+                if item.get("id") == message_id:
+                    speaker = str(item.get("speaker") or "")
+                    break
+            if speaker and speaker != "user":
+                _note_thumb(store, speaker, room.get("messages") or [], message_id, quarantine=True)
             landed = _reaction_on_latest(current.get("messages") or [], room.get("messages") or [], message_id)
             if landed is not None:
                 await _ack_room_reaction(store, room_id, landed)
@@ -1095,10 +1239,72 @@ def create_app(data_dir: str | Path | None = None) -> FastAPI:
         slug = slugify(body.name)
         if not slug or slug in RESERVED_SLUGS:
             raise StoreError("Type a short name for the skill, like desk-notes. Chats were not changed.", 400)
-        record = store.save_skill(parsed)
+        record = _save_user_skill(store, parsed)
         if _snapshot_bots(store) != bots_before:
             raise HTTPException(500, "Saving a skill changed a bot or a chat.")
         return {"name": record["name"], "description": record.get("description") or "", "body": record.get("body") or ""}
+
+    @app.get("/api/bots/{bot_id}/learning")
+    def get_learning(bot_id: str):
+        return learning_panel(store, store.get_bot(bot_id))
+
+    @app.post("/api/bots/{bot_id}/learning/pause")
+    def learning_pause(bot_id: str, body: LearnFlag):
+        set_paused(store, bot_id, body.on)
+        return learning_panel(store, store.get_bot(bot_id))
+
+    @app.post("/api/bots/{bot_id}/learning/manual")
+    def learning_manual(bot_id: str, body: LearnFlag):
+        set_manual(store, bot_id, body.on)
+        return learning_panel(store, store.get_bot(bot_id))
+
+    @app.post("/api/bots/{bot_id}/learning/rollback")
+    def learning_rollback(bot_id: str):
+        store.get_bot(bot_id)
+        rollback_latest(store, bot_id)
+        return learning_panel(store, store.get_bot(bot_id))
+
+    @app.post("/api/bots/{bot_id}/learning/rollback/{ledger_id}")
+    def learning_rollback_one(bot_id: str, ledger_id: str):
+        store.get_bot(bot_id)
+        rollback_for_bot(store, bot_id, ledger_id)
+        return learning_panel(store, store.get_bot(bot_id))
+
+    @app.put("/api/bots/{bot_id}/notes/retention")
+    def put_note_retention(bot_id: str, body: RetentionIn):
+        from easyagent.journal import save_retention
+
+        save_retention(store, bot_id, body.model_dump())
+        return learning_panel(store, store.get_bot(bot_id))
+
+    @app.post("/api/bots/{bot_id}/notes/habits/{entry_id}/approve")
+    def approve_note_habit(bot_id: str, entry_id: str):
+        from easyagent.journal import approve_habit
+
+        chats_before = _snapshot_chats(store, bot_id)
+        approve_habit(store, bot_id, entry_id)
+        if _snapshot_chats(store, bot_id) != chats_before:
+            raise HTTPException(500, "Approving a habit changed a chat.")
+        return learning_panel(store, store.get_bot(bot_id))
+
+    @app.post("/api/bots/{bot_id}/learning/approve/{candidate_id}")
+    def learning_approve(bot_id: str, candidate_id: str):
+        bot = store.get_bot(bot_id)
+        approve_candidate(store, bot, candidate_id)
+        return learning_panel(store, store.get_bot(bot_id))
+
+    @app.post("/api/bots/{bot_id}/learning/stop")
+    def learning_stop(bot_id: str):
+        store.get_bot(bot_id)
+        request_learn_stop()
+        return {"stopped": True}
+
+    @app.post("/api/bots/{bot_id}/learning/sleep")
+    async def learning_sleep(bot_id: str):
+        bot = store.get_bot(bot_id)
+        if chats_active(store):
+            raise HTTPException(409, "A chat is running.")
+        return await sleep_once(store, mock=False, runs=3, bot_id=bot["id"])
 
     @app.get("/api/direction")
     def get_direction():
@@ -1388,25 +1594,28 @@ def _chat_budget(store: Store, chat: dict) -> int:
 
 
 def _persist_context(store: Store, chat: dict) -> dict:
-    prepared = prepare_context(
-        chat["messages"],
-        chat.get("summary") or "",
-        int(chat.get("summarized_through") or 0),
-        _chat_budget(store, chat),
-    )
+    prepared = visible_prepare(chat, _chat_budget(store, chat))
     chat["summary"] = prepared.summary
     chat["summarized_through"] = prepared.summarized_through
     return prepared.stats
 
 
-def _public_chat(store: Store, chat: dict) -> dict:
-    """Full transcript plus the bounded view. Reading a chat does not write it."""
-    prepared = prepare_context(
-        chat.get("messages") or [],
-        chat.get("summary") or "",
-        int(chat.get("summarized_through") or 0),
-        _chat_budget(store, chat),
-    )
+def _public_chat(store: Store, chat: dict, window: int | None = None) -> dict:
+    """Transcript plus the bounded view. Reading a chat does not write it.
+
+    `window` returns only the recent tail. Omit it and every message is included.
+    """
+    prepared = visible_prepare(chat, _chat_budget(store, chat))
+    messages = list(chat.get("messages") or [])
+    shown = messages
+    start = 0
+    if window is not None:
+        size = int(window)
+        if size < 0:
+            size = 0
+        if len(messages) > size:
+            start = len(messages) - size
+            shown = messages[start:]
     return {
         "id": chat["id"],
         "bot_id": chat["bot_id"],
@@ -1415,7 +1624,10 @@ def _public_chat(store: Store, chat: dict) -> dict:
         "updated_at": chat.get("updated_at"),
         "summary": prepared.summary,
         "summarized_through": prepared.summarized_through,
-        "messages": chat.get("messages") or [],
+        "fresh_from": int(chat.get("fresh_from") or 0),
+        "messages": shown,
+        "message_count": len(messages),
+        "window_start": start,
         "context": prepared.stats,
         "run": public_run(chat),
     }
@@ -1521,41 +1733,91 @@ def public_computer(computer: dict) -> dict:
     }
 
 
+def _last_user_text(messages: list) -> str:
+    for message in reversed(messages or []):
+        if message.get("role") == "user":
+            return str(message.get("content") or "")
+    return ""
+
+
+def _skills_for_prompt(store: Store, bot_id: str, request: str) -> str:
+    """User skills first, then learned ones by measured success. Lessons only when one matches."""
+    text = pack_skills(rank_skills(store, store.list_skills()))
+    block = lesson_block(store, bot_id, request) if bot_id and request else ""
+    if not block:
+        return text
+    return f"{text}\n\n{block}" if text else block
+
+
+def _save_user_skill(store: Store, skill: dict) -> dict:
+    """A skill typed by the person, or saved from a reply fence. Learning does not use this."""
+    stored = store.save_skill(skill)
+    slug = stored.get("name") or ""
+    if slug:
+        mark_origin(store, slug, "user")
+    return stored
+
+
+def _note_thumb(store: Store, bot_id: str, messages: list, message_id: str, *, quarantine: bool = False) -> None:
+    """A thumbs-up or thumbs-down is an inbox note. It does not add a chat line."""
+    if not bot_id:
+        return
+    text = ""
+    emoji = ""
+    for item in messages or []:
+        if item.get("id") == message_id:
+            emoji = item.get("reaction") or ""
+            text = str(item.get("content") or "")
+            break
+    if emoji not in {"👍", "👎"}:
+        return
+    try:
+        from easyagent.learn import credit_named, observe
+
+        observe(
+            store,
+            bot_id,
+            f"The person marked a reply {emoji}.",
+            reason="thumb",
+            task=text,
+            quarantine=quarantine,
+        )
+        credit_named(store, text, emoji == "👍", "thumb")
+    except Exception:
+        return
+
+
 def _turn_messages(store: Store, bot_id: str, chat: dict) -> tuple[dict, list[dict]]:
     bot = store.get_bot(bot_id)
     endpoint = _require_endpoint(store, bot_id)
-    prepared = prepare_context(
-        chat["messages"],
-        chat.get("summary") or "",
-        int(chat.get("summarized_through") or 0),
-        bot_context_chars(bot),
-    )
+    view = model_turn(store, bot, chat, endpoint)
     others = ", ".join(other["name"] for other in store.list_bots() if other["id"] != bot["id"])
-    # After the user line is already stored. A miss leaves the prompt as it was.
-    recalled = scan_chats(store, bot_id, chat, prepared.summarized_through)
     ensure_own_files(store, bot_id)
     system = build_system(
         bot_name=bot["name"],
         direction=store.read_direction(),
-        summary=prepared.summary,
-        skills_text=pack_skills(store.list_skills()),
+        summary=view.summary,
+        skills_text=_skills_for_prompt(store, bot_id, _last_user_text(chat.get("messages") or [])),
         other_bots=others,
         computers=_computer_prompt(store),
         memory=_memory_prompt(store, bot_id),
-        recalled=recalled,
+        recalled=view.recalled,
         projects=_projects_prompt(store, bot_id),
         message_ids=message_index(chat.get("messages") or [], self_id=bot_id),
-        context_note=context_note(prepared.stats),
+        context_note=context_note(view.stats),
         own_files=own_files_prompt(store, bot_id, chat.get("id")),
+        earlier=view.earlier,
     )
-    source = (chat.get("messages") or [])[prepared.summarized_through :]
-    if len(source) == len(prepared.tail):
+    source = list(chat.get("messages") or [])[view.summarized_through :]
+    if len(source) >= len(view.tail):
+        source = source[len(source) - len(view.tail) :]
+    if len(source) == len(view.tail):
         tail = [
             _model_message(store, bot_id, chat["id"], stored, item)
-            for stored, item in zip(source, prepared.tail)
+            for stored, item in zip(source, view.tail)
         ]
     else:
-        tail = prepared.tail
+        tail = view.tail
     return endpoint, [{"role": "system", "content": system}, *tail]
 
 
@@ -1646,7 +1908,7 @@ def _memory_prompt(store: Store, bot_id: str) -> str:
     return "Index:\n" + "\n".join(f"- {slug}" for slug in slugs[:24])
 
 
-async def _complete_for_chat(store: Store, bot_id: str, chat: dict) -> tuple[str, list[str], list[str], str, str]:
+async def _complete_for_chat(store: Store, bot_id: str, chat: dict) -> tuple[str, list[str], list[str], str, str, bool, str, str]:
     bot = store.get_bot(bot_id)
     endpoint, messages = _turn_messages(store, bot_id, chat)
     conn = gate.bind_connection(endpoint, bot.get("name") or "")
@@ -1665,11 +1927,20 @@ async def _complete_for_chat(store: Store, bot_id: str, chat: dict) -> tuple[str
     visible, skills = extract_skills(settled.text)
     saved: list[str] = []
     for skill in skills:
-        stored = store.save_skill(skill)
+        stored = _save_user_skill(store, skill)
         saved.append(stored["name"])
     if not visible.strip() and not settled.choices and not settled.reacted:
         visible = "Saved skill: " + ", ".join(saved) if saved else "(empty reply)"
-    return visible, saved, list(settled.choices), settled.made or "", settled.thinking or "", settled.reacted
+    return (
+        visible,
+        saved,
+        list(settled.choices),
+        settled.made or "",
+        settled.thinking or "",
+        settled.reacted,
+        settled.check or "",
+        settled.lesson or "",
+    )
 
 
 def _labeled_room_messages(messages: list[dict]) -> list[dict]:
@@ -1780,7 +2051,7 @@ async def _complete_for_room_bot(store: Store, room: dict, bot_id: str) -> tuple
         bot_name=bot["name"],
         direction=store.read_direction(),
         summary=prepared.summary,
-        skills_text=pack_skills(store.list_skills()),
+        skills_text=_skills_for_prompt(store, bot["id"], _last_user_text(room.get("messages") or [])),
         room_note=note,
         computers=_computer_prompt(store),
         memory=_memory_prompt(store, bot["id"]),
@@ -1816,7 +2087,7 @@ async def _complete_for_room_bot(store: Store, room: dict, bot_id: str) -> tuple
         visible, skills = extract_skills(settled.text)
         saved: list[str] = []
         for skill in skills:
-            stored = store.save_skill(skill)
+            stored = _save_user_skill(store, skill)
             saved.append(stored["name"])
         if not visible.strip() and not settled.choices and not settled.reacted:
             visible = "Saved skill: " + ", ".join(saved) if saved else "(empty reply)"
@@ -1911,7 +2182,7 @@ async def _ack_room_reaction(store: Store, room_id: str, message: dict) -> None:
         bot_name=bot["name"],
         direction=store.read_direction(),
         summary=prepared.summary,
-        skills_text=pack_skills(store.list_skills()),
+        skills_text=_skills_for_prompt(store, bot["id"], _last_user_text(room.get("messages") or [])),
         room_note=(
             f'You are in the room "{room.get("name") or "Room"}". '
             "The person just reacted to your latest line. This is not a new task."
@@ -2267,6 +2538,8 @@ async def _finish_and_maybe_ask(
     made: str = "",
     thinking: str = "",
     quiet: bool = False,
+    check: str = "",
+    lesson: str = "",
 ) -> dict:
     """Save the parent reply, then run at most one child ask found in it."""
     ask = parse_subagent(visible)
@@ -2274,7 +2547,17 @@ async def _finish_and_maybe_ask(
     if ask and not visible.strip():
         visible = f"Asked {ask[0]} to do one task."
     finished = _finish_reply(
-        store, bot_id, chat_id, visible, saved, choices or [], made, thinking, quiet=quiet
+        store,
+        bot_id,
+        chat_id,
+        visible,
+        saved,
+        choices or [],
+        made,
+        thinking,
+        quiet=quiet,
+        check=check,
+        lesson=lesson,
     )
     if not ask:
         return finished
@@ -2489,6 +2772,8 @@ def _finish_reply(
     made: str = "",
     thinking: str = "",
     quiet: bool = False,
+    check: str = "",
+    lesson: str = "",
 ) -> dict:
     chat = store.get_chat(bot_id, chat_id)
     visible = redact(store, visible)
@@ -2568,6 +2853,14 @@ def _finish_reply(
         message.pop("thinking", None)
     if saved:
         message["skills_saved"] = saved
+    if check in {"checked", "revised"}:
+        message["check"] = check
+    elif "check" in message:
+        message.pop("check", None)
+    if str(lesson or "").startswith("Learned:"):
+        message["lesson"] = lesson
+    elif "lesson" in message:
+        message.pop("lesson", None)
     if len(kept) >= 2:
         message["choices"] = kept
     elif "choices" in message:
@@ -2600,7 +2893,7 @@ async def _reply_json(store: Store, bot_id: str, chat_id: str) -> dict:
     chat = store.get_chat(bot_id, chat_id)
     _write_live(store, bot_id, chat_id, step="Waiting on model", start=True, force=True)
     try:
-        visible, saved, choices, made, thinking, reacted = await _complete_for_chat(store, bot_id, chat)
+        visible, saved, choices, made, thinking, reacted, checked, lesson = await _complete_for_chat(store, bot_id, chat)
     except llm.ProviderError as exc:
         return _append_error(store, bot_id, chat_id, _chat_connection_error(store, bot_id, str(exc)))
     except SearchError as exc:
@@ -2617,6 +2910,8 @@ async def _reply_json(store: Store, bot_id: str, chat_id: str) -> dict:
         made,
         thinking,
         quiet=bool(reacted) and not (visible or "").strip(),
+        check=checked,
+        lesson=lesson,
     )
 
 
@@ -2637,6 +2932,8 @@ async def _stream_reply(store: Store, bot_id: str, chat_id: str):
         sent = ""
         thought = ""
         reacted = False
+        checked = ""
+        lesson = ""
         thought_saved = False
         async for kind, text in stream_with_tools(
             base_url=endpoint["base_url"],
@@ -2684,6 +2981,16 @@ async def _stream_reply(store: Store, bot_id: str, chat_id: str):
                 continue
             if kind == "final":
                 final = text
+            elif kind == "check":
+                try:
+                    parsed = json.loads(text)
+                except json.JSONDecodeError:
+                    parsed = {}
+                if isinstance(parsed, dict) and parsed.get("badge") in {"checked", "revised"}:
+                    checked = parsed["badge"]
+            elif kind == "lesson":
+                if str(text or "").startswith("Learned:"):
+                    lesson = str(text)
             elif kind == "choices":
                 try:
                     parsed = json.loads(text)
@@ -2700,7 +3007,7 @@ async def _stream_reply(store: Store, bot_id: str, chat_id: str):
         visible, skills = extract_skills(final or "")
         saved: list[str] = []
         for skill in skills:
-            stored = store.save_skill(skill)
+            stored = _save_user_skill(store, skill)
             saved.append(stored["name"])
         if not visible.strip() and not choices and not reacted:
             visible = "Saved skill: " + ", ".join(saved) if saved else "(empty reply)"
@@ -2714,6 +3021,8 @@ async def _stream_reply(store: Store, bot_id: str, chat_id: str):
             made,
             thought,
             quiet=reacted and not visible.strip(),
+            check=checked,
+            lesson=lesson,
         )
         yield _sse({"type": "done", "chat": result["chat"]})
     except llm.ProviderError as exc:

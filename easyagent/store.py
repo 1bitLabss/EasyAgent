@@ -1,4 +1,7 @@
-"""Disk store. One directory per bot. Transcripts are rewritten atomically and never trimmed."""
+"""Disk store. One directory per bot. Transcripts are rewritten atomically.
+
+A normal save never drops a message. The nightly prune can remove a message
+only after its digest and search index have been checked."""
 
 from __future__ import annotations
 
@@ -77,6 +80,17 @@ def canonical_emoji(emoji: str) -> str:
         if known.replace("\ufe0f", "") == base:
             return known
     return ""
+
+
+def fold_name(value: str) -> str:
+    """Trim, collapse internal whitespace, and ignore case."""
+    return " ".join(str(value or "").split()).casefold()
+
+
+def names_match(typed: str, stored: str) -> bool:
+    """The typed name matches the stored one. An empty name never matches."""
+    right = fold_name(stored)
+    return bool(right) and fold_name(typed) == right
 
 
 def reaction_signal(message: dict) -> str:
@@ -388,9 +402,10 @@ class Store:
         api_key: str | None,
         model: str | None = None,
         max_parallel: int = 1,
+        endpoint_id: str | None = None,
     ) -> dict:
         record = {
-            "id": new_id(),
+            "id": self._parse_id(endpoint_id) if endpoint_id else new_id(),
             "name": name,
             "base_url": base_url,
             "api_key": api_key or "",
@@ -412,8 +427,8 @@ class Store:
             match = next((item for item in endpoints if item.get("id") == endpoint_id), None)
             if match is None:
                 raise StoreError("Endpoint not found.", 404)
-            if confirm_name != match.get("name"):
-                raise StoreError("Type the endpoint's exact name to remove it.", 400)
+            if not names_match(confirm_name, match.get("name") or ""):
+                raise StoreError("Type the connection's name to remove it.", 400)
             kept = [item for item in endpoints if item.get("id") != endpoint_id]
             atomic_write_json(self.endpoints_path, kept)
 
@@ -452,6 +467,16 @@ class Store:
                 match["max_parallel"] = clamp_parallel(max_parallel)
             atomic_write_json(self.endpoints_path, endpoints)
         return match
+
+    def endpoint_by_name(self, name: str) -> dict | None:
+        """One saved connection, matched on its label. Nothing is written."""
+        wanted = " ".join((name or "").split()).casefold()
+        if not wanted:
+            return None
+        for endpoint in self.list_endpoints():
+            if " ".join(str(endpoint.get("name") or "").split()).casefold() == wanted:
+                return endpoint
+        return None
 
     # --- bots --------------------------------------------------------------
 
@@ -525,6 +550,14 @@ class Store:
         context_tokens_set: bool = False,
         face_color: str | None = None,
         face_color_set: bool = False,
+        check_enabled: bool | None = None,
+        check_enabled_set: bool = False,
+        learn_paused: bool | None = None,
+        learn_paused_set: bool = False,
+        learn_manual: bool | None = None,
+        learn_manual_set: bool = False,
+        check_revisions: int | None = None,
+        check_revisions_set: bool = False,
     ) -> dict:
         """Change settings. Chat files in this bot are not opened or rewritten."""
         bot = self.get_bot(bot_id)
@@ -549,6 +582,31 @@ class Store:
                 bot["face_color"] = face_color
             else:
                 bot.pop("face_color", None)
+        if check_enabled_set:
+            if check_enabled is False:
+                bot["check_enabled"] = False
+            else:
+                bot.pop("check_enabled", None)
+        if learn_paused_set:
+            if learn_paused:
+                bot["learn_paused"] = True
+            else:
+                bot.pop("learn_paused", None)
+        if learn_manual_set:
+            if learn_manual:
+                bot["learn_manual"] = True
+            else:
+                bot.pop("learn_manual", None)
+        if check_revisions_set:
+            if check_revisions is None:
+                bot.pop("check_revisions", None)
+            else:
+                number = int(check_revisions)
+                if number < 0:
+                    number = 0
+                if number > 4:
+                    number = 4
+                bot["check_revisions"] = number
         atomic_write_json(self._bot_dir(bot["id"]) / "bot.json", bot)
         return bot
 
@@ -558,8 +616,8 @@ class Store:
         Endpoints, skills, direction, and every other bot stay where they are.
         """
         bot = self.get_bot(bot_id)
-        if confirm_name != bot.get("name"):
-            raise StoreError("Type the bot's exact name to remove it.", 400)
+        if not names_match(confirm_name, bot.get("name") or ""):
+            raise StoreError("Type the bot's name to remove it.", 400)
         directory = self._bot_dir(bot["id"])
         if directory.parent.resolve() != self.bots_dir.resolve():
             raise StoreError("Refusing to delete that path.", 400)
@@ -687,6 +745,9 @@ class Store:
         chat.setdefault("messages", [])
         chat.setdefault("summary", "")
         chat.setdefault("summarized_through", 0)
+        chat.setdefault("fresh_from", 0)
+        chat.setdefault("rolling_summary", "")
+        chat.setdefault("rolling_through", 0)
         return chat
 
     def toggle_reaction(self, bot_id: str, chat_id: str, message_id: str, emoji: str) -> dict:
@@ -729,6 +790,119 @@ class Store:
         if len(chat.get("messages") or []) < len(current.get("messages") or []):
             raise StoreError("Refusing to shorten a stored transcript.", 400)
         atomic_write_json(path, chat)
+        return chat
+
+    def existing_ongoing(self, bot_id: str) -> dict | None:
+        """The pinned conversation, or the newest chat. Does not create one and does not delete any."""
+        bot = self.get_bot(bot_id)
+        pinned = str(bot.get("ongoing_chat_id") or "")
+        if pinned:
+            try:
+                return self.get_chat(bot_id, pinned)
+            except StoreError:
+                pass
+        listed = self.list_chats(bot_id)
+        if not listed:
+            return None
+        return self.get_chat(bot_id, listed[0]["id"])
+
+    def ongoing_chat(self, bot_id: str) -> dict:
+        """The one conversation this bot opens into.
+
+        A saved pin wins. Otherwise the newest chat becomes the ongoing one.
+        When the bot has no chats, one empty chat is created. Other transcripts stay.
+        """
+        chat = self.existing_ongoing(bot_id)
+        if chat is None:
+            chat = self.create_chat(bot_id)
+        bot = self.get_bot(bot_id)
+        if bot.get("ongoing_chat_id") != chat["id"]:
+            with self._lock:
+                bot = self.get_bot(bot_id)
+                bot["ongoing_chat_id"] = chat["id"]
+                atomic_write_json(self._bot_dir(bot["id"]) / "bot.json", bot)
+        return chat
+
+    def start_fresh(self, bot_id: str, chat_id: str) -> dict:
+        """Hide prior turns from the model. The stored messages stay on disk."""
+        with self._lock:
+            chat = self.get_chat(bot_id, chat_id)
+            count = len(chat.get("messages") or [])
+            chat["fresh_from"] = count
+            chat["summary"] = ""
+            chat["summarized_through"] = count
+            chat["rolling_summary"] = ""
+            chat["rolling_through"] = count
+            chat["updated_at"] = now_iso()
+            return self.save_chat(chat)
+
+    def save_rolling_summary(self, bot_id: str, chat_id: str, summary: str, through: int) -> dict:
+        """Replace the rolling summary only. The message list is read again so it cannot shrink."""
+        with self._lock:
+            chat = self.get_chat(bot_id, chat_id)
+            chat["rolling_summary"] = summary
+            chat["rolling_through"] = int(through)
+            chat["updated_at"] = now_iso()
+            return self.save_chat(chat)
+
+    def drop_messages(self, bot_id: str, chat_id: str, message_ids: set[str]) -> dict:
+        """Remove messages by id. Every other save still refuses to shorten a transcript.
+
+        Only the nightly prune calls this, and only for ids it has just re-checked.
+        """
+        drop = {str(item) for item in message_ids if str(item)}
+        with self._lock:
+            chat = self.get_chat(bot_id, chat_id)
+            messages = list(chat.get("messages") or [])
+            if not drop:
+                return chat
+            summary_through = int(chat.get("summarized_through") or 0)
+            fresh = int(chat.get("fresh_from") or 0)
+            rolling = int(chat.get("rolling_through") or 0)
+            kept = []
+            dropped_summary = dropped_fresh = dropped_rolling = 0
+            removed = 0
+            for index, message in enumerate(messages):
+                mid = str(message.get("id") or "")
+                if mid and mid in drop:
+                    removed += 1
+                    if index < summary_through:
+                        dropped_summary += 1
+                    if index < fresh:
+                        dropped_fresh += 1
+                    if index < rolling:
+                        dropped_rolling += 1
+                    continue
+                kept.append(message)
+            if removed == 0:
+                return chat
+            chat["messages"] = kept
+            chat["summarized_through"] = max(0, min(len(kept), summary_through - dropped_summary))
+            chat["fresh_from"] = max(0, min(len(kept), fresh - dropped_fresh))
+            chat["rolling_through"] = max(0, min(len(kept), rolling - dropped_rolling))
+            chat["updated_at"] = now_iso()
+            atomic_write_json(self._chat_path(chat["bot_id"], chat["id"]), chat)
+            return chat
+
+    def delete_chat(self, bot_id: str, chat_id: str) -> dict:
+        """Remove one chat transcript and its files. The bot and every other chat stay."""
+        chat = self.get_chat(bot_id, chat_id)
+        run = chat.get("run") if isinstance(chat.get("run"), dict) else {}
+        if run.get("status") == "running":
+            raise StoreError("That chat is still running. Stop it before deleting it.", 409)
+        bot_id = self._parse_id(bot_id)
+        chat_id = self._parse_id(chat_id)
+        chats = self._child(self._bot_dir(bot_id), "chats")
+        path = self._child(chats, f"{chat_id}.json")
+        files = self._child(chats, chat_id)
+        if files.exists() and not files.is_dir():
+            raise StoreError("Refusing to delete that path.", 400)
+        if path.is_file():
+            path.unlink()
+        if files.is_dir():
+            if files.parent.resolve() != chats.resolve():
+                raise StoreError("Refusing to delete that path.", 400)
+            shutil.rmtree(files)
         return chat
 
     # --- rooms -------------------------------------------------------------
@@ -954,8 +1128,8 @@ class Store:
 
     def delete_project(self, project_id: str, confirm_name: str) -> dict:
         project = self.get_project(project_id)
-        if confirm_name != project.get("name"):
-            raise StoreError("Type the project's exact name to remove it.", 400)
+        if not names_match(confirm_name, project.get("name") or ""):
+            raise StoreError("Type the project's name to remove it.", 400)
         self._delete_project_dir(project["id"])
         return project
 
@@ -1139,8 +1313,8 @@ class Store:
             match = next((item for item in computers if item.get("id") == computer_id), None)
             if match is None:
                 raise StoreError("Computer not found.", 404)
-            if confirm_name != match.get("name"):
-                raise StoreError("Type the computer's exact name to remove it.", 400)
+            if not names_match(confirm_name, match.get("name") or ""):
+                raise StoreError("Type the computer's name to remove it.", 400)
             kept = [item for item in computers if item.get("id") != computer_id]
             atomic_write_json(self.computers_path, kept)
 
@@ -1273,7 +1447,10 @@ class Store:
                 parts.append(f"  also: {item['also']}")
             parts.append("")
         self._memory_dir(bot_id).mkdir(parents=True, exist_ok=True)
-        atomic_write_text(self._topic_file(bot_id, slug), "\n".join(parts).rstrip() + "\n")
+        path = self._topic_file(bot_id, slug)
+        previous = path.read_text(encoding="utf-8") if path.is_file() else ""
+        atomic_write_text(path, "\n".join(parts).rstrip() + "\n")
+        self._note_ledger("memory", f"{bot_id}/{slug}", previous, bot_id)
 
     def _ensure_pointer(self, bot_id: str, slug: str) -> None:
         slugs = self._read_index_slugs(bot_id)
@@ -1684,5 +1861,16 @@ class Store:
         path = self._child(self.skills_dir, f"{slug}.md")
         if path.parent.resolve() != self.skills_dir.resolve():
             raise StoreError("Bad skill name.", 400)
+        previous = path.read_text(encoding="utf-8") if path.is_file() else ""
         atomic_write_text(path, render_skill(document))
+        self._note_ledger("skill", slug, previous, "")
         return document
+
+    def _note_ledger(self, kind: str, key: str, previous: str, bot_id: str) -> None:
+        """A content-addressed copy of the previous text. Learning can roll it back."""
+        try:
+            from easyagent.learn import note_ledger
+
+            note_ledger(self, kind=kind, key=key, previous=previous, bot_id=bot_id)
+        except Exception:
+            return

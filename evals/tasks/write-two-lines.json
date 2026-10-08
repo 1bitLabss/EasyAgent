@@ -1,0 +1,33 @@
+{
+  "id": "write-two-lines",
+  "category": "files",
+  "prompt": "Write {workspace}/pair.txt with two lines: ALPHA-1 and BETA-2.",
+  "mock": [
+    "```files\nwrite\n{workspace}/pair.txt\nALPHA-1\nBETA-2\n```",
+    "```files\nread\n{workspace}/pair.txt\n```",
+    "pair.txt has ALPHA-1 and BETA-2.",
+    "pair.txt has ALPHA-1 and BETA-2."
+  ],
+  "criteria": [
+    {
+      "kind": "file_contains",
+      "text": "ALPHA-1",
+      "path": "{workspace}/pair.txt"
+    },
+    {
+      "kind": "file_contains",
+      "text": "BETA-2",
+      "path": "{workspace}/pair.txt"
+    },
+    {
+      "kind": "tool_called",
+      "tool": "files",
+      "action": "write",
+      "success": true
+    },
+    {
+      "kind": "max_steps",
+      "limit": 8
+    }
+  ]
+}

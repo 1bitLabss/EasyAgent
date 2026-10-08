@@ -1,0 +1,38 @@
+{
+  "id": "html-svg-only",
+  "category": "page",
+  "prompt": "Make a small HTML page and save it at {workspace}/mark.html. The picture has to be in the file itself.",
+  "mock": [
+    "```files\nwrite\n{workspace}/mark.html\n<!DOCTYPE html>\n<html>\n<head><title>Mark</title>\n<style>body{display:flex;background:#f4efe6;color:#1c1b19;font-size:18px}</style>\n</head>\n<body>\n<svg width=\"120\" height=\"80\" viewBox=\"0 0 120 80\"><circle cx=\"40\" cy=\"40\" r=\"18\" fill=\"#c4a574\"/><rect x=\"70\" y=\"20\" width=\"30\" height=\"40\" fill=\"#16324a\"/></svg>\n<p>A drawn mark</p>\n</body>\n</html>\n```",
+    "```files\nread\n{workspace}/mark.html\n```",
+    "The page is mark.html. The picture is drawn in the file.",
+    "The page is mark.html. The picture is drawn in the file.",
+    "The page is mark.html. The picture is drawn in the file."
+  ],
+  "criteria": [
+    {
+      "kind": "file_exists",
+      "path": "{workspace}/mark.html"
+    },
+    {
+      "kind": "file_contains",
+      "text": "<svg",
+      "path": "{workspace}/mark.html"
+    },
+    {
+      "kind": "file_contains",
+      "text": "<rect",
+      "path": "{workspace}/mark.html"
+    },
+    {
+      "kind": "tool_called",
+      "tool": "files",
+      "action": "write",
+      "success": true
+    },
+    {
+      "kind": "max_steps",
+      "limit": 12
+    }
+  ]
+}

@@ -13,7 +13,7 @@ npm run dev
 npm run build
 ```
 
-`cargo test -p easyagent-supervisor` does not need a display or WebKit. It checks attach versus start, the health JSON, the tray title, and the icon bitmap. `npm test` runs that same command. `npm run dev` opens the window. `npm run build` is `cargo tauri build` and writes installers under `desktop/src-tauri/target/release/bundle/`.
+`cargo test -p easyagent-supervisor` does not need a display or WebKit. It checks attach versus start, the health JSON, the tray title, and the icon bitmap. `npm test` runs that same command. `npm run dev` opens the window. `npm run build` is `cargo tauri build` and writes installers under `desktop/src-tauri/target/release/bundle/`. On macOS, `npm run build -- --target universal-apple-darwin` builds one `.dmg` for both Apple silicon and Intel. The targets are NSIS and MSI on Windows, `.app` and `.dmg` on macOS, and `.deb`, AppImage, and `.rpm` on Linux.
 
 `pytest` from the repo root includes `tests/test_desktop_contract.py`, which checks that `GET /api/health` and `GET /api/unread` still have the shape the window reads. That does not compile the window.
 
@@ -46,7 +46,11 @@ Install the Xcode command line tools, Rust, and Node.js. From `desktop/`, `npm r
 
 That build is unsigned and not notarized. Distributing it off your own Mac needs an Apple Developer ID Application certificate, the hardened runtime, `notarytool`, and stapling. Those secrets are not in this repo.
 
-Tauri updater signing keys are not configured. The window does not check for updates.
+Tauri updater signing keys are not configured. `createUpdaterArtifacts` is false, the endpoint list is empty, and the window does not check for updates. `EASYAGENT_UPDATES=1` only reaches the stub, which still refuses to install anything until a minisign public key is set in `src-tauri/tauri.conf.json`.
+
+The window is a single instance. A second launch focuses the one that is already open. Closing the window hides it. The bots keep running. Quit, from the tray, is what exits. If this window started the server, Quit stops that process. If it attached to one that was already running, Quit leaves that process alone.
+
+The window remembers its size. The tray icon shows the unread count. A native notice appears when a bot finishes a reply, or when that reply asks a question. About, in the desktop app, has "Open EasyAgent when I sign in."
 
 ## What the window starts
 
@@ -58,4 +62,4 @@ The README section **Desktop window** is the user-facing description. In short:
 
 ## CI
 
-`.github/workflows/desktop.yml` runs `cargo test -p easyagent-supervisor` only. A full `tauri build` needs the webview packages above. Signed installers need the Windows and macOS certificates named in those sections. If this forge does not run GitHub Actions, that file is still the command to keep.
+`.github/workflows/desktop.yml` runs `cargo test -p easyagent-supervisor` when the desktop crate changes. `.github/workflows/desktop-installers.yml` runs on a version tag (`v*`) and builds the unsigned Windows, macOS, and Linux installers. The macOS job targets `universal-apple-darwin`. Those jobs do not sign anything. Signed installers need the Windows and macOS certificates named above. If this forge does not run GitHub Actions, those files are still the commands to keep.

@@ -1,0 +1,36 @@
+{
+  "id": "list-folder",
+  "category": "files",
+  "prompt": "List the files in {workspace} and name them.",
+  "setup": {
+    "files": {
+      "a.txt": "one\n",
+      "b.txt": "two\n"
+    }
+  },
+  "mock": [
+    "```files\nlist\n{workspace}\n```",
+    "The folder has a.txt and b.txt.",
+    "The folder has a.txt and b.txt."
+  ],
+  "criteria": [
+    {
+      "kind": "tool_called",
+      "tool": "files",
+      "action": "list",
+      "success": true
+    },
+    {
+      "kind": "reply_regex",
+      "pattern": "a\\.txt"
+    },
+    {
+      "kind": "reply_regex",
+      "pattern": "b\\.txt"
+    },
+    {
+      "kind": "max_steps",
+      "limit": 6
+    }
+  ]
+}

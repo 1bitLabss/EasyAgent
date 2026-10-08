@@ -1,0 +1,29 @@
+{
+  "id": "recall-bike",
+  "category": "recall",
+  "prelude": [
+    {
+      "role": "user",
+      "content": "My bike color is teal-9."
+    },
+    {
+      "role": "assistant",
+      "content": "Your bike color is teal-9."
+    }
+  ],
+  "prelude_pad": 12,
+  "prompt": "What color did I say my bike is?",
+  "mock": [
+    "Your bike is teal-9."
+  ],
+  "criteria": [
+    {
+      "kind": "reply_regex",
+      "pattern": "teal-9"
+    },
+    {
+      "kind": "max_steps",
+      "limit": 3
+    }
+  ]
+}

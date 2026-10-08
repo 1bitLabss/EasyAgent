@@ -277,12 +277,26 @@ def native_tools() -> list[dict]:
     return tools
 
 
-def _completion_payload(messages: list[dict], model: str | None, *, stream: bool) -> dict:
+def _completion_payload(
+    messages: list[dict],
+    model: str | None,
+    *,
+    stream: bool,
+    response_schema: dict | None = None,
+    grammar: str | None = None,
+) -> dict:
     payload: dict = {"messages": messages, "tools": native_tools()}
     if stream:
         payload["stream"] = True
     if model:
         payload["model"] = model
+    if response_schema:
+        payload["response_format"] = {
+            "type": "json_schema",
+            "json_schema": {"name": "easyagent_json", "strict": True, "schema": response_schema},
+        }
+    if grammar:
+        payload["grammar"] = grammar
     return payload
 
 
@@ -553,11 +567,19 @@ async def _complete_once(
     model: str | None,
     messages: list[dict],
     timeout: float,
+    response_schema: dict | None = None,
+    grammar: str | None = None,
 ) -> str:
     """One non-streaming completion. The caller decides whether to retry."""
     _native_calls.set(None)
     url = base_url.rstrip("/") + "/chat/completions"
-    payload = _completion_payload(messages, model, stream=False)
+    payload = _completion_payload(
+        messages,
+        model,
+        stream=False,
+        response_schema=response_schema,
+        grammar=grammar,
+    )
     headers = {"Content-Type": "application/json"}
     if api_key:
         headers["Authorization"] = f"Bearer {api_key}"
@@ -609,6 +631,8 @@ async def _complete_window(
     model: str | None,
     messages: list[dict],
     timeout: float,
+    response_schema: dict | None = None,
+    grammar: str | None = None,
 ) -> str:
     """Retry a completion that never returned, and free the slot during the pause."""
     window = retry.Window()
@@ -624,6 +648,8 @@ async def _complete_window(
                     model=model,
                     messages=messages,
                     timeout=timeout,
+                    response_schema=response_schema,
+                    grammar=grammar,
                 )
             except turn_mod.TurnCancelled:
                 raise
@@ -650,6 +676,8 @@ async def complete(
     model: str | None,
     messages: list[dict],
     timeout: float = 120.0,
+    response_schema: dict | None = None,
+    grammar: str | None = None,
 ) -> str:
     if not gate.inner_retry_allowed():
         permit = await gate.reserve()
@@ -661,6 +689,8 @@ async def complete(
                 model=model,
                 messages=messages,
                 timeout=timeout,
+                response_schema=response_schema,
+                grammar=grammar,
             )
         finally:
             await permit.release()
@@ -670,6 +700,8 @@ async def complete(
         model=model,
         messages=messages,
         timeout=timeout,
+        response_schema=response_schema,
+        grammar=grammar,
     )
 
 

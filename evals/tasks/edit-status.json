@@ -1,0 +1,38 @@
+{
+  "id": "edit-status",
+  "category": "files",
+  "prompt": "In {workspace}/status.txt replace RED-OLD with GREEN-NEW. Keep the rest of the sentence.",
+  "setup": {
+    "files": {
+      "status.txt": "The status is RED-OLD.\n"
+    }
+  },
+  "mock": [
+    "```files\nwrite\n{workspace}/status.txt\nThe status is GREEN-NEW.\n\n```",
+    "```files\nread\n{workspace}/status.txt\n```",
+    "The status line now says GREEN-NEW.",
+    "The status line now says GREEN-NEW."
+  ],
+  "criteria": [
+    {
+      "kind": "file_contains",
+      "text": "GREEN-NEW",
+      "path": "{workspace}/status.txt"
+    },
+    {
+      "kind": "file_excludes",
+      "text": "RED-OLD",
+      "path": "{workspace}/status.txt"
+    },
+    {
+      "kind": "tool_called",
+      "tool": "files",
+      "action": "write",
+      "success": true
+    },
+    {
+      "kind": "max_steps",
+      "limit": 8
+    }
+  ]
+}

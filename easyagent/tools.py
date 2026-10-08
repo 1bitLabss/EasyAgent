@@ -25,6 +25,7 @@ from pathlib import Path
 
 from easyagent import gate
 from easyagent import llm
+from easyagent.check import review_turn
 from easyagent import retry
 from easyagent import search as search_mod
 from easyagent import turn as turn_mod
@@ -121,6 +122,8 @@ class Settled:
     made: str = ""
     thinking: str = ""
     reacted: bool = False
+    check: str = ""
+    lesson: str = ""
 
 
 _PNG_MARK = "[[easyagent-png]]"
@@ -1622,6 +1625,7 @@ def _is_harness(text: str) -> bool:
         "The write failed:",
         "That sentence is not a finish.",
         "The breaker found a defect.",
+        "The check found problems.",
     ))
 
 
@@ -4890,6 +4894,7 @@ async def run_turn(
     ask = _original_user_text(messages)
     ledger = None if is_quick(ask) else Ledger.from_ask(ask)
     success_keys: list[tuple] = []
+    fails: list[dict] = []
     bare_held = False
     opening = ""
     notes_text = ""
@@ -5437,7 +5442,8 @@ async def run_turn(
         extra = final[len(shown):] if shown and final.startswith(shown) else final
         if extra:
             yield "delta", extra.lstrip("\n") if shown else extra
-        yield "final", final
+        for event in _seal(final):
+            yield event
 
     def _after_stuck(reason: str):
         """True when a plan to read or check kept the turn open."""
@@ -5447,6 +5453,30 @@ async def run_turn(
                 return True, kept
             kept.append(event)
         return False, kept
+
+    def _failed(request: ToolRequest, detail: str) -> None:
+        fails.append({
+            "kind": request.kind,
+            "action": request.action,
+            "path": request.path or "",
+            "ok": False,
+            "result": (detail or "")[:1200],
+        })
+
+    def _seal(final: str):
+        items = []
+        for index, step in enumerate(steps):
+            raw = raws[index] if index < len(raws) else ""
+            items.append({
+                "kind": step.get("kind") or "",
+                "action": step.get("action") or "",
+                "path": step.get("path") or "",
+                "ok": True,
+                "result": (raw or "")[:1200],
+            })
+        items.extend(fails)
+        yield "ledger", json.dumps(items)
+        yield "final", final or ""
 
     def close(answer: str):
         nonlocal streamed
@@ -5482,7 +5512,8 @@ async def run_turn(
         if final and final != streamed:
             streamed = final
             yield "stage", final
-        yield "final", final
+        for event in _seal(final):
+            yield event
 
     if needs_stages(ask):
         remembered = memory_overlap(ask, _standing_lines(store, bot_id))
@@ -5709,7 +5740,8 @@ async def run_turn(
             if did_react:
                 yield "reacted", "1"
             if did_react and not found and not (text or "").strip():
-                yield "final", ""
+                for event in _seal(""):
+                    yield event
                 return
             if len(found) > 1:
                 batched = found
@@ -6097,13 +6129,15 @@ async def run_turn(
                 if final and final != streamed:
                     streamed = final
                     yield "stage", final
-                yield "final", final
+                for event in _seal(final):
+                    yield event
                 return
             if final != shown:
                 extra = final[len(shown):] if final.startswith(shown) else final
                 if extra:
                     yield "delta", extra
-            yield "final", final
+            for event in _seal(final):
+                yield event
             return
         if query:
             sig = ("search", query)
@@ -6135,6 +6169,7 @@ async def run_turn(
                 findings = await search_mod.web_search(query)
             except SearchError as exc:
                 detail = f"Web search failed: {exc}"
+                _failed(search_request, detail)
                 last_sig = sig
                 seen_results[sig] = detail
                 search_miss = True
@@ -6344,7 +6379,8 @@ async def run_turn(
                 if final and final != streamed:
                     streamed = final
                     yield "stage", final
-                yield "final", final
+                for event in _seal(final):
+                    yield event
                 return
             if parts is not None and not _join_lines(lines) and final == (text or ""):
                 for piece in parts:
@@ -6359,7 +6395,8 @@ async def run_turn(
                     yield "delta", extra
             elif final:
                 yield "delta", final
-            yield "final", final
+            for event in _seal(final):
+                yield event
             return
         request = _prepare_request(request, messages)
         rejected = _windows_rejects(request.command) if request.kind == "shell" and sys.platform == "win32" else ""
@@ -6444,6 +6481,8 @@ async def run_turn(
         try:
             result = await execute(store, request, bot_id)
         except ToolError as exc:
+            _failed(request, str(exc))
+            yield "face", "sad"
             if request.kind == "files" and request.action == "write" and _wanted_write(messages):
                 rich = _write_failure_text(request, exc)
                 deliver_tries += 1
@@ -6505,6 +6544,8 @@ async def run_turn(
                 try:
                     result = await execute(store, request, bot_id)
                 except ToolError as write_exc:
+                    _failed(request, str(write_exc))
+                    yield "face", "sad"
                     rich = _write_failure_text(request, write_exc)
                     deliver_tries += 1
                     if deliver_tries < 2:
@@ -6654,7 +6695,10 @@ async def complete_with_tools(
     made = ""
     thought = ""
     reacted = False
-    async for kind, text in run_turn(
+    checked = ""
+    lesson = ""
+    async for kind, text in review_turn(
+        run_turn,
         base_url=base_url,
         api_key=api_key,
         model=model,
@@ -6671,6 +6715,16 @@ async def complete_with_tools(
             thought += text
         elif kind == "reacted":
             reacted = True
+        elif kind == "check":
+            try:
+                parsed = json.loads(text)
+            except json.JSONDecodeError:
+                parsed = {}
+            if isinstance(parsed, dict):
+                checked = str(parsed.get("badge") or "")
+        elif kind == "lesson":
+            if str(text or "").startswith("Learned:"):
+                lesson = str(text)
         elif kind == "choices":
             try:
                 parsed = json.loads(text)
@@ -6678,7 +6732,7 @@ async def complete_with_tools(
                 parsed = []
             if isinstance(parsed, list):
                 choices = tuple(item for item in parsed if isinstance(item, str))
-    return Settled(final, choices, made, thought.strip(), reacted)
+    return Settled(final, choices, made, thought.strip(), reacted, checked, lesson)
 
 
 async def stream_with_tools(
@@ -6692,7 +6746,8 @@ async def stream_with_tools(
     chat_id: str | None = None,
 ):
     """Yield stream events, then ('final', text). The turn stays open across tools."""
-    async for kind, text in run_turn(
+    async for kind, text in review_turn(
+        run_turn,
         base_url=base_url,
         api_key=api_key,
         model=model,

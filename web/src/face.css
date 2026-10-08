@@ -1,0 +1,220 @@
+/* Same classes as the classic page. The drawing is /static/face.svg. Do not redraw it. */
+
+.buddy-face {
+  --face: #1c1b19;
+  --state: var(--face);
+  display: inline-flex;
+  flex: none;
+  line-height: 0;
+  border-radius: 4px;
+}
+
+.buddy-face svg {
+  width: 28px;
+  height: auto;
+  display: block;
+  overflow: hidden;
+}
+
+.buddy-face.is-large svg { width: 42px; height: auto; }
+.buddy-face.is-tiny {
+  width: 26px;
+  height: 26px;
+  align-items: center;
+  justify-content: center;
+  overflow: hidden;
+  border-radius: 999px;
+  background: var(--face);
+}
+.buddy-face.is-tiny svg { width: 26px; height: 26px; }
+.buddy-face.is-tile {
+  width: 44px;
+  height: 44px;
+  align-items: center;
+  justify-content: center;
+  overflow: hidden;
+  border-radius: 999px;
+  background: var(--face);
+}
+.buddy-face.is-tile svg { width: 44px; height: 44px; }
+
+/* The screen takes the bot color, so a face is that color with the eyes and smile on it. */
+.buddy-face .screen,
+.buddy-face .blink {
+  fill: var(--face);
+}
+
+.buddy-face .shell { fill: var(--face); }
+.buddy-face.is-waiting,
+.buddy-face.is-reconnecting { --state: #d0892a; }
+.buddy-face.is-waiting .shell,
+.buddy-face.is-reconnecting .shell { fill: #d0892a; }
+.buddy-face.is-thinking { --state: #5c4d9a; }
+.buddy-face.is-thinking .shell { fill: #5c4d9a; }
+.buddy-face.is-tool { --state: #2a6fdb; }
+.buddy-face.is-tool .shell { fill: #2a6fdb; }
+.buddy-face.is-halted { --state: #8f2d28; }
+.buddy-face.is-halted .shell { fill: #8f2d28; }
+.buddy-face .bulb { fill: var(--state); }
+
+.buddy-face.is-selected {
+  box-shadow: 0 0 0 2px var(--rail), 0 0 0 4px var(--face);
+}
+
+.buddy-face .eyes,
+.buddy-face .mouth,
+.buddy-face .blink,
+.buddy-face .blink-line,
+.buddy-face .bulb,
+.buddy-face .thought {
+  visibility: hidden;
+}
+
+.buddy-face.is-idle .eyes-mid,
+.buddy-face.is-idle .mouth-smile,
+.buddy-face.is-waiting .eyes-mid,
+.buddy-face.is-waiting .mouth-smile,
+.buddy-face.is-reconnecting .eyes-mid,
+.buddy-face.is-reconnecting .mouth-smile,
+.buddy-face.is-thinking .eyes-up,
+.buddy-face.is-thinking .mouth-smile,
+.buddy-face.is-thinking .thought-3,
+.buddy-face.is-tool .eyes-squint,
+.buddy-face.is-tool .mouth-flat,
+.buddy-face.is-talking .eyes-mid,
+.buddy-face.is-talking .mouth-open,
+.buddy-face.is-halted .eyes-x,
+.buddy-face.is-halted .mouth-flat {
+  visibility: visible;
+}
+
+.buddy-face.is-idle .blink,
+.buddy-face.is-idle .blink-line { animation: idle-blink 4.8s steps(1, end) infinite; }
+.buddy-face.is-waiting .eyes-mid,
+.buddy-face.is-reconnecting .eyes-mid { animation: wait-mid 2.4s steps(1, end) infinite; }
+.buddy-face.is-waiting .eyes-left,
+.buddy-face.is-reconnecting .eyes-left { animation: wait-left 2.4s steps(1, end) infinite; }
+.buddy-face.is-waiting .eyes-right,
+.buddy-face.is-reconnecting .eyes-right { animation: wait-right 2.4s steps(1, end) infinite; }
+.buddy-face.is-waiting .blink,
+.buddy-face.is-waiting .blink-line,
+.buddy-face.is-reconnecting .blink,
+.buddy-face.is-reconnecting .blink-line { animation: wait-blink 2.4s steps(1, end) infinite; }
+.buddy-face.is-reconnecting .bulb { animation: bulb-fast 0.28s steps(1, end) infinite; }
+.buddy-face.is-thinking .bulb { animation: bulb-slow 1.2s steps(1, end) infinite; }
+.buddy-face.is-thinking .thought-1 { animation: thought-a 1.2s steps(1, end) infinite; }
+.buddy-face.is-thinking .thought-2 { animation: thought-b 1.2s steps(1, end) infinite; }
+.buddy-face.is-thinking .thought-3 { animation: thought-c 1.2s steps(1, end) infinite; }
+.buddy-face.is-tool .eyes-squint { animation: tool-on 0.4s steps(1, end) infinite; }
+.buddy-face.is-tool .eyes-mid { animation: tool-off 0.4s steps(1, end) infinite; }
+.buddy-face.is-tool .mouth-flat { animation: tool-on 0.4s steps(1, end) infinite; }
+.buddy-face.is-tool .mouth-open { animation: tool-off 0.4s steps(1, end) infinite; }
+.buddy-face.is-tool .bulb { animation: bulb-fast 0.28s steps(1, end) infinite; }
+.buddy-face.is-talking .mouth-open { animation: tool-on 0.36s steps(1, end) infinite; }
+.buddy-face.is-talking .mouth-smile { animation: tool-off 0.36s steps(1, end) infinite; }
+
+@keyframes idle-blink {
+  0%, 88% { visibility: hidden; }
+  89%, 96% { visibility: visible; }
+  97%, 100% { visibility: hidden; }
+}
+@keyframes wait-mid {
+  0%, 19% { visibility: hidden; }
+  20%, 39% { visibility: visible; }
+  40%, 59% { visibility: hidden; }
+  60%, 79% { visibility: visible; }
+  80%, 100% { visibility: hidden; }
+}
+@keyframes wait-left {
+  0%, 19% { visibility: visible; }
+  20%, 100% { visibility: hidden; }
+}
+@keyframes wait-right {
+  0%, 39% { visibility: hidden; }
+  40%, 59% { visibility: visible; }
+  60%, 100% { visibility: hidden; }
+}
+@keyframes wait-blink {
+  0%, 79% { visibility: hidden; }
+  80%, 100% { visibility: visible; }
+}
+@keyframes bulb-slow {
+  0%, 49% { visibility: visible; }
+  50%, 100% { visibility: hidden; }
+}
+@keyframes thought-a {
+  0%, 100% { visibility: visible; }
+}
+@keyframes thought-b {
+  0%, 32% { visibility: hidden; }
+  33%, 100% { visibility: visible; }
+}
+@keyframes thought-c {
+  0%, 65% { visibility: hidden; }
+  66%, 100% { visibility: visible; }
+}
+@keyframes tool-on {
+  0%, 49% { visibility: visible; }
+  50%, 100% { visibility: hidden; }
+}
+@keyframes tool-off {
+  0%, 49% { visibility: hidden; }
+  50%, 100% { visibility: visible; }
+}
+@keyframes bulb-fast {
+  0%, 40% { visibility: visible; }
+  41%, 100% { visibility: hidden; }
+}
+
+/* A short reaction uses the existing eye and mouth frames. The grid is unchanged. */
+.buddy-face.is-glad .eyes,
+.buddy-face.is-glad .mouth,
+.buddy-face.is-sad .eyes,
+.buddy-face.is-sad .mouth,
+.buddy-face.is-sad .blink,
+.buddy-face.is-sad .blink-line {
+  visibility: hidden !important;
+}
+
+.buddy-face.is-glad .eyes-mid,
+.buddy-face.is-glad .mouth-smile {
+  visibility: visible !important;
+}
+
+.buddy-face.is-sad .eyes-x,
+.buddy-face.is-sad .mouth-flat {
+  visibility: visible !important;
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  .buddy-face.is-glad {
+    animation: face-bounce 0.6s ease;
+  }
+  .buddy-face.is-glad .blink,
+  .buddy-face.is-glad .blink-line {
+    visibility: visible !important;
+    animation: glad-blink 0.6s steps(1, end) 1 !important;
+  }
+  .buddy-face.is-sad {
+    animation: face-flicker 0.6s steps(2, end);
+  }
+}
+
+@keyframes face-bounce {
+  0%, 100% { transform: translateY(0); }
+  32% { transform: translateY(-4px); }
+  58% { transform: translateY(0); }
+  76% { transform: translateY(-2px); }
+}
+
+@keyframes glad-blink {
+  0%, 34% { visibility: hidden; }
+  35%, 58% { visibility: visible; }
+  59%, 100% { visibility: hidden; }
+}
+
+@keyframes face-flicker {
+  0%, 100% { opacity: 1; }
+  25%, 70% { opacity: 0.45; }
+  45%, 90% { opacity: 1; }
+}

@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>EasyAgent</title>
   <link rel="icon" href="/static/favicon.png" type="image/png" />
-  <link rel="stylesheet" href="/static/app.css?v=33" />
+  <link rel="stylesheet" href="/static/app.css?v=36" />
 </head>
 <body>
   <div id="token-gate" class="gate" hidden>
@@ -183,6 +183,11 @@
             <input id="settings-context" type="number" min="512" max="1000000" step="1" inputmode="numeric" />
           </label>
           <p class="form-note">Older messages stay saved. This number is only how much of the recent chat is sent with the next reply.</p>
+          <label class="check">
+            <input id="settings-check" type="checkbox" checked />
+            <span>Check replies before sending</span>
+          </label>
+          <p class="form-note">EasyAgent uses your connected model to review and learn — no extra model needed.</p>
           <fieldset class="face-colors" id="face-colors">
             <legend>Face color</legend>
             <div id="face-swatches" class="face-swatches"></div>
@@ -191,6 +196,43 @@
             <button type="submit">Save</button>
           </div>
         </form>
+
+        <section id="learning" class="settings-block" aria-labelledby="learning-heading">
+          <h2 id="learning-heading">Learning</h2>
+          <p class="form-note">After a hard turn, this bot can propose a skill. The proposal stays a candidate until a check passes and a replay does not do worse. Skills and memory you wrote are left alone.</p>
+          <h3>What changed last night</h3>
+          <p id="learn-night" class="form-note">No nightly pass yet. These notes are written only while this bot is idle.</p>
+          <ul id="learn-notes" class="entity-list"></ul>
+          <h3>What can be removed</h3>
+          <p class="form-note">Digested messages older than the window can be removed after the notes and the search index already have them. Undigested messages stay.</p>
+          <ul id="learn-prune" class="entity-list"></ul>
+          <p id="learn-prune-empty" class="empty-inline">Nothing is waiting to be removed.</p>
+          <label class="check">
+            <input id="learn-pause" type="checkbox" />
+            <span>Pause learning while this bot is idle</span>
+          </label>
+          <label class="check">
+            <input id="learn-manual" type="checkbox" />
+            <span>Hold candidates until I approve them</span>
+          </label>
+          <div class="form-actions">
+            <button type="button" id="learn-rollback">Roll back the last change</button>
+          </div>
+          <p id="learn-status" class="form-note" role="status" hidden></p>
+          <p id="learn-error" class="form-error" role="alert" hidden></p>
+          <h3>Waiting</h3>
+          <ul id="learn-waiting" class="entity-list"></ul>
+          <p id="learn-waiting-empty" class="empty-inline">No candidates waiting.</p>
+          <h3>Promoted</h3>
+          <ul id="learn-promoted" class="entity-list"></ul>
+          <p id="learn-promoted-empty" class="empty-inline">Nothing promoted yet.</p>
+          <h3>Rejected</h3>
+          <ul id="learn-rejected" class="entity-list"></ul>
+          <p id="learn-rejected-empty" class="empty-inline">Nothing rejected.</p>
+          <h3>Skill results</h3>
+          <ul id="learn-skills" class="entity-list"></ul>
+          <p id="learn-skills-empty" class="empty-inline">No skill results yet.</p>
+        </section>
 
         <section id="memory" class="settings-block" aria-labelledby="memory-heading">
           <h2 id="memory-heading">Memory</h2>
@@ -620,7 +662,7 @@
       <p class="eyebrow" id="confirm-kicker">Confirm</p>
       <h3 id="confirm-title"></h3>
       <p id="confirm-copy"></p>
-      <label>Type <strong id="confirm-name"></strong> to confirm
+      <label id="confirm-type">Type <strong id="confirm-name"></strong> to confirm
         <input id="confirm-input" autocomplete="off" />
       </label>
       <div class="form-actions">
@@ -639,6 +681,6 @@
     <div id="info-body"></div>
   </dialog>
 
-  <script src="/static/app.js?v=38"></script>
+  <script src="/static/app.js?v=41"></script>
 </body>
 </html>

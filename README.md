@@ -8,7 +8,7 @@ The pixel drawing is traced from [mascot-original.jpg](assets/mascot-original.jp
 
 EasyAgent is a free local agent harness for any OpenAI-compatible model. You run it on your own computer. It gives you multiple bots, real tools, markdown memory, and a goal, plan, build, and check loop. It does not include a model, an account, or a cloud copy of your chats.
 
-Version 0.1.0. [MIT license](LICENSE). Copyright Nathan / 1bitLabs.
+Version 0.2.0. [MIT license](LICENSE). Copyright Nathan / 1bitLabs.
 
 I built this for myself, and I'm sharing it free. It is the harness I wanted on my own machine: a few bots, the model I already run, and the files on that computer.
 
@@ -35,6 +35,17 @@ python -m easyagent
 ```
 
 Open http://127.0.0.1:44721
+
+The page is a React app. The built files are in `easyagent/ui`, so `pip install` and `python -m easyagent` serve it without Node. The earlier page is still at http://127.0.0.1:44721/classic. `EASYAGENT_UI=classic` serves that page at `/`.
+
+To work on the page, start EasyAgent, then in `web/`:
+
+```bash
+npm install
+npm run dev
+```
+
+That opens a dev server on http://127.0.0.1:44731 and proxies `/api`, `/static`, and `/classic` to port 44721. `npm test` runs the Vitest checks. `npm run build` writes `easyagent/ui` again. `npm run test:e2e` runs the browser smoke tests against a temporary data folder and a mock model. EasyAgent does not send telemetry.
 
 - Port: `44721`. Override with `EASYAGENT_PORT`.
 - Chats, bots, memory, and connections: a `data` folder in the directory where you started the process (`./data`). Override with `EASYAGENT_DATA`.
@@ -64,9 +75,26 @@ EasyAgent calls `{address}/chat/completions`. The address should already include
 
 ### Bots and chats
 
-A bot is a name, a connection, an optional model, and a token budget. Each bot has its own chats. The full transcript stays on disk. The model receives a recent stretch of that chat plus a short summary of older turns, not the whole history, once the budget is full.
+A bot is a name, a connection, an optional model, and a token budget. Each bot has one ongoing conversation. The full transcript stays on disk. See [One chat that never ends](#one-chat-that-never-ends).
 
-Adding a bot selects it, creates its first chat, and puts the cursor in the message box. Switching bots or chats does not stop a reply that is already running in another chat, and it does not draw that reply into the chat on screen.
+Adding a bot selects it, opens its conversation, and puts the cursor in the message box. Switching bots does not stop a reply that is already running, and it does not draw that reply into the chat on screen.
+
+### One chat that never ends
+
+Each bot opens straight into its one conversation. There is no chat list and no New chat button. The transcript stays on this computer and grows without a hard stop. The model is never told the context is full, and a long chat does not end.
+
+On every message the request is built from four pieces. The summary, the recent turns, and the retrieved passages stay inside the bot's token budget:
+
+1. The bot's direction, memory, and skills.
+2. A rolling summary of older turns. While the bot is idle, its own connection rewrites that summary. The summary is capped. A sentence is kept only when it cites a message id that is really in the transcript, and a fact that is not in those messages is dropped.
+3. The most recent turns, in full, until the budget is used.
+4. A few passages from the whole on-disk history that match the new message. Search is BM25 across every saved chat. If that bot's connection answers `POST /embeddings`, those vectors can rerank the passages. If it does not, or it does not answer in time, BM25 is the whole search. The passages are labeled `From earlier:` and include the time they were said. Search waits only a fraction of a second. The summary refresh does not hold up the reply.
+
+The page shows the latest messages and loads older ones when you scroll up, so a long conversation stays quick.
+
+Start fresh, in the bot's settings, clears only what the model will see next. It does not delete the transcript. Delete chat still removes one transcript when you ask it to.
+
+Chats already on disk are not deleted. The newest one becomes the ongoing conversation. The others stay in the history search.
 
 A room is a separate transcript. You add existing bots, and each one replies in the order you added them. One bot's failure stays on its turn. Removing a bot from a room does not delete the bot or its private chats.
 
@@ -110,6 +138,27 @@ Memory is markdown and plain text on this computer, not a hidden list.
 - A skill is a markdown note under `data/skills/`. The bot can save one from a reply. The Skills panel lists them.
 
 A night pass can propose a skill or a memory line from a recent chat. It does not install the proposal. A proposal with no concrete counterexample is dropped. An older memory line is not rewritten by that pass.
+
+### What your bot keeps track of
+
+While a bot is idle, and only then, it reads that day's conversation and the tool results already in the chat. It updates eight markdown notes in its own folder. The pass uses the model that bot is already connected to. There is no extra model. A running chat, or a message in the last little while, skips the pass. The idle window defaults to overnight (02:00–05:00) and can be changed. Every pass is appended to `notes/nightly-log.md`.
+
+The notes live next to `MEMORY.md` and `USER.md`. Those two stay yours. Text you write in the eight files, outside the bot's auto block, is never rewritten. Each file has a size cap. A later pass merges duplicates. Every bot entry names the message id and the date it came from. The Learning panel lists all eight and what changed last night. Roll back one snapshot from that history.
+
+| File | What it is for |
+| --- | --- |
+| `MISTAKES.md` | What went wrong, the cause, and the fix that worked. A similar task can see the matching lines. |
+| `PROMISES.md` | Commitments such as "I'll check later." Open ones are raised at a natural pause, and closed when the chat shows they are done. |
+| `UNKNOWNS.md` | Open questions and assumptions. A later tool result in the chat can close one. What is left is a single question, not a pile of them. |
+| `PREDICTIONS.md` | Before a real task, the expected outcome and a confidence. Afterwards it scores itself. The running score decides how many times a reply is checked. |
+| `HABITS.md` | Repeated patterns. A routine is only a suggestion until you approve it. Approval adds a schedule. The pass never adds one. |
+| `PLAYBOOK.md` | Multi-step recipes made only from skills the replay promoted. A step that did not work is left out. |
+| `WORLD.md` | Machines, addresses, models, and when they were last seen. Passwords, keys, and tokens are not written. |
+| `DREAMS.md` | Ideas that might help. The best one can be mentioned. None of them run on their own. |
+
+Only the lines that match the current message are sent, and they share the same token budget as the rest of the chat. The eight files are not pasted in whole.
+
+Digested raw messages older than a window (30 days unless you change it) can be removed after the note and the search index for them are on disk and have been read back. The bot's settings show what would be removed before it goes. Keep forever, or turn pruning off, and nothing is removed. A message that was not digested is never removed.
 
 ### The goal loop
 
@@ -162,7 +211,11 @@ The desktop app is a Tauri 2 window around the same page. It is not a second pro
 
 Install the Python package from the repo root first (`pip install -r requirements.txt`), so the window can start the server. Rust 1.90 or newer and Node.js are required. `desktop/rust-toolchain.toml` pins Rust 1.90.0 when rustup is installed. `EASYAGENT_PYTHON` picks the interpreter. `EASYAGENT_CWD`, when it is an existing directory, is the server's working directory. Use the same directory, or the same `EASYAGENT_DATA`, when the window and a terminal should share chats.
 
-Signing keys are not in this repo. The installers this build produces are unsigned. Tauri's updater is not configured. The window does not check for updates. [desktop/BUILD.md](desktop/BUILD.md) has the same commands and the notes on signing.
+Signing keys are not in this repo. The installers this build produces are unsigned. Windows gets an NSIS installer and an MSI. macOS gets a `.dmg`; `npm run build -- --target universal-apple-darwin` from `desktop/` makes that disk image for both Apple silicon and Intel. Linux gets a `.deb` and an AppImage.
+
+The window is one instance. Closing it hides it, and the bots keep running. Quit is in the tray. A server the window started stops on Quit. A server that was already running is left alone. The window remembers its size. The tray icon carries the unread count. A notice appears when a bot finishes a reply or asks a question. In the desktop app, About has "Open EasyAgent when I sign in."
+
+The updater plugin is wired and off. There is no signing key, `createUpdaterArtifacts` is false, and the window does not check for updates. `EASYAGENT_UPDATES=1` still does not install anything. [desktop/BUILD.md](desktop/BUILD.md) has the build commands and the notes on signing.
 
 ### Linux
 
@@ -241,6 +294,16 @@ That listens on port `44731`. Point `EASYAGENT_RELAY_URL` at `http://127.0.0.1:4
 | `data/bots/<id>/chats/<id>/files/` | A file or picture attached in that chat |
 | `data/bots/<id>/notes/MEMORY.md` | Standing memory in markdown |
 | `data/bots/<id>/notes/USER.md` | Notes about the person, in markdown |
+| `data/bots/<id>/notes/MISTAKES.md` | Mistakes, causes, and fixes the bot keeps |
+| `data/bots/<id>/notes/PROMISES.md` | Open and closed commitments |
+| `data/bots/<id>/notes/UNKNOWNS.md` | Open questions and assumptions |
+| `data/bots/<id>/notes/PREDICTIONS.md` | Expected outcomes and the calibration score |
+| `data/bots/<id>/notes/HABITS.md` | Repeated patterns and suggested routines |
+| `data/bots/<id>/notes/PLAYBOOK.md` | Recipes from promoted skills |
+| `data/bots/<id>/notes/WORLD.md` | Machines, connections, and last seen. No secrets |
+| `data/bots/<id>/notes/DREAMS.md` | Ideas. None of them run on their own |
+| `data/bots/<id>/notes/nightly-log.md` | One entry for every idle pass |
+| `data/bots/<id>/notes/retention.json` | Idle window, how long to keep digested transcripts, and whether pruning is on |
 | `data/bots/<id>/memory/` | Topic files. The index only names them |
 | `data/rooms/<id>.json` | One room: member bots and its own transcript |
 | `data/bots/<id>/schedules.json` | That bot's schedules |
@@ -251,6 +314,46 @@ That listens on port `44731`. Point `EASYAGENT_RELAY_URL` at `http://127.0.0.1:4
 | `data/computers.json` | Saved computers. Passwords and keys are sealed |
 
 `data/` is local. Do not commit it. Deleting `unread.json` only makes existing replies look unread again.
+
+## How EasyAgent checks its work
+
+After a reply is drafted, EasyAgent asks the same model to grade it. EasyAgent uses your connected model to review and learn — no extra model needed.
+
+The grade is JSON: did the reply answer the request, did a tool that ran succeed, and does the reply claim a file line, a command output, or a search result that is not in the tool results. A short reply that did not use a tool is left alone.
+
+If the grade fails, the problems go back to that same model. That happens at most twice. The chat shows a small badge, checked or revised after check, and the problems sit in the collapsible Thinking section. Stop ends the check at once. The call waits in that connection's At once line.
+
+Each bot has the check on unless you turn it off in that bot's settings. There is no second model and no judge connection. A grade does not promote a file, a command, or a skill. Those still depend on what actually ran.
+
+## How EasyAgent learns
+
+EasyAgent uses your connected model to review and learn — no extra model needed.
+
+After a long turn, a turn that recovered from a failure, or a thumbs-up or thumbs-down, the model may propose a skill or a short lesson. The proposal is a candidate. It names when it applies, the steps, the pitfalls, the scope, and a check: a command and the exit code you expect, a file that should exist, or a pattern in the output. On a llama.cpp server that accepts it, the proposal is constrained to that JSON shape.
+
+A candidate is not a live skill. A linter checks that the tools it names exist, that the command parses, and that the text stays under a size cap. While the bot is idle, EasyAgent replays the task that produced the candidate, with the candidate and without it, in a temporary folder. The default is three runs each. It promotes the candidate only when the replay does not do worse and the check passes. Otherwise it drops the candidate and keeps the reason. This does not run while a chat is active, it waits in that connection's At once line, and Stop ends it. You can pause it per bot, or hold a passing candidate until you approve it.
+
+Each skill keeps a count of uses, passes, and fails, from checks, tool results, and your reactions. The model and connection that wrote it are stored with the date. Skills you wrote stay ahead of learned ones. A learned skill that keeps failing is archived. Every change to a skill or a memory file has a backup, and the Learning panel can roll the last one back.
+
+Notes taken during a chat wait in an inbox. The idle pass merges them into a learned skill, and it stops when the skill would pass its size cap. A lesson from a failed check is shown on the next similar try. If that try fails, the lesson expires. If it passes, the lesson is kept as a note on a learned skill. The chat shows a short line, Learned: ….
+
+A skill or a memory line you wrote is never edited by this pass. Each bot learns on its own. A note picked up in a room, or from another bot, stays aside until you approve it or a check proves it.
+
+Some agents let the model rewrite its own notes in the background, and nothing checks whether the change helped. Those notes can grow without a limit, contradict themselves, or lock in a fix for a failure that does not repeat. EasyAgent keeps a proposal as a candidate until a command, a file, or a replay says the change holds. A note that keeps failing is archived. A note you wrote is left alone.
+
+## Running evals
+
+EasyAgent uses your connected model to review and learn — no extra model needed. A grade is a proposal. File checks, command results, and the other machine checks decide whether a task passed.
+
+```bash
+python -m easyagent.evals run --connection "Home server"
+python -m easyagent.evals run --mock
+python -m easyagent.evals compare evals/results/one.json evals/results/two.json
+```
+
+`--connection` is the saved connection name. The runner copies that connection into a temporary folder, makes a temporary bot, and runs each task through the same tool loop as a chat. It does not open your chats or write into `data/`. Tasks live in `evals/tasks/`. Each one has a prompt and checks: a file exists or contains text, the reply matches, a tool was called, a tool result was not invented, a step limit, or a rubric.
+
+The rubric is graded by the same connection, using that bot's model, and it waits in that connection's At once line. `--judge-model name` is an optional model name for an offline run. It does not add a connection, and the app has no separate judge setting. `--tasks id,id` runs a subset. `--mock` uses a scripted model so the runner can be tested without a server. Results go to `evals/results/<timestamp>.json` with the pass rate, each category, and the average steps, tokens, and time. `compare` names tasks that passed in the first file and fail in the second.
 
 ## Tests
 

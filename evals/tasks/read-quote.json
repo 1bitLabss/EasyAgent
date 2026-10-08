@@ -1,0 +1,35 @@
+{
+  "id": "read-quote",
+  "category": "files",
+  "prompt": "Read {workspace}/quote.txt and quote the line that is there.",
+  "setup": {
+    "files": {
+      "quote.txt": "FERRY-MARK\n"
+    }
+  },
+  "mock": [
+    "```files\nread\n{workspace}/quote.txt\n```",
+    "The line is FERRY-MARK.",
+    "The line is FERRY-MARK."
+  ],
+  "criteria": [
+    {
+      "kind": "tool_called",
+      "tool": "files",
+      "action": "read",
+      "success": true
+    },
+    {
+      "kind": "reply_regex",
+      "pattern": "FERRY-MARK"
+    },
+    {
+      "kind": "grounded",
+      "text": "FERRY-MARK"
+    },
+    {
+      "kind": "max_steps",
+      "limit": 6
+    }
+  ]
+}

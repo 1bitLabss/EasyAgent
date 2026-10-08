@@ -1,0 +1,38 @@
+{
+  "id": "memory-paint",
+  "category": "memory",
+  "turns": [
+    {
+      "prompt": "Remember this fact under the topic paint: the door is ochre.",
+      "mock": [
+        "```memory\nnew\npaint\nthe door is ochre\n```",
+        "I filed the paint note."
+      ]
+    },
+    {
+      "prompt": "What color did I say the door is?",
+      "mock": [
+        "```memory\nread\npaint\n```",
+        "The door is ochre."
+      ]
+    }
+  ],
+  "criteria": [
+    {
+      "kind": "memory_contains",
+      "text": "ochre"
+    },
+    {
+      "kind": "reply_regex",
+      "pattern": "ochre"
+    },
+    {
+      "kind": "grounded",
+      "text": "ochre"
+    },
+    {
+      "kind": "max_steps",
+      "limit": 8
+    }
+  ]
+}

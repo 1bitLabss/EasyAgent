@@ -1,0 +1,29 @@
+{
+  "id": "recall-lark",
+  "category": "recall",
+  "prelude": [
+    {
+      "role": "user",
+      "content": "The project code name is LARK-17."
+    },
+    {
+      "role": "assistant",
+      "content": "The project code name is LARK-17."
+    }
+  ],
+  "prelude_pad": 10,
+  "prompt": "What project code name did I give you at the start of this chat?",
+  "mock": [
+    "The project code name is LARK-17."
+  ],
+  "criteria": [
+    {
+      "kind": "reply_regex",
+      "pattern": "LARK-17"
+    },
+    {
+      "kind": "max_steps",
+      "limit": 3
+    }
+  ]
+}

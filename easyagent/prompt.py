@@ -48,6 +48,7 @@ def build_system(
     message_ids: str = "",
     context_note: str = "",
     own_files: str = "",
+    earlier: str = "",
 ) -> str:
     direction_text = (direction or "").strip()
     if len(direction_text) > DIRECTION_CAP:
@@ -277,11 +278,9 @@ Summary of older turns:
 {summary_text}
 """
     extra = (recalled or "").strip()
-    if not extra:
-        return text
-    return (
-        text
-        + "\n# Earlier lines that share words with this message\n"
-        + extra
-        + "\n"
-    )
+    if extra:
+        text += "\n# Earlier lines that share words with this message\n" + extra + "\n"
+    block = (earlier or "").strip()
+    if block:
+        text += "\n" + block + "\n"
+    return text

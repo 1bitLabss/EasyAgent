@@ -1,0 +1,22 @@
+{
+  "id": "judge-checklist",
+  "category": "judge",
+  "prompt": "Explain what a checklist is, in two plain sentences.",
+  "mock": [
+    "A checklist is a short list of things to do. You mark each thing when it is done."
+  ],
+  "criteria": [
+    {
+      "kind": "reply_regex",
+      "pattern": "checklist"
+    },
+    {
+      "kind": "llm_judge",
+      "rubric": "The reply explains a checklist in plain sentences. It does not claim a tool ran."
+    },
+    {
+      "kind": "max_steps",
+      "limit": 3
+    }
+  ]
+}

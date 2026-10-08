@@ -91,6 +91,58 @@ pub fn unread_total(body: &str) -> Option<i64> {
     value.get("total").and_then(|item| item.as_i64())
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UnreadChat {
+    pub bot_id: String,
+    pub chat_id: String,
+    pub unread: i64,
+}
+
+pub fn unread_chats(body: &str) -> Vec<UnreadChat> {
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(body) else {
+        return Vec::new();
+    };
+    let Some(rows) = value.get("chats").and_then(|item| item.as_array()) else {
+        return Vec::new();
+    };
+    rows.iter()
+        .filter_map(|row| {
+            Some(UnreadChat {
+                bot_id: row.get("bot_id")?.as_str()?.to_string(),
+                chat_id: row.get("chat_id")?.as_str()?.to_string(),
+                unread: row.get("unread")?.as_i64()?,
+            })
+        })
+        .collect()
+}
+
+/// Choices on the latest assistant line. More than one means the bot asked a question.
+pub fn choice_count(body: &str) -> usize {
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(body) else {
+        return 0;
+    };
+    let Some(last) = value.get("messages").and_then(|item| item.as_array()).and_then(|rows| rows.last()) else {
+        return 0;
+    };
+    if last.get("role").and_then(|item| item.as_str()) != Some("assistant") {
+        return 0;
+    }
+    last.get("choices").and_then(|item| item.as_array()).map(|rows| rows.len()).unwrap_or(0)
+}
+
+pub fn notice_line(choices: usize) -> &'static str {
+    if choices > 1 {
+        "A bot has a question."
+    } else {
+        "A bot finished a reply."
+    }
+}
+
+/// Updates stay off unless this is exactly "1". Even then the window has no signing key.
+pub fn updates_requested(value: Option<&str>) -> bool {
+    value == Some("1")
+}
+
 pub fn decide(probe: Probe) -> Result<Launch, &'static str> {
     match probe {
         Probe::EasyAgent => Ok(Launch::Attach),
@@ -477,6 +529,16 @@ mod tests {
         assert!(!health_is_easyagent("not json"));
         assert_eq!(unread_total(r#"{"total": 4, "chats": [], "rooms": []}"#), Some(4));
         assert_eq!(unread_total("{}"), None);
+        let chats = unread_chats(r#"{"total": 1, "chats": [{"bot_id": "b", "chat_id": "c", "unread": 2}]}"#);
+        assert_eq!(chats.len(), 1);
+        assert_eq!(chats[0].unread, 2);
+        assert_eq!(choice_count(r#"{"messages": [{"role": "assistant", "choices": ["Yes", "No"]}]}"#), 2);
+        assert_eq!(choice_count(r#"{"messages": [{"role": "assistant", "content": "Done."}]}"#), 0);
+        assert_eq!(notice_line(2), "A bot has a question.");
+        assert_eq!(notice_line(0), "A bot finished a reply.");
+        assert!(!updates_requested(None));
+        assert!(!updates_requested(Some("0")));
+        assert!(updates_requested(Some("1")));
     }
 
     #[test]

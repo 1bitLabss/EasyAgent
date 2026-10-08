@@ -1,0 +1,29 @@
+{
+  "id": "shell-pine",
+  "category": "shell",
+  "prompt": "Print the token PINE-42. On Windows use PowerShell Write-Output. Otherwise use printf. Report the output.",
+  "mock": [
+    "```shell\nprintf 'PINE-42\\n'\n```",
+    "The command printed PINE-42.",
+    "The command printed PINE-42."
+  ],
+  "criteria": [
+    {
+      "kind": "tool_called",
+      "tool": "shell",
+      "success": true
+    },
+    {
+      "kind": "reply_regex",
+      "pattern": "PINE-42"
+    },
+    {
+      "kind": "grounded",
+      "text": "PINE-42"
+    },
+    {
+      "kind": "max_steps",
+      "limit": 6
+    }
+  ]
+}

@@ -1,0 +1,42 @@
+{
+  "id": "memory-garage",
+  "category": "memory",
+  "turns": [
+    {
+      "prompt": "Remember this fact under the topic garage: the garage code is 4419.",
+      "mock": [
+        "```memory\nnew\ngarage\nthe garage code is 4419\n```",
+        "I filed the garage code.",
+        "I filed the garage code."
+      ]
+    },
+    {
+      "prompt": "What garage code did I ask you to remember?",
+      "mock": [
+        "```memory\nread\ngarage\n```",
+        "The garage code is 4419.",
+        "The garage code is 4419."
+      ]
+    }
+  ],
+  "criteria": [
+    {
+      "kind": "memory_contains",
+      "text": "4419"
+    },
+    {
+      "kind": "tool_called",
+      "tool": "memory",
+      "action": "read",
+      "success": true
+    },
+    {
+      "kind": "reply_regex",
+      "pattern": "4419"
+    },
+    {
+      "kind": "max_steps",
+      "limit": 8
+    }
+  ]
+}

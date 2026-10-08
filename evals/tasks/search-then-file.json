@@ -1,0 +1,32 @@
+{
+  "id": "search-then-file",
+  "category": "search",
+  "prompt": "Search the web for the capital of France, then write {workspace}/capital.txt containing only the word Paris.",
+  "mock": [
+    "```search\ncapital of France\n```",
+    "```files\nwrite\n{workspace}/capital.txt\nParis\n```",
+    "```files\nread\n{workspace}/capital.txt\n```",
+    "capital.txt contains Paris.",
+    "capital.txt contains Paris."
+  ],
+  "criteria": [
+    {
+      "kind": "tool_called",
+      "tool": "search",
+      "success": true
+    },
+    {
+      "kind": "file_contains",
+      "text": "Paris",
+      "path": "{workspace}/capital.txt"
+    },
+    {
+      "kind": "grounded",
+      "text": "Paris"
+    },
+    {
+      "kind": "max_steps",
+      "limit": 10
+    }
+  ]
+}

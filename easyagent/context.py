@@ -154,12 +154,32 @@ def clamp_summary(existing: str, block: str, summary_cap: int = MAX_SUMMARY_CHAR
     if len(combined) <= summary_cap:
         return combined
     lines = combined.splitlines()
-    dropped = 0
     reserve = min(80, max(20, summary_cap // 4))
     budget = summary_cap - reserve
-    while lines and len("\n".join(lines)) > max(budget, 0):
-        lines.pop(0)
-        dropped += 1
+    limit = max(budget, 0)
+    lengths = [len(line) for line in lines]
+    prefix = [0]
+    for length in lengths:
+        prefix.append(prefix[-1] + length)
+
+    def joined_from(start: int) -> int:
+        count = len(lines) - start
+        if count <= 0:
+            return 0
+        return (prefix[-1] - prefix[start]) + (count - 1)
+
+    dropped = 0
+    if lines and joined_from(0) > limit:
+        low = 0
+        high = len(lines)
+        while low < high:
+            mid = (low + high) // 2
+            if joined_from(mid) > limit:
+                low = mid + 1
+            else:
+                high = mid
+        dropped = low
+        lines = lines[dropped:]
     prefix = f"[Earlier summary compacted; {dropped} lines dropped.]"
     body = "\n".join(lines).strip()
     result = prefix if not body else f"{prefix}\n{body}"

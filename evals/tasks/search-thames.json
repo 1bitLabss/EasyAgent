@@ -1,0 +1,28 @@
+{
+  "id": "search-thames",
+  "category": "search",
+  "prompt": "Which river runs through London? Search the web, then answer in one sentence.",
+  "mock": [
+    "```search\nriver through London\n```",
+    "The Thames runs through London."
+  ],
+  "criteria": [
+    {
+      "kind": "tool_called",
+      "tool": "search",
+      "success": true
+    },
+    {
+      "kind": "reply_regex",
+      "pattern": "Thames"
+    },
+    {
+      "kind": "grounded",
+      "text": "Thames"
+    },
+    {
+      "kind": "max_steps",
+      "limit": 6
+    }
+  ]
+}

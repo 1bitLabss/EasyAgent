@@ -79,7 +79,7 @@ def token_matches(presented: str, expected: str) -> bool:
 
 def is_shell(path: str) -> bool:
     """The page and its scripts. No transcript is in these files."""
-    return path in {"/", "/favicon.ico"} or path.startswith("/static/")
+    return path in {"/", "/favicon.ico", "/classic"} or path.startswith("/static/") or path.startswith("/ui/")
 
 
 def contained_file(root: Path, relative: str) -> Path | None:

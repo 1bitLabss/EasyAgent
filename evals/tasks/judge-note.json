@@ -1,0 +1,22 @@
+{
+  "id": "judge-note",
+  "category": "judge",
+  "prompt": "In two plain sentences, say what a note on paper is for.",
+  "mock": [
+    "A note on paper holds a fact you want later. You can read it without asking anyone."
+  ],
+  "criteria": [
+    {
+      "kind": "reply_regex",
+      "pattern": "note"
+    },
+    {
+      "kind": "llm_judge",
+      "rubric": "The reply says what a paper note is for, in plain sentences, and invents no tool result."
+    },
+    {
+      "kind": "max_steps",
+      "limit": 3
+    }
+  ]
+}

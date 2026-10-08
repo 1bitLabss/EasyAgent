@@ -1,0 +1,28 @@
+{
+  "id": "search-capital",
+  "category": "search",
+  "prompt": "What is the capital of France? Search the web, then answer in one sentence.",
+  "mock": [
+    "```search\ncapital of France\n```",
+    "Paris is the capital of France."
+  ],
+  "criteria": [
+    {
+      "kind": "tool_called",
+      "tool": "search",
+      "success": true
+    },
+    {
+      "kind": "reply_regex",
+      "pattern": "Paris"
+    },
+    {
+      "kind": "grounded",
+      "text": "Paris"
+    },
+    {
+      "kind": "max_steps",
+      "limit": 6
+    }
+  ]
+}

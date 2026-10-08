@@ -1,0 +1,11 @@
+{
+  "id": "learn-with-skill",
+  "category": "learn",
+  "suite": false,
+  "prompt": "Reply with the token MARKER-LEARN.",
+  "mock": ["MARKER-LEARN"],
+  "criteria": [
+    {"kind": "reply_regex", "pattern": "MARKER-LEARN"},
+    {"kind": "max_steps", "limit": 2}
+  ]
+}

@@ -1,0 +1,34 @@
+{
+  "id": "two-files",
+  "category": "files",
+  "prompt": "Write {workspace}/one.txt with ONE-OK and {workspace}/two.txt with TWO-OK.",
+  "mock": [
+    "```files\nwrite\n{workspace}/one.txt\nONE-OK\n```\n```files\nwrite\n{workspace}/two.txt\nTWO-OK\n```",
+    "```files\nread\n{workspace}/one.txt\n```",
+    "```files\nread\n{workspace}/two.txt\n```",
+    "one.txt has ONE-OK and two.txt has TWO-OK.",
+    "one.txt has ONE-OK and two.txt has TWO-OK."
+  ],
+  "criteria": [
+    {
+      "kind": "file_contains",
+      "text": "ONE-OK",
+      "path": "{workspace}/one.txt"
+    },
+    {
+      "kind": "file_contains",
+      "text": "TWO-OK",
+      "path": "{workspace}/two.txt"
+    },
+    {
+      "kind": "tool_called",
+      "tool": "files",
+      "action": "write",
+      "success": true
+    },
+    {
+      "kind": "max_steps",
+      "limit": 10
+    }
+  ]
+}

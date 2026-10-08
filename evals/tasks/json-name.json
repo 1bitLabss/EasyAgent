@@ -1,0 +1,32 @@
+{
+  "id": "json-name",
+  "category": "files",
+  "prompt": "Write {workspace}/box.json as JSON with a name field set to cedar.",
+  "mock": [
+    "```files\nwrite\n{workspace}/box.json\n{\"name\": \"cedar\"}\n\n```",
+    "```files\nread\n{workspace}/box.json\n```",
+    "box.json names cedar.",
+    "box.json names cedar."
+  ],
+  "criteria": [
+    {
+      "kind": "file_exists",
+      "path": "{workspace}/box.json"
+    },
+    {
+      "kind": "file_contains",
+      "text": "cedar",
+      "path": "{workspace}/box.json"
+    },
+    {
+      "kind": "tool_called",
+      "tool": "files",
+      "action": "write",
+      "success": true
+    },
+    {
+      "kind": "max_steps",
+      "limit": 8
+    }
+  ]
+}

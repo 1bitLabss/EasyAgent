@@ -1,0 +1,27 @@
+{
+  "id": "ask-party",
+  "category": "question",
+  "prompt": "Book a table for me tonight. I have not said how many people are coming. Ask me that. Do not pick a number.",
+  "mock": [
+    "```question\nHow many people are coming?\n2\n4\n6\n```"
+  ],
+  "criteria": [
+    {
+      "kind": "tool_called",
+      "tool": "question",
+      "success": true
+    },
+    {
+      "kind": "reply_regex",
+      "pattern": "How many people"
+    },
+    {
+      "kind": "reply_excludes",
+      "pattern": "I booked"
+    },
+    {
+      "kind": "max_steps",
+      "limit": 4
+    }
+  ]
+}

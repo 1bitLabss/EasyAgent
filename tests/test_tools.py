@@ -270,7 +270,7 @@ def test_page_lists_tools_and_skills_in_plain_words(tmp_path, monkeypatch):
         json={"content": "keep-this-line"},
     )
     before = _chat_bytes(tmp_path, bot["id"])
-    page = client.get("/")
+    page = client.get("/classic")
     assert page.status_code == 200
     assert "Files on this computer" in page.text
     assert "A command on this computer" in page.text

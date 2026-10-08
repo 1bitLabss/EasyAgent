@@ -98,6 +98,8 @@ def own_files_prompt(store: Store, bot_id: str, chat_id: str | None = None) -> s
     rows += [
         f"- Your memory file: {_show(paths['memory_md'])} (lessons and facts you keep)",
         f"- Notes about the person: {_show(paths['user_md'])}",
+        "- Notes you keep while idle, in that same notes folder: MISTAKES.md, PROMISES.md, UNKNOWNS.md, "
+        "PREDICTIONS.md, HABITS.md, PLAYBOOK.md, WORLD.md, and DREAMS.md",
         f"- Your memory topics: {_show(paths['memory_index'])} names the topic files in {_show(paths['memory_dir'])}",
         f"- Skills (shared by every bot): {_show(paths['skills'])} (one .md file per skill)",
         f"- Direction: {_show(paths['direction'])}",
@@ -197,6 +199,21 @@ def search_history(store: Store, bot_id: str, query: str) -> str:
                     break
         if len(hits) >= _SEARCH_HITS:
             break
+    try:
+        from easyagent.retrieve import search_passages
+
+        seen = "\n".join(hits)
+        for passage in search_passages(store, bot_id, needle, limit=_SEARCH_HITS):
+            if passage.text and passage.text[:80] in seen:
+                continue
+            hits.append(
+                f"- chat \"{passage.title}\" (id {passage.chat_id}) message {passage.index + 1}, "
+                f"{passage.role}, {passage.created_at or '?'}: {_snippet(passage.text, terms[0] if terms else needle)}"
+            )
+            if len(hits) >= _SEARCH_HITS:
+                break
+    except Exception:
+        pass
     for label, text in _memory_sources(store, bot_id):
         for row in text.splitlines():
             if row.strip() and matches(row):

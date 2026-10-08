@@ -1,0 +1,26 @@
+{
+  "id": "checker-loop",
+  "category": "checker",
+  "needs_check": true,
+  "prompt": "Give one long status paragraph. Include the token LOOP-CHECK in that paragraph.",
+  "mock": [
+    "LOOP-CHECK ordinary note ordinary note ordinary note ordinary note ordinary note ordinary note ordinary note ordinary note ordinary note ordinary note ordinary note ordinary note ordinary note ordinary note ordinary note ordinary note ordinary note ordinary note ordinary note ordinary note."
+  ],
+  "revision_mock": [
+    "LOOP-CHECK ordinary note ordinary note ordinary note ordinary note ordinary note ordinary note ordinary note ordinary note ordinary note ordinary note ordinary note ordinary note ordinary note ordinary note ordinary note ordinary note ordinary note ordinary note ordinary note ordinary note."
+  ],
+  "criteria": [
+    {
+      "kind": "reply_regex",
+      "pattern": "LOOP-CHECK"
+    },
+    {
+      "kind": "reply_excludes",
+      "pattern": "Stuck\\."
+    },
+    {
+      "kind": "max_steps",
+      "limit": 4
+    }
+  ]
+}

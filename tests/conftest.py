@@ -12,6 +12,15 @@ def remote_assets_answer(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def checks_use_an_opt_in(monkeypatch):
+    """Existing tests count model calls. A check is on only when a test asks for it."""
+    monkeypatch.setenv("EASYAGENT_CHECK", "0")
+    monkeypatch.setenv("EASYAGENT_LEARN", "0")
+    monkeypatch.setenv("EASYAGENT_ROLLING", "0")
+    monkeypatch.setenv("EASYAGENT_NIGHTLY", "0")
+
+
+@pytest.fixture(autouse=True)
 def fast_model_retry(monkeypatch):
     """The retry window is real minutes. Tests move the clock instead of sleeping."""
     clock = {"t": 0.0}

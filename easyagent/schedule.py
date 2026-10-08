@@ -214,6 +214,9 @@ async def _run_one(store: Store, bot: dict, schedule: dict, slot: str) -> dict:
         for skill in skills:
             try:
                 stored = store.save_skill(skill)
+                from easyagent.learn import mark_origin
+
+                mark_origin(store, stored["name"], "user")
             except StoreError:
                 continue
             saved.append(stored["name"])

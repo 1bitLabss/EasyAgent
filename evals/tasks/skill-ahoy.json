@@ -1,0 +1,25 @@
+{
+  "id": "skill-ahoy",
+  "category": "skill",
+  "prompt": "Greet me in one sentence, and follow the greeting skill.",
+  "setup": {
+    "skill": {
+      "name": "greeting",
+      "description": "How this bot starts a greeting.",
+      "body": "Start the reply with the word AHOY."
+    }
+  },
+  "mock": [
+    "AHOY. Good morning."
+  ],
+  "criteria": [
+    {
+      "kind": "reply_regex",
+      "pattern": "^AHOY"
+    },
+    {
+      "kind": "max_steps",
+      "limit": 2
+    }
+  ]
+}

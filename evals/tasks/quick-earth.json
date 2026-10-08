@@ -1,0 +1,18 @@
+{
+  "id": "quick-earth",
+  "category": "answer",
+  "prompt": "Name the planet we live on, in one sentence.",
+  "mock": [
+    "We live on Earth."
+  ],
+  "criteria": [
+    {
+      "kind": "reply_regex",
+      "pattern": "Earth"
+    },
+    {
+      "kind": "max_steps",
+      "limit": 2
+    }
+  ]
+}

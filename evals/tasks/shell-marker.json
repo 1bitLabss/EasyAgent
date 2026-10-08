@@ -1,0 +1,29 @@
+{
+  "id": "shell-marker",
+  "category": "shell",
+  "prompt": "Run a command that prints EA-SHELL-OK and tell me what it printed. On Windows use Write-Output. Otherwise use printf.",
+  "mock": [
+    "```shell\nprintf 'EA-SHELL-OK\\n'\n```",
+    "It printed EA-SHELL-OK.",
+    "It printed EA-SHELL-OK."
+  ],
+  "criteria": [
+    {
+      "kind": "tool_called",
+      "tool": "shell",
+      "success": true
+    },
+    {
+      "kind": "reply_regex",
+      "pattern": "EA-SHELL-OK"
+    },
+    {
+      "kind": "grounded",
+      "text": "EA-SHELL-OK"
+    },
+    {
+      "kind": "max_steps",
+      "limit": 6
+    }
+  ]
+}

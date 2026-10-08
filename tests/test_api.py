@@ -260,12 +260,14 @@ def test_delete_bot_requires_the_exact_name_and_spares_everything_else(world):
 
     missing = world.client.request("DELETE", f"/api/bots/{ada['id']}")
     assert missing.status_code == 422
-    wrong = world.client.request("DELETE", f"/api/bots/{ada['id']}", json={"confirm_name": "Ada "})
+    wrong = world.client.request("DELETE", f"/api/bots/{ada['id']}", json={"confirm_name": "Bea"})
     assert wrong.status_code == 400
+    blank = world.client.request("DELETE", f"/api/bots/{ada['id']}", json={"confirm_name": "   "})
+    assert blank.status_code == 400
     assert (world.path / "bots" / ada["id"]).is_dir()
     assert chat_files(world.path, bea["id"]) == bea_bytes
 
-    removed = world.client.request("DELETE", f"/api/bots/{ada['id']}", json={"confirm_name": "Ada"})
+    removed = world.client.request("DELETE", f"/api/bots/{ada['id']}", json={"confirm_name": "  aDa "})
     assert removed.status_code == 200, removed.text
     assert not (world.path / "bots" / ada["id"]).exists()
     assert chat_files(world.path, bea["id"]) == bea_bytes
@@ -273,6 +275,97 @@ def test_delete_bot_requires_the_exact_name_and_spares_everything_else(world):
     assert (world.path / "DIRECTION.md").read_bytes() == direction_bytes
     assert skill.read_bytes() == skill_bytes
     assert world.client.get(f"/api/bots/{bea['id']}/chats/{chat['id']}").json()["messages"][0]["content"] == "bea stays"
+
+
+def test_delete_chat_removes_only_that_transcript(world):
+    endpoint = add_endpoint(world, "local")
+    ada = add_bot(world, "Ada", endpoint["id"])
+    bea = add_bot(world, "Bea", endpoint["id"])
+    keep = world.client.post(f"/api/bots/{ada['id']}/chats").json()
+    drop = world.client.post(f"/api/bots/{ada['id']}/chats").json()
+    other = world.client.post(f"/api/bots/{bea['id']}/chats").json()
+    assert world.client.post(
+        f"/api/bots/{ada['id']}/chats/{keep['id']}/messages",
+        json={"content": "keep-me"},
+    ).status_code == 200
+    assert world.client.post(
+        f"/api/bots/{ada['id']}/chats/{drop['id']}/messages",
+        json={"content": "drop-me"},
+    ).status_code == 200
+    assert world.client.post(
+        f"/api/bots/{bea['id']}/chats/{other['id']}/messages",
+        json={"content": "other-stays"},
+    ).status_code == 200
+    from easyagent.store import Store
+
+    store = Store(world.path)
+    store.save_chat_file(ada["id"], drop["id"], name="note.txt", media_type="text/plain", data=b"only this chat")
+    keep_bytes = (world.path / "bots" / ada["id"] / "chats" / f"{keep['id']}.json").read_bytes()
+    bea_bytes = chat_files(world.path, bea["id"])
+    bot_bytes = (world.path / "bots" / ada["id"] / "bot.json").read_bytes()
+    endpoints_bytes = (world.path / "endpoints.json").read_bytes()
+    direction_bytes = (world.path / "DIRECTION.md").read_bytes()
+    drop_path = world.path / "bots" / ada["id"] / "chats" / f"{drop['id']}.json"
+    running = json.loads(drop_path.read_text(encoding="utf-8"))
+    running["run"] = {"status": "running"}
+    drop_path.write_text(json.dumps(running), encoding="utf-8")
+    blocked = world.client.delete(f"/api/bots/{ada['id']}/chats/{drop['id']}")
+    assert blocked.status_code == 409
+    assert drop_path.is_file()
+    assert (world.path / "bots" / ada["id"] / "chats" / f"{keep['id']}.json").read_bytes() == keep_bytes
+    running.pop("run")
+    drop_path.write_text(json.dumps(running), encoding="utf-8")
+
+    removed = world.client.delete(f"/api/bots/{ada['id']}/chats/{drop['id']}")
+    assert removed.status_code == 200, removed.text
+    assert removed.json()["deleted"] == drop["id"]
+    assert not drop_path.exists()
+    assert not (world.path / "bots" / ada["id"] / "chats" / drop["id"]).exists()
+    assert (world.path / "bots" / ada["id"] / "chats" / f"{keep['id']}.json").read_bytes() == keep_bytes
+    assert chat_files(world.path, bea["id"]) == bea_bytes
+    assert (world.path / "bots" / ada["id"] / "bot.json").read_bytes() == bot_bytes
+    assert (world.path / "endpoints.json").read_bytes() == endpoints_bytes
+    assert (world.path / "DIRECTION.md").read_bytes() == direction_bytes
+    assert (world.path / "bots" / ada["id"]).is_dir()
+    kept = world.client.get(f"/api/bots/{ada['id']}/chats/{keep['id']}")
+    assert kept.status_code == 200
+    assert kept.json()["messages"][0]["content"] == "keep-me"
+    missing = world.client.get(f"/api/bots/{ada['id']}/chats/{drop['id']}")
+    assert missing.status_code == 404
+    script = world.client.get("/static/app.js?v=41").text
+    assert "Delete chat" in script
+    assert "function foldName" in script
+    assert "function confirmDeleteChat" in script
+    assert 'confirm-input").value !== name' not in script
+    assert 'confirm-input").value !== $("confirm-name")' not in script
+    prompt = Path("easyagent/prompt.py").read_text(encoding="utf-8")
+    assert "Do not delete, reset, or rewrite stored chats." in prompt
+
+
+def test_a_computer_name_matches_without_case_or_extra_spaces(world):
+    endpoint = add_endpoint(world, "local")
+    bot = add_bot(world, "Ada", endpoint["id"])
+    chat = world.client.post(f"/api/bots/{bot['id']}/chats").json()
+    assert world.client.post(
+        f"/api/bots/{bot['id']}/chats/{chat['id']}/messages",
+        json={"content": "still here"},
+    ).status_code == 200
+    before = chat_files(world.path, bot["id"])
+    computer = world.client.post(
+        "/api/computers",
+        json={"name": "Workshop", "kind": "linux", "host": "workshop.internal", "user": "ada", "password": "secret-pass"},
+    )
+    assert computer.status_code == 200, computer.text
+    blocked = world.client.request(
+        "DELETE", f"/api/computers/{computer.json()['id']}", json={"confirm_name": "shop"}
+    )
+    assert blocked.status_code == 400
+    gone = world.client.request(
+        "DELETE", f"/api/computers/{computer.json()['id']}", json={"confirm_name": "  workSHOP "}
+    )
+    assert gone.status_code == 200, gone.text
+    assert chat_files(world.path, bot["id"]) == before
+    assert world.client.get("/api/computers").json() == []
 
 
 def test_delete_endpoint_does_not_touch_chats(world):
@@ -292,7 +385,7 @@ def test_delete_endpoint_does_not_touch_chats(world):
     )
     assert blocked.status_code == 400
     gone = world.client.request(
-        "DELETE", f"/api/endpoints/{endpoint['id']}", json={"confirm_name": "local"}
+        "DELETE", f"/api/endpoints/{endpoint['id']}", json={"confirm_name": "  LOCAL "}
     )
     assert gone.status_code == 200, gone.text
     assert chat_files(world.path, bot["id"]) == before
@@ -379,11 +472,13 @@ def test_placeholder_skill_is_not_saved(world):
 
 def test_no_route_wipes_chats(world):
     spec = world.client.get("/openapi.json").json()
+    deletes = []
     for path, methods in spec["paths"].items():
         assert "wipe" not in path
         assert "reset" not in path
-        if "/chats/" in path:
-            assert "delete" not in methods
+        if "/chats/" in path and "delete" in methods:
+            deletes.append(path)
+    assert deletes == ["/api/bots/{bot_id}/chats/{chat_id}"]
 
 
 def test_store_refuses_to_shorten_a_transcript(world):
@@ -588,7 +683,7 @@ def test_a_static_file_stays_inside_its_folder():
 
 
 def test_ui_is_served(world):
-    page = world.client.get("/")
+    page = world.client.get("/classic")
     assert page.status_code == 200
     assert "EasyAgent" in page.text
     assert "Connections" in page.text
@@ -1694,12 +1789,12 @@ def test_reasoning_stays_out_of_the_answer_and_out_of_the_next_call(world, monke
     stored = world.client.get(f"/api/bots/{bot['id']}/chats/{chat['id']}").json()
     assert [item["content"] for item in stored["messages"]] == ["hi there", "Hello", "and then", "Next"]
     assert "thinking" not in stored["messages"][-1]
-    page = world.client.get("/")
-    assert 'app.js?v=38' in page.text
-    assert 'app.css?v=33' in page.text
+    page = world.client.get("/classic")
+    assert 'app.js?v=41' in page.text
+    assert 'app.css?v=36' in page.text
     assert 'id="stop"' in page.text
     assert 'id="continue"' in page.text
-    script = world.client.get("/static/app.js?v=38")
+    script = world.client.get("/static/app.js?v=41")
     assert script.status_code == 200
     assert "model-thinking" in script.text
     assert "function setProse" in script.text
@@ -1719,7 +1814,7 @@ def test_reasoning_stays_out_of_the_answer_and_out_of_the_next_call(world, monke
     assert "function continueRun" in script.text
     send_fn = script.text.split("async function sendDraft")[1].split("async function retry")[0]
     assert '$("send").disabled' not in send_fn
-    css = world.client.get("/static/app.css?v=33")
+    css = world.client.get("/static/app.css?v=36")
     assert css.status_code == 200
     assert ".model-thinking" in css.text
     assert ".model-thinking-p" in css.text
@@ -1980,9 +2075,9 @@ def test_debug_raw_saves_the_first_chunks_only_when_asked(tmp_path, monkeypatch)
 
 def test_adding_a_bot_opens_its_first_chat(world):
     """A new bot is selected, its first chat is created, and the message box is focused."""
-    page = world.client.get("/")
-    assert 'app.js?v=38' in page.text
-    script = world.client.get("/static/app.js?v=38")
+    page = world.client.get("/classic")
+    assert 'app.js?v=41' in page.text
+    script = world.client.get("/static/app.js?v=41")
     assert script.status_code == 200
     submit = script.text.split('$("bot-form").addEventListener("submit"')[1].split('$("toggle-room")')[0]
     assert 'api(`/api/bots/${bot.id}/chats`' in submit

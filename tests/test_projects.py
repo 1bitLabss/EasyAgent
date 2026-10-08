@@ -124,6 +124,15 @@ def test_bot_project_upload_does_not_rewrite_chats_and_only_that_bot_can_read(tm
     assert removed_file.status_code == 200, removed_file.text
     assert removed_file.json()["files"] == []
     assert _chats(tmp_path) == after_turns
+    removed = client.request(
+        "DELETE",
+        f"/api/bots/{ada['id']}/projects/{project['id']}",
+        json={"confirm_name": "  kiln   notes "},
+    )
+    assert removed.status_code == 200, removed.text
+    assert not (tmp_path / "projects" / project["id"]).exists()
+    assert _chats(tmp_path) == after_turns
+    assert _rooms(tmp_path) == rooms_before
 
 
 def test_group_project_is_not_a_room_and_only_chosen_bots_can_read(tmp_path, monkeypatch):
@@ -199,7 +208,7 @@ def test_group_project_is_not_a_room_and_only_chosen_bots_can_read(tmp_path, mon
     assert {item["name"] for item in still.json()["files"]} == names
     assert client.get("/api/rooms").json() == []
 
-    page = client.get("/")
+    page = client.get("/classic")
     assert page.status_code == 200
     assert 'id="screen-projects"' in page.text
     assert 'id="bot-project-form"' in page.text

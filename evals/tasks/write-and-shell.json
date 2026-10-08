@@ -1,0 +1,36 @@
+{
+  "id": "write-and-shell",
+  "category": "files",
+  "prompt": "Write {workspace}/marker.txt with the word MARK-1, then run printf so it prints MARK-2, and tell me both.",
+  "mock": [
+    "```files\nwrite\n{workspace}/marker.txt\nMARK-1\n```",
+    "```shell\nprintf 'MARK-2\\n'\n```",
+    "```files\nread\n{workspace}/marker.txt\n```",
+    "The file says MARK-1 and the command printed MARK-2.",
+    "The file says MARK-1 and the command printed MARK-2."
+  ],
+  "criteria": [
+    {
+      "kind": "file_contains",
+      "text": "MARK-1",
+      "path": "{workspace}/marker.txt"
+    },
+    {
+      "kind": "tool_called",
+      "tool": "shell",
+      "success": true
+    },
+    {
+      "kind": "reply_regex",
+      "pattern": "MARK-1"
+    },
+    {
+      "kind": "reply_regex",
+      "pattern": "MARK-2"
+    },
+    {
+      "kind": "max_steps",
+      "limit": 10
+    }
+  ]
+}

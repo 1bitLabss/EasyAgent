@@ -1,0 +1,32 @@
+{
+  "id": "write-exact",
+  "category": "files",
+  "prompt": "Write the file {workspace}/note.txt so the only line is HELLO-EVAL.",
+  "mock": [
+    "```files\nwrite\n{workspace}/note.txt\nHELLO-EVAL\n```",
+    "```files\nread\n{workspace}/note.txt\n```",
+    "The file note.txt contains HELLO-EVAL.",
+    "The file note.txt contains HELLO-EVAL."
+  ],
+  "criteria": [
+    {
+      "kind": "file_exists",
+      "path": "{workspace}/note.txt"
+    },
+    {
+      "kind": "file_contains",
+      "text": "HELLO-EVAL",
+      "path": "{workspace}/note.txt"
+    },
+    {
+      "kind": "tool_called",
+      "tool": "files",
+      "action": "write",
+      "success": true
+    },
+    {
+      "kind": "max_steps",
+      "limit": 8
+    }
+  ]
+}

@@ -1,0 +1,18 @@
+{
+  "id": "quick-hello",
+  "category": "answer",
+  "prompt": "Say hello in one short sentence.",
+  "mock": [
+    "Hello."
+  ],
+  "criteria": [
+    {
+      "kind": "reply_regex",
+      "pattern": "Hello"
+    },
+    {
+      "kind": "max_steps",
+      "limit": 2
+    }
+  ]
+}

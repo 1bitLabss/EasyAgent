@@ -1,0 +1,48 @@
+{
+  "id": "html-lark",
+  "category": "page",
+  "prompt": "Make a small HTML page about Lark field notes and save it at {workspace}/lark.html. Put a real picture in the file.",
+  "mock": [
+    "```files\nwrite\n{workspace}/lark.html\n<!DOCTYPE html>\n<html>\n<head><title>Lark</title>\n<style>body{display:flex;background:#f4efe6;color:#1c1b19;font-size:18px}</style>\n</head>\n<body>\n<svg width=\"120\" height=\"80\" viewBox=\"0 0 120 80\"><circle cx=\"40\" cy=\"40\" r=\"18\" fill=\"#c4a574\"/><rect x=\"70\" y=\"20\" width=\"30\" height=\"40\" fill=\"#16324a\"/></svg>\n<p>Lark field notes</p>\n</body>\n</html>\n```",
+    "```files\nread\n{workspace}/lark.html\n```",
+    "The page is lark.html. It has a drawn picture and the words Lark field notes.",
+    "The page is lark.html. It has a drawn picture and the words Lark field notes.",
+    "The page is lark.html. It has a drawn picture and the words Lark field notes."
+  ],
+  "criteria": [
+    {
+      "kind": "file_exists",
+      "path": "{workspace}/lark.html"
+    },
+    {
+      "kind": "file_contains",
+      "text": "<svg",
+      "path": "{workspace}/lark.html"
+    },
+    {
+      "kind": "file_contains",
+      "text": "<circle",
+      "path": "{workspace}/lark.html"
+    },
+    {
+      "kind": "file_contains",
+      "text": "Lark field notes",
+      "path": "{workspace}/lark.html"
+    },
+    {
+      "kind": "file_contains",
+      "text": "display:flex",
+      "path": "{workspace}/lark.html"
+    },
+    {
+      "kind": "tool_called",
+      "tool": "files",
+      "action": "write",
+      "success": true
+    },
+    {
+      "kind": "max_steps",
+      "limit": 12
+    }
+  ]
+}

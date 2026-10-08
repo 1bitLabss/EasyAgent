@@ -649,6 +649,15 @@ function syncNewConnection() {
   show(box, select.value === "__new__");
 }
 
+function foldName(value) {
+  return String(value || "").trim().replace(/\s+/g, " ").toLowerCase();
+}
+
+function namesMatch(typed, stored) {
+  const right = foldName(stored);
+  return right.length > 0 && foldName(typed) === right;
+}
+
 function renderChatList() {
   const list = $("chat-list");
   list.replaceChildren();
@@ -656,7 +665,7 @@ function renderChatList() {
   for (const chat of state.chats) {
     const selected = chat.id === state.chatId;
     const count = chat.message_count === 1 ? "1 message" : `${chat.message_count} messages`;
-    list.append(el("li", {}, [
+    list.append(el("li", { class: "chat-row" }, [
       el("button", {
         type: "button",
         class: selected ? "chat-item is-selected" : "chat-item",
@@ -666,6 +675,11 @@ function renderChatList() {
         el("strong", {}, [chat.title || "New chat"]),
         el("small", {}, [count]),
       ]),
+      el("button", {
+        type: "button",
+        class: "text-btn",
+        onclick: () => confirmDeleteChat(chat),
+      }, ["Delete chat"]),
     ]));
   }
 }
@@ -724,9 +738,15 @@ function renderStage() {
     $("settings-name").value = bot.name || "";
     $("settings-model").value = bot.model || "";
     $("settings-context").value = String(contextTokens);
+    if ($("settings-check")) $("settings-check").checked = bot.check_enabled !== false;
     state.renderedBotId = bot.id;
   }
   paintFaceSwatches();
+  if (screen === "settings" && bot && state.learnFor !== bot.id) {
+    state.learnFor = bot.id;
+    refreshLearning(bot.id);
+  }
+  if (screen !== "settings") state.learnFor = null;
   renderChatList();
   const chat = state.chat;
   const wrongBot = chat && chat.bot_id && chat.bot_id !== bot.id;
@@ -955,6 +975,19 @@ function whoLine(label, bot, options) {
   if (bot) kids.push(makeFace(bot, options || {}));
   kids.push(document.createTextNode(label));
   return el("p", { class: "who" }, kids);
+}
+
+function checkBadge(message) {
+  if (!message || message.role === "user") return null;
+  if (message.check === "revised") return el("span", { class: "check-badge" }, ["revised after check"]);
+  if (message.check === "checked") return el("span", { class: "check-badge" }, ["checked"]);
+  return null;
+}
+
+function learnNote(message) {
+  const text = String((message && message.lesson) || "");
+  if (!text.startsWith("Learned:")) return null;
+  return el("p", { class: "learn-note" }, [text]);
 }
 
 function mountChatFace(bot) {
@@ -1363,8 +1396,13 @@ function renderThread() {
     if (open) main.append(choiceRow(message.choices));
     if (message.id) main.append(reactionControl(message, false));
     const speaker = message.role === "user" ? null : bot;
+    const row = whoLine(who, speaker, { halted: failed });
+    const badge = checkBadge(message);
+    if (badge) row.append(badge);
+    const learned = learnNote(message);
+    if (learned) main.append(learned);
     const item = el("li", { class: `message ${message.role}${failed ? " error" : ""}` }, [
-      whoLine(who, speaker, { halted: failed }),
+      row,
       main,
     ]);
     messages.append(item);
@@ -2210,29 +2248,65 @@ async function stopFlight(event) {
   if (currentBot()) renderAskChoices(currentBot());
 }
 
-function openConfirm({ kicker, title, copy, name, action, submitLabel }) {
+function syncConfirmButton() {
+  const typed = $("confirm-form").dataset.typed !== "0";
+  $("confirm-go").disabled = typed && !namesMatch($("confirm-input").value, $("confirm-name").textContent);
+}
+
+function openConfirm({ kicker, title, copy, name, action, submitLabel, typed }) {
+  const needsName = typed !== false;
+  $("confirm-form").dataset.typed = needsName ? "1" : "0";
   $("confirm-kicker").textContent = kicker;
   $("confirm-title").textContent = title;
   $("confirm-copy").textContent = copy;
-  $("confirm-name").textContent = name;
+  $("confirm-name").textContent = name || "";
+  if ($("confirm-type")) $("confirm-type").hidden = !needsName;
   $("confirm-input").value = "";
   $("confirm-go").textContent = submitLabel;
-  $("confirm-go").disabled = true;
   formError("confirm-error", "");
+  syncConfirmButton();
   $("confirm-form").onsubmit = async (event) => {
     event.preventDefault();
-    if ($("confirm-input").value !== name) return;
+    if (needsName && !namesMatch($("confirm-input").value, name || "")) return;
     $("confirm-go").disabled = true;
     try {
       await action();
       $("confirm-dialog").close();
     } catch (error) {
       formError("confirm-error", error.message);
-      $("confirm-go").disabled = $("confirm-input").value !== name;
+      syncConfirmButton();
     }
   };
   $("confirm-dialog").showModal();
-  $("confirm-input").focus();
+  if (needsName) $("confirm-input").focus();
+}
+
+function confirmDeleteChat(chat) {
+  const botId = state.botId;
+  if (!botId || !chat) return;
+  const chatId = chat.id;
+  openConfirm({
+    kicker: "Delete chat",
+    title: `Delete ${chat.title || "this chat"}?`,
+    copy: "This removes only this chat's transcript. The bot and its other chats stay.",
+    typed: false,
+    submitLabel: "Delete chat",
+    action: async () => {
+      await api(`/api/bots/${botId}/chats/${chatId}`, { method: "DELETE" });
+      const wasOpen = state.chatId === chatId;
+      await refreshChats(botId);
+      if (wasOpen) {
+        state.chat = null;
+        state.chatId = null;
+        const next = state.chats[0];
+        if (next) await openChat(next.id);
+        else renderStage();
+      } else {
+        renderChatList();
+      }
+      rememberSelection();
+    },
+  });
 }
 
 function confirmRemoveBot() {
@@ -2307,7 +2381,13 @@ async function saveSettings(event) {
     show($("settings-note"), true);
     return;
   }
-  const body = { name, endpoint_id: endpointId, model: model || null, context_tokens: contextTokens };
+  const body = {
+    name,
+    endpoint_id: endpointId,
+    model: model || null,
+    context_tokens: contextTokens,
+    check_enabled: $("settings-check") ? $("settings-check").checked : true,
+  };
   if (state.pendingFace && state.pendingFace.botId === botId) body.face_color = state.pendingFace.color;
   try {
     await api(`/api/bots/${botId}`, {
@@ -2592,6 +2672,131 @@ function watchSchedules(on) {
   }, 5000);
 }
 
+async function refreshLearning(botId) {
+  if (!botId || state.botId !== botId) return;
+  try {
+    const panel = await api(`/api/bots/${botId}/learning`);
+    if (state.botId !== botId) return;
+    renderLearning(botId, panel);
+  } catch (error) {
+    if (state.botId === botId) formError("learn-error", error.message);
+  }
+}
+
+function renderLearning(botId, panel) {
+  const pause = $("learn-pause");
+  const manual = $("learn-manual");
+  if (pause) pause.checked = Boolean(panel.paused);
+  if (manual) manual.checked = Boolean(panel.manual);
+  fillLearn(botId, "learn-waiting", "learn-waiting-empty", panel.waiting || [], (item) => {
+    const kids = [
+      el("strong", {}, [item.name || "Candidate"]),
+      el("small", {}, [item.status === "ready" ? "Waiting for approval." : "Waiting for a replay."]),
+    ];
+    if (item.reason) kids.push(el("small", {}, [item.reason]));
+    if (item.status === "ready" && item.id) {
+      kids.push(el("button", {
+        type: "button",
+        class: "text-btn",
+        onclick: () => approveCandidate(botId, item.id),
+      }, ["Approve"]));
+    }
+    return el("li", {}, kids);
+  });
+  fillLearn(botId, "learn-promoted", "learn-promoted-empty", panel.promoted || [], (item) => el("li", {}, [
+    el("strong", {}, [item.name || "Skill"]),
+    el("small", {}, [item.reason || "Promoted."]),
+  ]));
+  fillLearn(botId, "learn-rejected", "learn-rejected-empty", panel.rejected || [], (item) => el("li", {}, [
+    el("strong", {}, [item.name || "Candidate"]),
+    el("small", {}, [item.reason || "Rejected."]),
+  ]));
+  const night = $("learn-night");
+  if (night) {
+    night.textContent = (panel.last_night && panel.last_night.summary) || "No nightly pass yet. These notes are written only while this bot is idle.";
+  }
+  const noteList = $("learn-notes");
+  if (noteList) {
+    noteList.replaceChildren();
+    for (const file of panel.notes || []) {
+      const changed = file.changed ? " Changed last night." : "";
+      noteList.append(el("li", {}, [
+        el("strong", {}, [file.title || file.name]),
+        el("small", {}, [`${file.name}. ${file.entries || 0} entries.${changed}`]),
+      ]));
+    }
+  }
+  const pruneList = $("learn-prune");
+  const pruneEmpty = $("learn-prune-empty");
+  const pending = (panel.prune && panel.prune.pending) || [];
+  if (pruneList) {
+    pruneList.replaceChildren();
+    for (const row of pending) {
+      const staying = panel.prune && (panel.prune.pruning === false || panel.prune.keep_forever) ? " Staying." : "";
+      pruneList.append(el("li", {}, [`${row.created_at || "undated"} — ${row.preview || row.message_id}${staying}`]));
+    }
+  }
+  if (pruneEmpty) show(pruneEmpty, pending.length === 0);
+  fillLearn(botId, "learn-skills", "learn-skills-empty", panel.skills || [], (item) => {
+    const uses = item.uses || 0;
+    const rate = item.rate == null ? "no uses yet" : `${Math.round(item.rate * 100)}% passed`;
+    const where = item.archived ? "Archived." : (item.origin === "user" ? "You wrote this." : "Learned.");
+    return el("li", {}, [
+      el("strong", {}, [item.name || "Skill"]),
+      el("small", {}, [`${where} ${uses} use${uses === 1 ? "" : "s"}, ${item.passes || 0} passed, ${item.fails || 0} failed. ${rate}`]),
+    ]);
+  });
+}
+
+function fillLearn(_botId, listId, emptyId, rows, render) {
+  const list = $(listId);
+  const empty = $(emptyId);
+  if (!list) return;
+  list.replaceChildren();
+  if (empty) show(empty, rows.length === 0);
+  for (const row of rows) list.append(render(row));
+}
+
+async function setLearnFlag(kind, on) {
+  const bot = currentBot();
+  if (!bot) return;
+  try {
+    const panel = await api(`/api/bots/${bot.id}/learning/${kind}`, {
+      method: "POST",
+      body: JSON.stringify({ on: Boolean(on) }),
+    });
+    renderLearning(bot.id, panel);
+  } catch (error) {
+    formError("learn-error", error.message);
+    refreshLearning(bot.id);
+  }
+}
+
+async function rollBackLearning() {
+  const bot = currentBot();
+  if (!bot) return;
+  const status = $("learn-status");
+  try {
+    const panel = await api(`/api/bots/${bot.id}/learning/rollback`, { method: "POST", body: "{}" });
+    renderLearning(bot.id, panel);
+    if (status) {
+      status.hidden = false;
+      status.textContent = "Rolled back the last skill or memory change.";
+    }
+  } catch (error) {
+    formError("learn-error", error.message);
+  }
+}
+
+async function approveCandidate(botId, candidateId) {
+  try {
+    const panel = await api(`/api/bots/${botId}/learning/approve/${candidateId}`, { method: "POST", body: "{}" });
+    if (state.botId === botId) renderLearning(botId, panel);
+  } catch (error) {
+    formError("learn-error", error.message);
+  }
+}
+
 async function refreshSchedules(botId) {
   if (state.view !== "bot" || state.botId !== botId) return;
   try {
@@ -2868,6 +3073,9 @@ function wire() {
   $("stop").addEventListener("click", stopFlight);
   $("remove-bot").addEventListener("click", confirmRemoveBot);
   $("settings-form").addEventListener("submit", saveSettings);
+  if ($("learn-pause")) $("learn-pause").addEventListener("change", () => setLearnFlag("pause", $("learn-pause").checked));
+  if ($("learn-manual")) $("learn-manual").addEventListener("change", () => setLearnFlag("manual", $("learn-manual").checked));
+  if ($("learn-rollback")) $("learn-rollback").addEventListener("click", rollBackLearning);
   $("show-skills").addEventListener("click", () => {
     if (!state.botId) {
       showSkills();
@@ -3026,9 +3234,7 @@ function wire() {
   });
   $("info-close").addEventListener("click", closeInfo);
   $("confirm-cancel").addEventListener("click", () => $("confirm-dialog").close());
-  $("confirm-input").addEventListener("input", () => {
-    $("confirm-go").disabled = $("confirm-input").value !== $("confirm-name").textContent;
-  });
+  $("confirm-input").addEventListener("input", syncConfirmButton);
   $("toggle-computer").addEventListener("click", () => {
     const form = $("computer-form");
     if (!form.hidden && !state.computerId) {

@@ -1,0 +1,25 @@
+{
+  "id": "skill-signoff",
+  "category": "skill",
+  "prompt": "Say hello in one sentence, and follow the sign-off skill.",
+  "setup": {
+    "skill": {
+      "name": "sign-off",
+      "description": "How to close a short reply.",
+      "body": "End every reply with the words SIGNED-OFF."
+    }
+  },
+  "mock": [
+    "Hello. SIGNED-OFF."
+  ],
+  "criteria": [
+    {
+      "kind": "reply_regex",
+      "pattern": "SIGNED-OFF"
+    },
+    {
+      "kind": "max_steps",
+      "limit": 2
+    }
+  ]
+}

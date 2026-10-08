@@ -43,6 +43,14 @@ npm test
 
 `pytest` already checks that `GET /api/health` and `GET /api/unread` still have the shape the window reads. A full `npm run build` needs the webview libraries in [desktop/BUILD.md](desktop/BUILD.md). You do not need that for an ordinary Python change.
 
+## Review and learning
+
+EasyAgent uses your connected model to review and learn — no extra model needed. The checker, eval rubrics, and later lesson or skill proposals all use the model that bot is already connected to. A model grade is a proposal. Commands, files, tests, and replay decide what is kept. Do not add a second helper model or a judge-connection setting. The settings screen has the per-bot check toggle and no other model control. `--judge-model` on an eval run only names a model on that same connection. A skill proposal stays in `skills/_candidates` until a check and a replay agree. Skills and memory you wrote are not auto-edited.
+
+## Mascot
+
+The mascot is locked. The grid in `easyagent/mascot.py`, `assets/mascot-original.jpg`, and `assets/banner.jpg` stay as they are. A change needs maintainer approval. A test pins their SHA-256 hashes and fails if one of them moves.
+
 ## Code style
 
 Match the file you are editing. Python uses four-space indentation and type hints where the surrounding code uses them. The page speaks in plain sentences. Do not reformat unrelated lines, and do not add a formatter or a new framework in a drive-by change.

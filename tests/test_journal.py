@@ -516,7 +516,7 @@ def test_hyphenated_keys_are_scrubbed_from_notes_summaries_and_lessons(tmp_path,
         "AKIAIOSFODNN7EXAMPLE",
         "Bearer sk-test-FAKE123456",
     ]
-    assert find_leaks("sk-test-FAKE123")
+    assert find_leaks("sk-test-FAKE123")  # fake-key-fixture
     assert not find_leaks("please check the skill later")
     assert not find_leaks("sk-test")
     for sample in samples:
@@ -524,7 +524,7 @@ def test_hyphenated_keys_are_scrubbed_from_notes_summaries_and_lessons(tmp_path,
         cleaned = scrub_text(store, f"The note says {sample} at the end.")
         assert sample not in cleaned
         assert "[redacted]" in cleaned
-    token = "sk-test-FAKE123"
+    token = "sk-test-FAKE123"  # fake-key-fixture
     messages = [_msg("m1", "user", f"ceramic drawer {token}", "2026-10-08T01:00:00+00:00")]
     chat = _chat(store, bot["id"], messages)
     chat["summarized_through"] = len(messages)

@@ -153,7 +153,7 @@ def test_a_title_is_scrubbed_before_it_is_cut(tmp_path):
     store.ensure()
     endpoint = store.add_endpoint(name="home", base_url="http://127.0.0.1:9/v1", api_key=None)
     bot = store.add_bot(name="Ada", endpoint_id=endpoint["id"], model="your-model")
-    key = "sk-proj-abc_def123456"
+    key = "sk-proj-abc_def123456"  # fake-key-fixture
     title = ("x" * 70) + " " + key
     messages = [_msg("m1", "user", "ceramic drawer note")]
     commit_entries(
@@ -197,7 +197,7 @@ def test_memory_saves_are_scrubbed(tmp_path):
     store.ensure()
     endpoint = store.add_endpoint(name="home", base_url="http://127.0.0.1:9/v1", api_key=None)
     bot = store.add_bot(name="Ada", endpoint_id=endpoint["id"], model="your-model")
-    key = "sk-test-FAKE123"
+    key = "sk-test-FAKE123"  # fake-key-fixture
     _run_memory(
         store,
         ToolRequest(kind="memory", action="new", path="keys", body=f"my staging API key is {key}, remember it"),
@@ -400,7 +400,7 @@ class _Slow(BaseHTTPRequestHandler):
             self.wfile.write(f"{len(piece):X}\r\n".encode() + piece + b"\r\n")
             self.wfile.flush()
 
-        parts = ["facts:", "\n", "1", ". key sk-test-FA", "KE123", "\n", "2", ". a PROM", "ISE", "S.md"]
+        parts = ["facts:", "\n", "1", ". key sk-test-FA", "KE123", "\n", "2", ". a PROM", "ISE", "S.md"]  # fake-key-fixture
         for part in parts:
             send({"choices": [{"delta": {"reasoning_content": part}}]})
         send({"choices": [{"delta": {"content": "Hello "}}]})
@@ -461,7 +461,7 @@ def test_thinking_stays_byte_exact_and_answer_deltas_arrive_live(tmp_path, monke
         assert "Hello " in deltas
         assert "there." in deltas
         thought = "".join(str(event.get("text") or "") for event in events if event.get("type") == "thinking")
-        exact = "facts:\n1. key sk-test-FAKE123\n2. a PROMISES.md"
+        exact = "facts:\n1. key sk-test-FAKE123\n2. a PROMISES.md"  # fake-key-fixture
         assert thought == exact
         assert "FA KE" not in thought
         assert "PROM ISE" not in thought

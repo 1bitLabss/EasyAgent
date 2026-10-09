@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.3.5
+
+- The reaction picker (thumbs up, thumbs down, heart, eyes) stays out of the way until you hover a message, focus it from the keyboard, or tap it. A reaction that was actually saved stays on the message as a small pill that names who placed it.
+
+## 0.3.4
+
+- A long chat no longer remounts its rows while it sits idle. The page draws every message the server already sent (the server still pages at 80, and Earlier messages still loads the rest) instead of guessing a 72px row and sliding that window on every scroll. The scroller opts out of overflow anchoring, and sticking to the bottom only runs when a new message arrives.
+
 ## 0.3.3
 
 - The desktop window opens the page the local server is serving, including when `EASYAGENT_PORT` is not the default. The page bundled into the app only redirects there, so a UI fix reaches Windows without a new installer. The installer version is 0.3.3 so the desktop installers workflow can build that shell.

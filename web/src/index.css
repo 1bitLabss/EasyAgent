@@ -192,6 +192,66 @@ body {
   color: #111111;
 }
 
+.message-row {
+  position: relative;
+  outline: none;
+}
+
+.reaction-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 4px;
+  padding: 0 4px;
+}
+
+.reaction-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
+  border: 1px solid rgba(0, 0, 0, 0.14);
+  border-radius: 999px;
+  background: #fff;
+  padding: 1px 8px 1px 6px;
+  color: #4b4b4b;
+  font-size: 12px;
+  line-height: 1.35;
+}
+
+.dark .reaction-pill {
+  border-color: rgba(255, 255, 255, 0.16);
+  background: rgba(255, 255, 255, 0.08);
+  color: #e4e4e4;
+}
+
+.reaction-who {
+  font-size: 11px;
+}
+
+.reaction-picker {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  opacity: 0;
+  pointer-events: none;
+}
+
+.reaction-pick {
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  padding: 0 2px;
+  font-size: 14px;
+  line-height: 1.2;
+}
+
+.message-row:hover .reaction-picker,
+.message-row:focus-within .reaction-picker,
+.message-row:active .reaction-picker {
+  opacity: 1;
+  pointer-events: auto;
+}
+
 .composer {
   display: flex;
   align-items: flex-end;

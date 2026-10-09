@@ -11,7 +11,7 @@ import { moodForReaction, pokeFace } from "@/lib/mood";
 import { describeRun, faceStateFor, runTone } from "@/lib/run";
 import { hideWhileSending, messageHasBubble, reactionWho } from "@/lib/transcript";
 import { cn } from "@/lib/utils";
-import { ESTIMATE, mergeChat, sameMessage, shareChat, visibleRange, type MessagePage } from "@/lib/window";
+import { mergeChat, sameMessage, shareChat, type MessagePage } from "@/lib/window";
 import { useApp } from "@/store";
 import { canResume, chatStillPolling, flightFor, retryMessage, sendMessage, settleIncoming, stopMessage } from "@/stream";
 import type { Bot, Chat, ChatMessage } from "@/types";
@@ -89,7 +89,7 @@ const MessageRow = memo(function MessageRow({
     if (!removing) pokeFace(botId, moodForReaction(emoji));
   }
   return (
-    <li className={cn("flex flex-col", mine ? "items-end" : "items-start")}>
+    <li tabIndex={message.id ? -1 : undefined} className={cn("message-row flex flex-col", mine ? "items-end" : "items-start")}>
       {message.role === "assistant" && !failed && (message.thinking || "").trim() ? <ThinkingBox text={message.thinking} seconds={message.thought_seconds} /> : null}
       {showBubble ? (
       <div className={cn(mine ? "bubble-user" : "bubble-bot", failed && "bg-danger/10 text-danger")}>
@@ -112,11 +112,25 @@ const MessageRow = memo(function MessageRow({
       {message.check === "checked" ? <Quiet text="Checked" /> : null}
       {message.lesson?.startsWith("Learned:") ? <Quiet text={message.lesson} /> : null}
       {message.id ? (
-        <div className="mt-1 flex items-center gap-1 px-1">
-          {message.reaction ? <button type="button" className="text-sm" title={`${who} reacted`} onClick={() => void react(message.reaction || "")}>{message.reaction}</button> : null}
-          {REACTIONS.map((emoji) => (
-            <button key={emoji} type="button" className="rounded px-0.5 text-sm" onClick={() => void react(emoji)}>{emoji}</button>
-          ))}
+        <div className="reaction-row">
+          {message.reaction ? (
+            <button
+              type="button"
+              className="reaction-pill"
+              data-testid="reaction-pill"
+              title={`${who} reacted`}
+              aria-label={`${who} reacted ${message.reaction}`}
+              onClick={() => void react(message.reaction || "")}
+            >
+              <span aria-hidden="true">{message.reaction}</span>
+              <span className="reaction-who">{who}</span>
+            </button>
+          ) : null}
+          <div className="reaction-picker" data-testid="reaction-picker" role="group" aria-label="React to this message">
+            {REACTIONS.map((emoji) => (
+              <button key={emoji} type="button" className="reaction-pick" aria-label={`React ${emoji}`} onClick={() => void react(emoji)}>{emoji}</button>
+            ))}
+          </div>
         </div>
       ) : null}
     </li>
@@ -130,40 +144,28 @@ const MessageRow = memo(function MessageRow({
 
 const Transcript = memo(function Transcript({
   rows,
-  start,
-  end,
   botName,
   sending,
   onChoose,
 }: {
   rows: ChatMessage[];
-  start: number;
-  end: number;
   botName: string;
   sending: boolean;
   onChoose: (choice: string) => void;
 }) {
-  const windowed = rows.length > 40;
   return (
-    <>
-      {windowed && start > 0 ? <div style={{ height: start * ESTIMATE }} /> : null}
-      <ol className="flex flex-col gap-4">
-        {rows.slice(start, end).map((message, index) => {
-          const at = start + index;
-          return (
-            <MessageRow
-              key={message.id || at}
-              message={message}
-              last={at === rows.length - 1}
-              botName={botName}
-              sending={sending}
-              onChoose={onChoose}
-            />
-          );
-        })}
-      </ol>
-      {windowed && end < rows.length ? <div style={{ height: (rows.length - end) * ESTIMATE }} /> : null}
-    </>
+    <ol className="flex flex-col gap-4">
+      {rows.map((message, index) => (
+        <MessageRow
+          key={message.id || index}
+          message={message}
+          last={index === rows.length - 1}
+          botName={botName}
+          sending={sending}
+          onChoose={onChoose}
+        />
+      ))}
+    </ol>
   );
 });
 
@@ -236,19 +238,16 @@ export function ChatPane() {
     return () => window.clearTimeout(timer);
   }, [botId, chat.data?.id, chat.data?.message_count]);
 
-  const [range, setRange] = useState({ start: 0, end: 40 });
   const stick = useRef(true);
   const anchor = useRef<{ height: number; top: number } | null>(null);
   const loadingOlder = useRef(false);
+  const pinning = useRef(false);
   const messageCount = chat.data?.messages.length || 0;
 
   function onScroll() {
     const el = scroller.current;
-    if (!el) return;
+    if (!el || pinning.current) return;
     stick.current = el.scrollHeight - el.scrollTop - el.clientHeight < 80;
-    if (messageCount > 40) {
-      setRange(visibleRange(el.scrollTop, el.clientHeight, messageCount));
-    }
     if (el.scrollTop < 64) void loadOlder();
   }
 
@@ -282,17 +281,18 @@ export function ChatPane() {
   useLayoutEffect(() => {
     const el = scroller.current;
     if (!el) return;
+    const pin = (top: number) => {
+      pinning.current = true;
+      el.scrollTop = top;
+      pinning.current = false;
+    };
     if (anchor.current) {
-      el.scrollTop = anchor.current.top + (el.scrollHeight - anchor.current.height);
+      pin(anchor.current.top + (el.scrollHeight - anchor.current.height));
       anchor.current = null;
       return;
     }
     if (!stick.current) return;
-    if (messageCount > 40) {
-      const next = { start: Math.max(0, messageCount - 24), end: messageCount };
-      setRange((current) => (current.start === next.start && current.end === next.end ? current : next));
-    }
-    el.scrollTop = el.scrollHeight;
+    pin(el.scrollHeight);
   }, [messageCount, live?.text, live?.reasoning, live?.label]);
 
   useEffect(() => {
@@ -339,9 +339,6 @@ export function ChatPane() {
   const face = faceFor(Boolean(flight?.sending), live?.phase, view?.words, live?.text, running ? "running" : open?.run?.status, view?.words);
   const asking = (open?.messages || []).slice(-1)[0]?.choices;
   const rows = open?.messages || [];
-  const windowed = rows.length > 40;
-  const rowStart = windowed ? Math.min(range.start, rows.length) : 0;
-  const rowEnd = windowed ? Math.max(rowStart, Math.min(range.end, rows.length)) : rows.length;
   const steps = (live?.steps || []).filter((item) => item && item !== "Thinking" && item !== view?.words);
 
   chooseRef.current = (choice) => {
@@ -432,7 +429,7 @@ export function ChatPane() {
       </div>
       </div>
 
-      <div ref={scroller} onScroll={onScroll} className="min-h-0 flex-1 overflow-y-auto px-4 pb-4 pt-2">
+      <div ref={scroller} onScroll={onScroll} className="min-h-0 flex-1 overflow-y-auto px-4 pb-4 pt-2" style={{ overflowAnchor: "none" }}>
         <div className="mx-auto flex w-full max-w-[760px] flex-col gap-4">
           {!chatId || !open ? (
             <div className="flex flex-1 flex-col items-center justify-center px-6 py-24 text-center">
@@ -453,8 +450,6 @@ export function ChatPane() {
               ) : null}
               <Transcript
                 rows={rows}
-                start={rowStart}
-                end={rowEnd}
                 botName={bot?.name || "the bot"}
                 sending={Boolean(flight?.sending)}
                 onChoose={onChoose}

@@ -164,7 +164,7 @@ def test_thought_chunks_and_steps_do_not_run_together():
     assert thought_gap("FA", "KE123") == ""
     assert thought_gap("step 0. ", "step 1. ") == ""
     assert thought_gap("see what is going on.", "Let me start", new_step=True) == "\n\n"
-    parts = ["facts:", "\n", "1", ". key sk-test-FA", "KE123", "\n", "2", ". a PROM", "ISE", "S.md"]
+    parts = ["facts:", "\n", "1", ". key sk-test-FA", "KE123", "\n", "2", ". a PROM", "ISE", "S.md"]  # fake-key-fixture
     assert join_segments(parts) == "".join(parts)
     stepped = "see what is going on." + thought_gap("see what is going on.", "Let me start", new_step=True) + "Let me start"
     assert stepped == "see what is going on.\n\nLet me start"

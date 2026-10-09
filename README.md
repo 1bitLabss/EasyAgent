@@ -8,7 +8,7 @@ The pixel drawing is traced from [mascot-original.jpg](assets/mascot-original.jp
 
 EasyAgent is a free local agent harness for any OpenAI-compatible model. You run it on your own computer. It gives you multiple bots, real tools, markdown memory, and a goal, plan, build, and check loop. It does not include a model, an account, or a cloud copy of your chats.
 
-Version 0.3.3. [MIT license](LICENSE). Copyright Nathan / 1bitLabs.
+Version 0.3.5. [MIT license](LICENSE). Copyright Nathan / 1bitLabs.
 
 I built this for myself, and I'm sharing it free. It is the harness I wanted on my own machine: a few bots, the model I already run, and the files on that computer.
 

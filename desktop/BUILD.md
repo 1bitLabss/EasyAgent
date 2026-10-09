@@ -1,5 +1,7 @@
 # Building the EasyAgent desktop window
 
+The phone you add to the home screen is the page itself. See the README section **Phone on the home Wi-Fi**. A Tauri v2 iOS and Android shell, which loads that same page, is documented in [MOBILE.md](MOBILE.md). It is not part of `npm run build`.
+
 The desktop app is Tauri 2. It opens the existing EasyAgent page in the system webview and adds a tray icon. The FastAPI process is still the app.
 
 Rust 1.90 or newer and Node.js are required. Tauri 2.12, which `cargo` resolves from the `2` requirement in this tree, does not compile on older rustc. `desktop/rust-toolchain.toml` pins 1.90.0 when rustup is installed. The Python package has to be installed as well when the window is the thing that starts the server: `pip install -r requirements.txt` from the repo root.

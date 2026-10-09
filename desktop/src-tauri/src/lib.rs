@@ -14,7 +14,9 @@ use easyagent_supervisor as host;
 
 struct OwnedServer(Mutex<Option<std::process::Child>>);
 
-#[cfg_attr(mobile, tauri::mobile_entry_point)]
+#[cfg(any(target_os = "ios", target_os = "android"))]
+mod mobile;
+
 #[tauri::command]
 fn set_open_at_login(app: tauri::AppHandle, enabled: bool) -> Result<(), String> {
     use tauri_plugin_autostart::ManagerExt;
@@ -33,7 +35,10 @@ fn open_at_login_enabled(app: tauri::AppHandle) -> Result<bool, String> {
     app.autolaunch().is_enabled().map_err(|err| err.to_string())
 }
 
+#[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    #[cfg(any(target_os = "ios", target_os = "android"))]
+    let _phone_shell = mobile::shell_note();
     tauri::Builder::default()
         .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
             focus(app);
@@ -71,12 +76,7 @@ pub fn run() {
             });
             install_tray(app, port)?;
             consider_updates(app.handle());
-            let url = host::app_url(port)
-                .parse::<tauri::Url>()
-                .expect("the local url is valid");
-            window
-                .navigate(url)
-                .map_err(|err| format!("Could not open the EasyAgent page. {err}"))?;
+            open_server_page(&window, port)?;
             Ok(())
         })
         .build(tauri::generate_context!())
@@ -190,7 +190,7 @@ fn install_tray(app: &tauri::App, port: u16) -> tauri::Result<()> {
             let (pixels, width, height) = host::draw_icon(count);
             let _ = paint.set_tooltip(Some(title));
             let _ = paint.set_icon(Some(Image::new_owned(pixels, width, height)));
-            std::thread::sleep(Duration::from_secs(2));
+            std::thread::sleep(host::UNREAD_POLL);
         }
     });
     Ok(())
@@ -214,6 +214,25 @@ fn consider_updates(app: &tauri::AppHandle) {
             Err(err) => eprintln!("EasyAgent updates are not signed yet ({err}). No update was installed."),
         }
     });
+}
+
+/// The window's first page is the local server. Navigate again once that
+/// process is actually listening, including when `EASYAGENT_PORT` is not 44721.
+/// If a Windows webview stayed on the copy bundled into the app, leave it.
+fn open_server_page(window: &tauri::WebviewWindow, port: u16) -> Result<(), String> {
+    let target = host::app_url(port);
+    let url = target
+        .parse::<tauri::Url>()
+        .map_err(|err| format!("Could not open the EasyAgent page. {err}"))?;
+    window
+        .navigate(url)
+        .map_err(|err| format!("Could not open the EasyAgent page. {err}"))?;
+    let script = format!(
+        "try {{ if (location.hostname !== '127.0.0.1' && location.hostname !== 'localhost') location.replace({}); }} catch (e) {{}}",
+        serde_json::to_string(&target).unwrap_or_else(|_| "\"http://127.0.0.1:44721/\"".into())
+    );
+    let _ = window.eval(&script);
+    Ok(())
 }
 
 fn focus(app: &tauri::AppHandle) {

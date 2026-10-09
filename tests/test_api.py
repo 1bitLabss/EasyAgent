@@ -2127,8 +2127,7 @@ def test_a_running_turn_is_visible_before_the_model_answers(world, monkeypatch):
     stored = world.client.get(f"/api/bots/{bot['id']}/chats/{chat['id']}").json()
     assert stored["run"]["status"] == "idle"
     assert stored["messages"][-1]["content"] == "Ready."
-    assert stored["messages"][-1]["thinking"] == "check the X account first Let me first check"
-    assert "firstLet" not in stored["messages"][-1]["thinking"]
+    assert stored["messages"][-1]["thinking"] == "check the X account firstLet me first check"
 
 
 def test_a_failed_run_says_stopped_and_can_be_retried(world, monkeypatch):

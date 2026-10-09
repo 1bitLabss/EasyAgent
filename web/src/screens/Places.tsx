@@ -2,7 +2,8 @@ import { useQuery } from "@tanstack/react-query";
 import { useEffect, useState, type ReactNode } from "react";
 import { api, queryClient, saveToken } from "@/api";
 import { Face } from "@/components/Face";
-import { Markdown, Thinking } from "@/components/Markdown";
+import { ThinkingBox } from "@/components/ThinkingBox";
+import { Markdown } from "@/components/Markdown";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogDescription, DialogTitle } from "@/components/ui/dialog";
 import { Input, Textarea } from "@/components/ui/input";
@@ -183,7 +184,7 @@ export function RoomsScreen() {
                     {speaker ? <Face color={speaker.face_color} tiny /> : null}
                     {message.speaker_name || (message.role === "user" ? "You" : "Reply")}
                   </p>
-                  {message.role !== "user" ? <Thinking text={message.thinking} /> : null}
+                  {message.role !== "user" ? <ThinkingBox text={message.thinking} seconds={message.thought_seconds} /> : null}
                   {message.role === "user" ? <p className="whitespace-pre-wrap">{message.content}</p> : <Markdown text={message.content || ""} />}
                   {last && (message.choices || []).length > 1 ? (
                     <div className="mt-2 flex flex-wrap gap-2">
@@ -502,7 +503,7 @@ export function TokenGate() {
   const [error, setError] = useState("");
   if (!needed) return null;
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-background p-4">
+    <div className="safe-overlay fixed inset-0 z-50 flex items-center justify-center bg-background p-4">
       <form className="w-full max-w-sm space-y-3 rounded-lg border border-border bg-card p-5" onSubmit={(event) => {
         event.preventDefault();
         const token = String(new FormData(event.currentTarget).get("token") || "");

@@ -1,14 +1,15 @@
 """Who may open EasyAgent.
 
-The computer running the process can always open it. A phone on the
-network can open it only when EASYAGENT_TOKEN is set and the request
-presents that token. The peer address comes from the socket. Forwarded
-headers are ignored.
+The computer running the process can always open it. A phone on the home
+LAN can open it only when Phone access is on and the request presents a
+pairing token. An address outside that LAN is refused. The peer address
+comes from the socket. Forwarded headers are ignored.
 """
 
 from __future__ import annotations
 
 import hashlib
+import ipaddress
 import os
 import secrets
 import socket
@@ -17,6 +18,16 @@ from pathlib import Path
 # Starlette's TestClient uses the host name "testclient". That value is not
 # a TCP address a phone can choose.
 _LOCAL = {"127.0.0.1", "::1", "localhost", "testclient"}
+# Home networks only. Python's ipaddress.is_private also marks documentation
+# ranges such as 203.0.113.0/24, and those are not a house LAN.
+_LAN_NETS = (
+    ipaddress.ip_network("10.0.0.0/8"),
+    ipaddress.ip_network("172.16.0.0/12"),
+    ipaddress.ip_network("192.168.0.0/16"),
+    ipaddress.ip_network("169.254.0.0/16"),
+    ipaddress.ip_network("fc00::/7"),
+    ipaddress.ip_network("fe80::/10"),
+)
 
 
 def configured_token() -> str:
@@ -38,13 +49,29 @@ def lan_ip() -> str | None:
     return ip
 
 
-def is_local(host: str | None) -> bool:
+def _cleaned(host: str | None) -> str:
     if not host:
-        return False
+        return ""
     cleaned = host.split("%", 1)[0].strip().lower()
     if cleaned.startswith("::ffff:"):
         cleaned = cleaned.removeprefix("::ffff:")
-    return cleaned in _LOCAL
+    return cleaned
+
+
+def is_local(host: str | None) -> bool:
+    return _cleaned(host) in _LOCAL
+
+
+def is_lan(host: str | None) -> bool:
+    """A private or link-local address. Loopback is local, not LAN."""
+    cleaned = _cleaned(host)
+    if not cleaned or cleaned in _LOCAL:
+        return False
+    try:
+        ip = ipaddress.ip_address(cleaned)
+    except ValueError:
+        return False
+    return any(ip in network for network in _LAN_NETS)
 
 
 def presented_token(headers) -> str:
@@ -57,14 +84,20 @@ def presented_token(headers) -> str:
     return ""
 
 
-def access_decision(host: str | None, presented: str) -> str:
-    """allow, refuse (no token configured), or need_token."""
+def access_decision(host: str | None, presented: str, phone=None) -> str:
+    """allow, refuse, or need_token.
+
+    Loopback is allowed. Anything outside the home LAN is refused, even
+    with a token. A LAN phone needs Phone access and a pairing token.
+    """
     if is_local(host):
         return "allow"
-    expected = configured_token()
-    if not expected:
+    if not is_lan(host):
         return "refuse"
-    if token_matches(presented, expected):
+    if phone is None or not getattr(phone, "enabled", False):
+        return "refuse"
+    accepts = getattr(phone, "accepts", None)
+    if accepts and accepts(presented):
         return "allow"
     return "need_token"
 
@@ -79,7 +112,7 @@ def token_matches(presented: str, expected: str) -> bool:
 
 def is_shell(path: str) -> bool:
     """The page and its scripts. No transcript is in these files."""
-    return path in {"/", "/favicon.ico", "/classic"} or path.startswith("/static/") or path.startswith("/ui/")
+    return path in {"/", "/favicon.ico", "/classic", "/manifest.webmanifest", "/sw.js"} or path.startswith("/static/") or path.startswith("/ui/")
 
 
 def contained_file(root: Path, relative: str) -> Path | None:
@@ -123,7 +156,20 @@ def standalone_font_css() -> str:
 """
 
 
-def refusal_html() -> str:
+def refusal_html(kind: str = "public") -> str:
+    if kind == "off":
+        title = "Phone access is off."
+        body = (
+            "This phone is on the home network, and Phone access is turned off "
+            "on the computer running EasyAgent. Turn it on in Settings there. "
+            "Chats stay on that computer."
+        )
+    else:
+        title = "This network is not home."
+        body = (
+            "EasyAgent answers the computer it runs on, and a paired phone on that "
+            "home network. This address is outside that network. Chats stay on that computer."
+        )
     return f"""<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -140,8 +186,8 @@ def refusal_html() -> str:
 </head>
 <body>
 <main>
-  <h1>Remote access is off.</h1>
-  <p>This browser is not on the computer running EasyAgent. Set <code>EASYAGENT_TOKEN</code> there, start the app again, and open this address. Type that token on the page. Chats stay on that computer.</p>
+  <h1>{title}</h1>
+  <p>{body}</p>
 </main>
 </body>
 </html>

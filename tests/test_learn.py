@@ -219,7 +219,7 @@ def test_failing_learned_skills_are_archived_and_inbox_respects_the_cap(tmp_path
     assert _live(store) == before
 
 
-def test_llama_cpp_gets_a_schema_and_a_grammar(monkeypatch):
+def test_a_proposal_does_not_send_tools_with_the_schema(monkeypatch):
     seen = {}
 
     async def fake_complete(**kwargs):
@@ -229,15 +229,16 @@ def test_llama_cpp_gets_a_schema_and_a_grammar(monkeypatch):
     monkeypatch.setattr("easyagent.llm.complete", fake_complete)
     data = asyncio.run(
         propose_json(
-            base_url="http://127.0.0.1:9/v1",
+            base_url="http://localhost:8080/v1",
             api_key=None,
-            model="llama-3",
+            model="your-model",
             notes="The marker was missing.",
         )
     )
     assert data["name"] == "marker-note"
+    assert seen["tools"] is False
     assert seen["response_schema"]["required"] == ["name", "trigger", "steps", "pitfalls", "scope", "check"]
-    assert "root ::=" in seen["grammar"]
+    assert "grammar" not in seen or not seen.get("grammar")
 
 
 def test_the_panel_pauses_and_a_running_chat_blocks_the_idle_pass(tmp_path):
@@ -289,3 +290,179 @@ def test_the_panel_pauses_and_a_running_chat_blocks_the_idle_pass(tmp_path):
     assert "EasyAgent uses your connected model to review and learn — no extra model needed." in readme
     assert "Hermes" not in readme
     assert "Nous" not in readme
+
+
+_REJECTED = (
+    '{"name":"missed-reply","trigger":"when a reply is marked down","steps":["Say what was wrong."],'
+    '"pitfalls":[],"scope":"this bot","check":{"kind":"command","command":"false","exit_code":0}}'
+)
+
+
+def test_a_thumbs_down_proposes_a_candidate_and_the_gate_rejects_it(tmp_path, monkeypatch):
+    from fastapi.testclient import TestClient
+
+    from easyagent.app import create_app
+
+    monkeypatch.setenv("EASYAGENT_LEARN", "1")
+    clear_stop()
+
+    async def complete(**kwargs):
+        messages = kwargs.get("messages") or []
+        system = ""
+        if messages and isinstance(messages[0], dict):
+            system = str(messages[0].get("content") or "")
+        if "Propose one skill" in system:
+            return _REJECTED
+        return "The kiln cooled evenly."
+
+    monkeypatch.setattr("easyagent.llm.complete", complete)
+    client = TestClient(create_app(tmp_path))
+    endpoint = client.post("/api/endpoints", json={"name": "home", "base_url": "http://127.0.0.1:9/v1"}).json()
+    bot = client.post("/api/bots", json={"name": "Ada", "endpoint_id": endpoint["id"], "model": "bot-model"}).json()
+    chat = client.post(f"/api/bots/{bot['id']}/chats").json()
+    sent = client.post(
+        f"/api/bots/{bot['id']}/chats/{chat['id']}/messages",
+        json={"content": "how did the firing go"},
+    )
+    assert sent.status_code == 200, sent.text
+    answer = sent.json()["chat"]["messages"][-1]
+    reacted = client.post(
+        f"/api/bots/{bot['id']}/chats/{chat['id']}/messages/{answer['id']}/reaction",
+        json={"emoji": "👎"},
+    )
+    assert reacted.status_code == 200, reacted.text
+    panel = client.get(f"/api/bots/{bot['id']}/learning")
+    assert panel.status_code == 200
+    waiting = panel.json()["waiting"]
+    assert [item["name"] for item in waiting] == ["missed-reply"]
+    assert waiting[0]["status"] == "candidate"
+    assert not (tmp_path / "skills" / "missed-reply.md").is_file()
+    slept = client.post(f"/api/bots/{bot['id']}/learning/sleep")
+    assert slept.status_code == 200, slept.text
+    body = slept.json()
+    assert body["status"] == "done"
+    assert any(item.get("name") == "missed-reply" for item in body["rejected"])
+    again = client.get(f"/api/bots/{bot['id']}/learning").json()
+    assert all(item.get("name") != "missed-reply" for item in again["waiting"])
+    assert any(item.get("name") == "missed-reply" for item in again["rejected"])
+    assert not (tmp_path / "skills" / "missed-reply.md").is_file()
+
+
+def test_a_user_correction_proposes_a_candidate(tmp_path, monkeypatch):
+    from fastapi.testclient import TestClient
+
+    from easyagent.app import create_app
+
+    monkeypatch.setenv("EASYAGENT_LEARN", "1")
+    clear_stop()
+
+    async def complete(**kwargs):
+        messages = kwargs.get("messages") or []
+        system = str(messages[0].get("content") or "") if messages else ""
+        if "Propose one skill" in system:
+            return (
+                '{"name":"corrected-reply","trigger":"when the person corrects a reply","steps":["Use the correction."],'
+                '"pitfalls":[],"scope":"this bot","check":{"kind":"command","command":"false","exit_code":0}}'
+            )
+        return "The sky is green."
+
+    monkeypatch.setattr("easyagent.llm.complete", complete)
+    client = TestClient(create_app(tmp_path))
+    endpoint = client.post("/api/endpoints", json={"name": "home", "base_url": "http://127.0.0.1:9/v1"}).json()
+    bot = client.post("/api/bots", json={"name": "Ada", "endpoint_id": endpoint["id"], "model": "bot-model"}).json()
+    chat = client.post(f"/api/bots/{bot['id']}/chats").json()
+    first = client.post(
+        f"/api/bots/{bot['id']}/chats/{chat['id']}/messages",
+        json={"content": "what color is the sky"},
+    )
+    assert first.status_code == 200, first.text
+    second = client.post(
+        f"/api/bots/{bot['id']}/chats/{chat['id']}/messages",
+        json={"content": "that's not right, I meant blue"},
+    )
+    assert second.status_code == 200, second.text
+    waiting = client.get(f"/api/bots/{bot['id']}/learning").json()["waiting"]
+    assert [item["name"] for item in waiting] == ["corrected-reply"]
+    assert waiting[0]["source"]["reason"] == "correction"
+    assert not (tmp_path / "skills" / "corrected-reply.md").is_file()
+
+
+def test_a_checker_revision_and_the_nightly_pass_propose_candidates(tmp_path, monkeypatch):
+    import json
+
+    from easyagent.check import force_check, review_turn
+    from easyagent.journal import run_pass
+    from datetime import datetime, timezone
+
+    monkeypatch.setenv("EASYAGENT_LEARN", "1")
+    store, _endpoint, bot = _world(tmp_path)
+    observe(store, bot["id"], "The kiln reply was wrong and had to be redone.", reason="correction", task="Check the kiln")
+
+    async def complete(**kwargs):
+        messages = kwargs.get("messages") or []
+        system = str(messages[0].get("content") or "") if messages else ""
+        if "Propose one skill" in system:
+            assert kwargs.get("timeout") in {None, 180.0} or (kwargs.get("timeout") or 0) >= 180
+            return _REJECTED
+        user = str(messages[-1].get("content") or "") if messages else ""
+        passed = "FABRICATED-CLAIM" not in user
+        return json.dumps(
+            {
+                "pass": passed,
+                "problems": [] if passed else ["The reply quotes a line that was not returned."],
+                "fix_hint": "" if passed else "Say the attempt failed.",
+            }
+        )
+
+    monkeypatch.setattr("easyagent.llm.complete", complete)
+
+    async def run_turn(**kwargs):
+        if not getattr(run_turn, "done", False):
+            run_turn.done = True
+            yield "ledger", json.dumps([{"kind": "files", "action": "read", "ok": False, "result": "No such file"}])
+            yield "final", "The first line is FABRICATED-CLAIM."
+            return
+        yield "ledger", "[]"
+        yield "final", "The read failed. There is no line to quote."
+
+    force_check(True)
+    try:
+        events = []
+
+        async def collect():
+            async for kind, text in review_turn(
+                run_turn,
+                base_url="http://127.0.0.1:9/v1",
+                api_key=None,
+                model="bot-model",
+                messages=[{"role": "user", "content": "Read the note."}],
+                store=store,
+                bot_id=bot["id"],
+            ):
+                events.append((kind, text))
+
+        asyncio.run(collect())
+    finally:
+        force_check(False)
+    assert any(kind == "check" and "revised" in text for kind, text in events)
+    waiting = list_candidates(store, bot["id"], status="candidate")
+    assert any(item["name"] == "missed-reply" and (item.get("source") or {}).get("reason") == "checker" for item in waiting)
+    assert not (store.skills_dir / "missed-reply.md").is_file()
+
+    async def nightly(**kwargs):
+        messages = kwargs.get("messages") or []
+        system = str(messages[0].get("content") or "") if messages else ""
+        if "Propose one skill" in system:
+            assert kwargs.get("timeout") == 180.0
+            return (
+                '{"name":"night-note","trigger":"after the idle pass","steps":["Keep the note."],'
+                '"pitfalls":[],"scope":"this bot","check":{"kind":"command","command":"false","exit_code":0}}'
+            )
+        return ""
+
+    monkeypatch.setattr("easyagent.llm.complete", nightly)
+    payload = asyncio.run(run_pass(store, bot, now=datetime(2026, 10, 8, 3, 0, tzinfo=timezone.utc), force=True))
+    assert payload["result"] == "updated"
+    names = {item["name"] for item in list_candidates(store, bot["id"], status="candidate")}
+    assert "night-note" in names
+    assert not (store.skills_dir / "night-note.md").is_file()

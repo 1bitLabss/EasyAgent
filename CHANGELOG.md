@@ -1,5 +1,59 @@
 # Changelog
 
+## 0.3.3
+
+- The desktop window opens the page the local server is serving, including when `EASYAGENT_PORT` is not the default. The page bundled into the app only redirects there, so a UI fix reaches Windows without a new installer. The installer version is 0.3.3 so the desktop installers workflow can build that shell.
+- The tray asks `/api/unread` every 15 seconds. It no longer opens a new connection every 2 seconds.
+- An open chat checks for an approval card every 5 seconds while a reply is running. It stops when that run is idle, and it pauses while the window is hidden.
+
+## 0.3.2
+
+- A finished reply stops the chat transcript poll. The page no longer asks for `?window=80` every couple of seconds after the answer is on screen, and it does not mark the chat read again on every refresh.
+- Unread is one request per window, at least eight seconds apart, and a hidden window does not ask. Sidebar tiles read that same result.
+- The bubbles stay mounted when a refresh repeats the same transcript, so the text does not flash and the typing box keeps focus.
+
+## 0.3.1
+
+- A risky tool call waits for you. The chat shows an approval card with the exact command or path, the rule that fired, and Approve once, Deny, and, when it is safe to offer, Always allow this exact command for this bot. Deny and an expired card are final. The bot does not retry that action.
+- Careful is the default for each bot. Normal allows replacing a file inside the workspace. Advanced asks you to type the bot's name, and a blocked action stays blocked unless you unlock that one rule. An unlocked rule still waits for a yes.
+- Wiping a disk, deleting a profile root, turning off the firewall or Defender, dumping credentials, reading browser cookies or saved passwords, piping a download into a shell, a fork bomb, and editing the guardrails are blocked even with approval.
+- An approved delete on this computer goes to EasyAgent Trash. An overwrite keeps a snapshot first. Settings lists the audit log and can restore either one.
+- Pages, files, and tool output are marked as data. A command copied out of that text waits for you. A lesson or a nightly proposal that would weaken the guardrails is rejected.
+- This is the guardrail release that was planned as 0.2.4. The phone app had already shipped as 0.3.0, so the version moves forward to 0.3.1 instead of back.
+
+## 0.3.0
+
+- EasyAgent installs on an iPhone or an Android phone from the page you already use. The icon is the locked mascot face. On a phone the faces sit in a bar at the bottom, the message box stays above the keyboard, and the Thinking box still stops scrolling at a short height.
+- On an iPhone, the Camera app reads the pairing code and Safari opens EasyAgent. Add to Home Screen from that page keeps the pairing token, including the separate storage the home-screen icon uses. The page stays under the notch, the keyboard does not cover the message box, and tapping the box does not zoom the page.
+- The server listens on this computer only, until you turn on Phone access in Settings. It then also listens on the home network. Settings shows a QR code. Scanning it once stores a pairing token on the phone, and you can revoke that phone later. An address outside the home network is refused. The API does not answer a phone that has no token.
+- Windows Defender Firewall needs an inbound rule for TCP port 44721 from the local subnet. Settings explains that and can add the rule after you agree. `EASYAGENT_FIREWALL=1` is the same agreement from the launcher.
+- A Tauri v2 iOS and Android shell is documented in desktop/MOBILE.md. It is not required for the home-screen app. It loads this same page and pairs the same way.
+
+## 0.2.3
+
+- Learning can propose a candidate on llama.cpp even when the address and the model name do not contain the word llama. EasyAgent asks the server what it is, and a grammar error counts too. A learning proposal, the checker, the nightly pass, the rolling summary, and eval grading do not send the tool list. If a schema is rejected, the call is tried again as plain JSON, and a JSON object is still read when it sits inside a think block or a code fence. A correction, a thumbs-down, and the nightly pass each leave a candidate waiting, and a check that does not pass still rejects it.
+- The nightly pass tells the model today's date and the timezone, and it shows the pipe-row format with an example. It does not send tools. An explicit promise such as "I will check the boiler tomorrow" is recorded. When a chat is using the only slot, the nightly pass and the other background calls step aside and try again later instead of waiting until they time out.
+- A memory line is scrubbed with the same secret scrub as a lesson and a note.
+- Thinking text is kept as the model streamed it. Newlines and spaces stay, and a word is not split by an inserted space. The reply's words are sent as they arrive.
+- The bot's name sits above the conversation. An empty thinking box is not shown, and a retry stays in the one box that is already open. A turn with no words does not leave an empty bubble. Reactions stay visible, and the tooltip says you or the bot's name.
+- A note title is scrubbed before it is shortened, so a cut key does not leave a fragment such as sk-proj. A prediction records what the bot expected. The person's own message is not filed as the expectation, and a reaction with no words is not a prediction.
+- Rolling back the last change consumes that snapshot. Another press says there is nothing left when the ledger has already been used, and the button stays off. A waiting candidate has Reject. Rejecting it does not install the skill.
+- The notes snapshot time is shown on your clock. Bot colors stay off the colors used for waiting, reconnecting, thinking, a tool, and a halt. Waiting and reconnecting are different colors. A new run clears the previous stop reason.
+
+## 0.2.2
+
+- Thinking is a box above the reply. It stays open and scrolls on its own while the model is reasoning, then folds to one line that you can open again. A check note stays in that same box.
+- When you already have a bot, EasyAgent opens that bot's chat. It remembers the last one you used, and otherwise opens the first. Add a bot is only there when you have none.
+- The list of transcripts that can be removed shows the time on your clock.
+- A secret with hyphens, such as an sk-test key, is scrubbed from the eight notes, the rolling summary, and lessons. The same scrubber catches sk-proj, sk-ant, ghp_, github_pat_, Slack xox tokens, AKIA keys, and Bearer tokens.
+- A revised check, a correction, a thumbs-down, and the nightly pass can propose a learning candidate. It stays a candidate until the replay or the check passes.
+- A finished answer that mentions a later check is kept. Only a reply that is just an announcement is asked to call the tool.
+- A turn that only reacts, or reacts and says a short word, finishes without an empty-reply error.
+- A reaction the bot placed is labeled as the bot's. A reaction you placed stays yours.
+- The nightly notes and the rolling summary wait several minutes for a local model, and they still use the normal retry budget.
+- Each bot gets a different face color when another bot already has that color.
+- Eval tasks that only checked exact wording now grade the meaning. Checks that a tool ran, a file was written, or a marker was returned stay exact.
+
 ## 0.2.1
 
 - A version tag publishes a GitHub Release and attaches the Windows `.exe` and `.msi`, the macOS `.dmg`, and the Linux `.deb`, AppImage, and `.rpm`. The installers are taken from `desktop/target`, which is where the cargo workspace writes them. The notes on that release are this section. The macOS supervisor build no longer calls the Linux-only `prctl` death signal. About reads the version from the app.

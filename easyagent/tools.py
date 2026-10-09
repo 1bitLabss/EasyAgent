@@ -1415,10 +1415,10 @@ def _run_memory(store: Store, request: ToolRequest, bot_id: str | None) -> str:
         if request.action == "read":
             return store.topic_text(bot_id, request.path)
         if request.action == "file":
-            record = store.add_memory(bot_id, request.body, request.path, create=False)
+            record = store.add_memory(bot_id, scrub_saved(store, request.body), request.path, create=False)
             return f"Filed in {record['topic']}."
         if request.action == "new":
-            record = store.add_memory(bot_id, request.body, request.path, create=True, fresh=True)
+            record = store.add_memory(bot_id, scrub_saved(store, request.body), request.path, create=True, fresh=True)
             return f"Filed in {record['topic']}."
         if request.action == "move":
             record = store.move_memory(bot_id, request.body, request.command, request.path)
@@ -1502,9 +1502,15 @@ def _execute(store: Store, request: ToolRequest, bot_id: str | None = None) -> s
 
 async def execute(store: Store, request: ToolRequest, bot_id: str | None = None) -> str:
     turn_mod.raise_if_cancelled()
+    from easyagent.safety import guard, wrap_output
+
+    request, early = await guard(store, request, bot_id)
+    if early is not None:
+        turn_mod.raise_if_cancelled()
+        return early
     result = await asyncio.to_thread(_execute, store, request, bot_id)
     turn_mod.raise_if_cancelled()
-    return result
+    return wrap_output(request, result, store)
 
 
 async def _run_together(
@@ -1911,8 +1917,29 @@ def _is_announcement(text: str) -> bool:
         return False
     if _SIZE_STATED.search(cleaned) and _names_in(cleaned):
         return False
+    if _has_real_answer(cleaned):
+        return False
     _note_heuristic("_is_announcement", "the reply says it will do the work and does not call a tool")
     return True
+
+
+def _has_real_answer(text: str) -> bool:
+    """A finished reply, even when it also mentions a check for later."""
+    cleaned = " ".join((text or "").split())
+    if not cleaned:
+        return False
+    leads = list(_ANNOUNCE_LEAD.finditer(cleaned))
+    if leads:
+        before = cleaned[: leads[-1].start()].strip(" .,;:-")
+        if len(before.split()) >= 8:
+            return True
+    sentences = [part.strip() for part in re.split(r"(?<=[.!?])\s+", cleaned) if part.strip()]
+    kept = []
+    for sentence in sentences:
+        if _ANNOUNCE_LEAD.search(sentence) and _ANNOUNCE_WORK.search(sentence):
+            continue
+        kept.append(sentence)
+    return len(" ".join(kept).split()) >= 8
 
 
 _STILL_STEP = re.compile(
@@ -3619,6 +3646,16 @@ def _write_memory_md(store: Store, bot_id: str, lesson: str, replaces: str) -> N
         return
 
 
+def scrub_saved(store: Store, text: str) -> str:
+    """Redact saved secrets and token-shaped leaks before a lesson is written."""
+    try:
+        from easyagent.journal import scrub_text
+
+        return scrub_text(store, text or "")
+    except Exception:
+        return redact(store, text or "")
+
+
 def keep_lessons(store: Store, bot_id: str | None, text: str) -> str:
     """Write a lesson the model marked. The chat keeps the model's words, not this fence."""
     if not bot_id:
@@ -3628,8 +3665,8 @@ def keep_lessons(store: Store, bot_id: str | None, text: str) -> str:
         for pair in (_lesson_from_fence(match.group(1)) for match in _MEMORY_FENCE.finditer(text or ""))
         if pair is not None
     ):
-        lesson = " ".join(redact(store, lesson).split())
-        old = " ".join(redact(store, old).split())
+        lesson = " ".join(scrub_saved(store, lesson).split())
+        old = " ".join(scrub_saved(store, old).split())
         if not _worth_saving(lesson):
             continue
         try:
@@ -4384,7 +4421,7 @@ def file_lasting_fact(store: Store, bot_id: str | None, spoken: str) -> str:
     lesson = _lasting_sentence(spoken)
     if not lesson:
         return ""
-    lesson = " ".join(redact(store, lesson).split())
+    lesson = " ".join(scrub_saved(store, lesson).split())
     if not _worth_saving(lesson):
         return ""
     _note_heuristic("_memory", "the model stated a lasting fact, so it is filed")
@@ -4644,12 +4681,7 @@ def _summary_request_is_off(ledger: Ledger, request: ToolRequest | None) -> bool
 
 
 def thought_gap(previous: str, incoming: str, *, new_step: bool = False) -> str:
-    """Separator between two thought pieces. Empty when they already join cleanly.
-
-    A new step is its own paragraph. A chunk that starts a new sentence
-    ('first' + 'Let', or 'on.' + 'Let') gets a space or a blank line so the
-    words do not run together.
-    """
+    """A new model step is its own paragraph. Chunks from one stream are not padded."""
     if not previous or not incoming:
         return ""
     if new_step:
@@ -4658,26 +4690,30 @@ def thought_gap(previous: str, incoming: str, *, new_step: bool = False) -> str:
         if previous.endswith("\n"):
             return "\n"
         return "\n\n"
-    if previous[-1].isspace() or incoming[0].isspace():
-        return ""
-    if previous[-1] in ".!?" and incoming[0].isalpha():
-        return "\n\n"
-    if previous[-1].isalnum() and incoming[0].isupper():
-        return " "
     return ""
 
 
 def join_segments(parts: list[str]) -> str:
-    """Join reasoning chunks from one model call."""
-    text = ""
-    for part in parts:
-        if not part:
-            continue
-        if not text:
-            text = part
-            continue
-        text += thought_gap(text, part) + part
-    return text
+    """Join reasoning chunks from one model call, byte for byte."""
+    return "".join(part for part in parts if part)
+
+
+def _hold_streamed_answer(text: str) -> bool:
+    """Keep a chunk back while it may still be a tool call or only an announcement."""
+    if not text:
+        return True
+    if _cut_off_tool(text):
+        return True
+    try:
+        if parse_tool(text) is not None:
+            return True
+    except ToolError:
+        return True
+    if search_mod.search_query(text or ""):
+        return True
+    if _is_announcement(text):
+        return True
+    return False
 
 
 def _retryable_provider(exc: llm.ProviderError) -> bool:
@@ -4904,25 +4940,26 @@ async def run_turn(
     new_thought = True
 
     def _remember_thought(chunk: str) -> str:
-        """Keep reasoning next to the reply. A second copy of the same block is not added."""
+        """Keep reasoning next to the reply, including spaces and newlines."""
         nonlocal thought, new_thought
-        if not (chunk or "").strip():
+        if not chunk:
             return ""
         incoming = chunk
-        current = thought.strip()
-        folded = " ".join(incoming.split())
-        have = " ".join(current.split())
-        if folded and (
-            have == folded
-            or have.startswith(folded + " ")
-            or current.startswith(incoming.strip() + "\n")
-        ):
-            new_thought = False
-            return ""
-        if len(folded) > 24 and folded in have:
-            new_thought = False
-            return ""
-        gap = thought_gap(thought, incoming, new_step=new_thought)
+        if incoming.strip():
+            current = thought.strip()
+            folded = " ".join(incoming.split())
+            have = " ".join(current.split())
+            if folded and (
+                have == folded
+                or have.startswith(folded + " ")
+                or current.startswith(incoming.strip() + "\n")
+            ):
+                new_thought = False
+                return ""
+            if len(folded) > 24 and folded in have:
+                new_thought = False
+                return ""
+        gap = thought_gap(thought, incoming, new_step=new_thought and bool(incoming.strip()))
         new_thought = False
         addition = gap + incoming
         thought += addition
@@ -5546,7 +5583,9 @@ async def run_turn(
         if remembered:
             detail = f"A standing note: {remembered}\n\n" + detail
         if findings:
-            detail = "Research for the work:\n" + findings + "\n\n" + detail
+            from easyagent.safety import mark_untrusted
+
+            detail = "Research for the work:\n" + mark_untrusted(findings) + "\n\n" + detail
         working = [*working, {"role": "user", "content": detail}]
 
     while True:
@@ -5567,8 +5606,24 @@ async def run_turn(
         text = ""
         parts: list[str] | None = None
         text_bits: list[str] = []
+        sent_answer = ""
+        held_answer = ""
+        splitter = llm._ThinkSplitter()
         new_thought = True
         thought_at = len(thought)
+
+        def _take_answer(bit: str):
+            nonlocal sent_answer, held_answer
+            if not bit:
+                return
+            held_answer += bit
+            if _hold_streamed_answer(held_answer):
+                return
+            sent_answer += held_answer
+            held = held_answer
+            held_answer = ""
+            return held
+
         try:
             async for kind, piece in _pull_model(
                 stream=stream,
@@ -5586,12 +5641,33 @@ async def run_turn(
                         yield "status", piece
                 elif kind == "replay":
                     text_bits.clear()
+                    sent_answer = ""
+                    held_answer = ""
+                    splitter = llm._ThinkSplitter()
                     if len(thought) > thought_at:
                         thought = thought[:thought_at]
                     new_thought = True
                     yield "replay", thought
                 else:
                     text_bits.append(piece)
+                    for split_kind, bit in splitter.feed(piece or ""):
+                        if split_kind == "reasoning":
+                            extra = _remember_thought(bit)
+                            if extra:
+                                yield "thinking", extra
+                            continue
+                        ready = _take_answer(bit)
+                        if ready:
+                            yield "delta", ready
+            for split_kind, bit in splitter.finish():
+                if split_kind == "reasoning":
+                    extra = _remember_thought(bit)
+                    if extra:
+                        yield "thinking", extra
+                    continue
+                ready = _take_answer(bit)
+                if ready:
+                    yield "delta", ready
         except turn_mod.TurnCancelled:
             for event in _partial_stream(text_bits):
                 yield event
@@ -5739,8 +5815,9 @@ async def run_turn(
                 parts = None
             if did_react:
                 yield "reacted", "1"
-            if did_react and not found and not (text or "").strip():
-                for event in _seal(""):
+            if did_react and not found:
+                spoken = strip_tool_markup(text or "").strip()
+                for event in _seal(spoken):
                     yield event
                 return
             if len(found) > 1:
@@ -6244,7 +6321,10 @@ async def run_turn(
             last_sig = sig
             _remember(search_request)
             _saw(search_request, findings)
-            detail = f"Web search ran on this computer, not on the phone.\nQuery: {query}\n\n{findings}"
+            from easyagent.safety import mark_untrusted
+
+            shown = mark_untrusted(findings or "")
+            detail = f"Web search ran on this computer, not on the phone.\nQuery: {query}\n\n{shown}"
             note = ""
             if search_miss:
                 note = (
@@ -6382,7 +6462,11 @@ async def run_turn(
                 for event in _seal(final):
                     yield event
                 return
-            if parts is not None and not _join_lines(lines) and final == (text or ""):
+            if sent_answer and final and (final == sent_answer or final.startswith(sent_answer)):
+                extra = final[len(sent_answer):]
+                if extra:
+                    yield "delta", extra
+            elif parts is not None and not _join_lines(lines) and final == (text or ""):
                 for piece in parts:
                     if piece:
                         yield "delta", piece

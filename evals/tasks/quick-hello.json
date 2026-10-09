@@ -7,8 +7,8 @@
   ],
   "criteria": [
     {
-      "kind": "reply_regex",
-      "pattern": "Hello"
+      "kind": "llm_judge",
+      "rubric": "The reply is a short greeting. Hello, hey, hi, or a similar welcome all pass. Exact wording is not required."
     },
     {
       "kind": "max_steps",

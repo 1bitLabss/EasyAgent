@@ -166,6 +166,7 @@ async def run_night(store: Store) -> dict:
                 {"role": "system", "content": _PROPOSER},
                 {"role": "user", "content": transcript},
             ],
+            tools=False,
         )
     finally:
         gate.reset_connection(conn)
@@ -193,6 +194,7 @@ async def run_night(store: Store) -> dict:
                 {"role": "system", "content": _BREAKER},
                 {"role": "user", "content": transcript + "\n\nProposal:\n" + proposal_text},
             ],
+            tools=False,
         )
     finally:
         gate.reset_connection(conn)
@@ -202,6 +204,10 @@ async def run_night(store: Store) -> dict:
     text = " ".join(redact(store, parsed["text"]).split())
     example = " ".join(redact(store, example).split())
     if not text or not example:
+        return {"kept": [], "dropped": 1}
+    from easyagent.safety import lesson_weakens
+
+    if lesson_weakens(text):
         return {"kept": [], "dropped": 1}
     record = {
         "id": new_id(),

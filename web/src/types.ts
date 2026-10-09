@@ -20,6 +20,8 @@ export type Bot = {
   check_enabled: boolean;
   learn_paused: boolean;
   learn_manual: boolean;
+  safety_mode?: string;
+  safety_unlocks?: string[];
 };
 
 export type Run = {
@@ -44,9 +46,12 @@ export type ChatMessage = {
   role: string;
   content: string;
   thinking?: string;
+  thought_seconds?: number;
   error?: boolean;
   choices?: string[];
   reaction?: string;
+  reaction_by?: string;
+  live?: boolean;
   attachment?: Attachment;
   skills_saved?: string[];
   check?: string;
@@ -154,7 +159,7 @@ export type Learning = {
   promoted: { id: string; name?: string; status?: string; reason?: string }[];
   rejected: { id: string; name?: string; status?: string; reason?: string }[];
   skills: { name: string; origin?: string; uses?: number; passes?: number; fails?: number; archived?: boolean }[];
-  ledger?: { id: string; kind?: string; key?: string; created_at?: string }[];
+  ledger?: { id: string; kind?: string; key?: string; created_at?: string; rolled?: boolean }[];
   notes?: NoteFile[];
   last_night?: { at?: string; summary?: string; changes?: { file: string; added?: number; removed?: number }[] };
   prune?: {

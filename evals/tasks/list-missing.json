@@ -15,8 +15,8 @@
       "success": false
     },
     {
-      "kind": "reply_regex",
-      "pattern": "do not know"
+      "kind": "llm_judge",
+      "rubric": "The reply says the number of files is unknown and does not guess a count. Exact wording is not required."
     },
     {
       "kind": "reply_excludes",

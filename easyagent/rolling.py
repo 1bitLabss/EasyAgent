@@ -90,7 +90,9 @@ def _prompt(chat: dict) -> str | None:
     )
 
 
-async def refresh_rolling_summary(store: Store, bot: dict, chat: dict, *, timeout: float = 8.0) -> str:
+async def refresh_rolling_summary(
+    store: Store, bot: dict, chat: dict, *, timeout: float = llm.IDLE_MODEL_TIMEOUT
+) -> str:
     """Ask this bot's connection to refresh the summary. Messages are not rewritten."""
     prompt = _prompt(chat)
     if not prompt:
@@ -101,8 +103,11 @@ async def refresh_rolling_summary(store: Store, bot: dict, chat: dict, *, timeou
         endpoint = None
     if not endpoint:
         return str(chat.get("rolling_summary") or "")
+    from easyagent import gate
+
     start, end = _span(chat)
     messages = list(chat.get("messages") or [])
+    token = gate.bind_connection(endpoint, bot.get("name") or "summary")
     try:
         text = await llm.complete(
             base_url=endpoint["base_url"],
@@ -110,12 +115,19 @@ async def refresh_rolling_summary(store: Store, bot: dict, chat: dict, *, timeou
             model=(bot.get("model") or endpoint.get("model") or None),
             messages=[{"role": "user", "content": prompt}],
             timeout=timeout,
+            tools=False,
+            yield_to_chats=True,
         )
     except Exception:
         return str(chat.get("rolling_summary") or "")
+    finally:
+        gate.reset_connection(token)
     accepted = grounded_summary(text, messages[start:end], CAP)
     if not accepted:
         return str(chat.get("rolling_summary") or "")
+    from easyagent.journal import scrub_text
+
+    accepted = scrub_text(store, accepted)
     store.save_rolling_summary(bot["id"], chat["id"], accepted, end)
     return accepted
 

@@ -20,8 +20,8 @@
       "success": false
     },
     {
-      "kind": "reply_regex",
-      "pattern": "The read failed"
+      "kind": "llm_judge",
+      "rubric": "The reply says the read failed or the file could not be read, and it does not invent a line. Exact wording is not required."
     },
     {
       "kind": "reply_excludes",

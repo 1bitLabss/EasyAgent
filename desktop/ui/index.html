@@ -33,5 +33,10 @@
     <p class="tagline">AI agents, made easy.</p>
     <p id="status">Starting EasyAgent…</p>
   </div>
+  <script>
+    if (location.hostname !== "127.0.0.1" && location.hostname !== "localhost") {
+      location.replace("http://127.0.0.1:44721/");
+    }
+  </script>
 </body>
 </html>

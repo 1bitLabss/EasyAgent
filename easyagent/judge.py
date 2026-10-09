@@ -77,19 +77,8 @@ def grading_model(bot: dict | None, endpoint: dict, judge_model: str | None = No
 
 
 def parse_grade(text: str) -> dict:
-    """Strict JSON. Anything else is a failed grade, not a pass."""
-    raw = (text or "").strip()
-    if raw.startswith("```"):
-        lines = raw.splitlines()
-        if lines and lines[0].startswith("```"):
-            lines = lines[1:]
-        if lines and lines[-1].strip().startswith("```"):
-            lines = lines[:-1]
-        raw = "\n".join(lines).strip()
-    start = raw.find("{")
-    end = raw.rfind("}")
-    if start >= 0 and end > start:
-        raw = raw[start : end + 1]
+    """Strict JSON. Think blocks and fences are stripped. Anything else is a failed grade."""
+    raw = llm.extract_json_text(text)
     try:
         data = json.loads(raw)
     except json.JSONDecodeError:
@@ -146,6 +135,7 @@ async def grade_text(
                 {"role": "system", "content": prompt},
                 {"role": "user", "content": user},
             ],
+            tools=False,
         )
     finally:
         gate.reset_connection(token)

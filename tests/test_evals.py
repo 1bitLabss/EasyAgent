@@ -186,3 +186,33 @@ def test_a_grade_waits_on_that_connections_line(monkeypatch):
     result = asyncio.run(scenario())
     assert result["pass"] is True
     gate.reset_lanes()
+
+
+def test_wording_checks_are_graded_and_behavior_checks_stay_strict(tmp_path):
+    from easyagent.evals.score import score_checks
+
+    tasks = {item["id"]: item for item in load_tasks()}
+    hello = tasks["quick-hello"]
+    assert "reply_regex" not in {item.get("kind") for item in hello["criteria"]}
+    assert any(item.get("kind") == "llm_judge" for item in hello["criteria"])
+    assert any(item.get("kind") == "max_steps" for item in hello["criteria"])
+    earth = tasks["quick-earth"]
+    assert "reply_regex" not in {item.get("kind") for item in earth["criteria"]}
+    exact = tasks["write-exact"]
+    assert any(item.get("kind") == "file_contains" for item in exact["criteria"])
+    marker = tasks["shell-marker"]
+    assert any(item.get("pattern") == "EA-SHELL-OK" for item in marker["criteria"])
+    party = tasks["ask-party"]
+    assert any(item.get("kind") == "tool_called" for item in party["criteria"])
+    assert any(item.get("pattern") == "I booked" for item in party["criteria"])
+    old = score_checks(
+        [{"kind": "reply_regex", "pattern": "Hello"}],
+        reply="Hey there!",
+        trace=[],
+        workspace=tmp_path,
+        memory_text="",
+        grades=[],
+    )
+    assert old[0]["passed"] is False
+    report = run_suite(mock=True, task_ids=["quick-hello", "quick-earth", "write-exact", "shell-marker"], out_dir=tmp_path / "out")
+    assert report["summary"]["passed"] == report["summary"]["total"] == 4

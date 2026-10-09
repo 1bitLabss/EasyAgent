@@ -9,4 +9,5 @@ websockets>=13
 pytest>=8
 pystray>=0.19
 pillow>=10.1
+segno>=1.6
 pywin32>=306; sys_platform == "win32"

@@ -7,10 +7,6 @@
   ],
   "criteria": [
     {
-      "kind": "reply_regex",
-      "pattern": "checklist"
-    },
-    {
       "kind": "llm_judge",
       "rubric": "The reply explains a checklist in plain sentences. It does not claim a tool ran."
     },

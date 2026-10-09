@@ -1,6 +1,6 @@
 [package]
 name = "easyagent-supervisor"
-version = "0.2.1"
+version = "0.3.3"
 description = "Start or attach to the local EasyAgent server."
 edition = "2021"
 license = "MIT"

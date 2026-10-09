@@ -5,18 +5,26 @@ import type { FaceName } from "@/lib/run";
 
 export const FACE_PALETTE = [
   "#c4532a",
-  "#2a6fdb",
   "#1f8a4c",
   "#c43b7a",
   "#b86e12",
-  "#5c4d9a",
   "#0e7c86",
-  "#8f2d28",
   "#3d6b4f",
   "#a34b2e",
   "#3a4f8a",
   "#6b4a2a",
+  "#7a4e8a",
+  "#2f6f5e",
+  "#9a3d62",
 ];
+
+export const STATE_COLORS = {
+  waiting: "#d0892a",
+  reconnecting: "#3d7ea6",
+  thinking: "#5c4d9a",
+  tool: "#2a6fdb",
+  halted: "#8f2d28",
+};
 
 const FRAMES = ["eyes-mid", "eyes-left", "eyes-right", "eyes-up", "eyes-squint", "eyes-x", "mouth-smile", "mouth-flat", "mouth-open"];
 

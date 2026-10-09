@@ -94,7 +94,7 @@ def names_match(typed: str, stored: str) -> bool:
 
 
 def reaction_signal(message: dict) -> str:
-    """The line the model sees when a person has an emoji on a message."""
+    """The line the model sees when an emoji is on a message, naming who placed it."""
     if not isinstance(message, dict):
         return ""
     emoji = message.get("reaction")
@@ -106,9 +106,10 @@ def reaction_signal(message: dict) -> str:
         excerpt = excerpt[:119].rstrip() + "…"
     whose = "your message" if message.get("role") == "assistant" else "the person's message"
     ident = f" (id {mid})" if mid else ""
+    actor = "You" if message.get("reaction_by") == "bot" else "The person"
     if excerpt:
-        return f"The person reacted {emoji} to {whose}{ident}. It says: {excerpt}"
-    return f"The person reacted {emoji} to {whose}{ident}."
+        return f"{actor} reacted {emoji} to {whose}{ident}. It says: {excerpt}"
+    return f"{actor} reacted {emoji} to {whose}{ident}."
 
 
 def message_index(messages: list, *, self_id: str | None = None) -> str:
@@ -162,6 +163,7 @@ def _set_message_reaction(messages: list, message_id: str, emoji: str) -> None:
     if message.get("role") != "user":
         raise StoreError("React to one of the person's messages.", 400)
     message["reaction"] = chosen
+    message["reaction_by"] = "bot"
 
 
 def _toggle_message_reaction(messages: list, message_id: str, emoji: str) -> None:
@@ -181,8 +183,10 @@ def _toggle_message_reaction(messages: list, message_id: str, emoji: str) -> Non
         found = True
         if message.get("reaction") == emoji:
             message.pop("reaction", None)
+            message.pop("reaction_by", None)
         else:
             message["reaction"] = emoji
+            message["reaction_by"] = "person"
         break
     if not found:
         raise StoreError("That message is not in the transcript.", 404)

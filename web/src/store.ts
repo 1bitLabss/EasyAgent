@@ -62,6 +62,22 @@ function savedTheme(): "light" | "dark" {
   }
 }
 
+export function savedBotId(): string | null {
+  try {
+    return localStorage.getItem("easyagent.bot");
+  } catch {
+    return null;
+  }
+}
+
+function rememberBot(botId: string) {
+  try {
+    localStorage.setItem("easyagent.bot", botId);
+  } catch {
+    /* the next visit falls back to the first bot */
+  }
+}
+
 export const useApp = create<AppState>((set) => ({
   screen: "chat",
   botId: null,
@@ -80,9 +96,15 @@ export const useApp = create<AppState>((set) => ({
   confirm: null,
   setScreen: (screen) => set({ screen, railOpen: false, adding: false }),
   setAdding: (adding) => set(adding ? { adding: true, screen: "chat" } : { adding: false }),
-  goHome: () => set({ botId: null, chatId: null, screen: "chat", railOpen: false, adding: false }),
-  selectBot: (botId) => set({ botId, chatId: null, screen: "chat", railOpen: false }),
-  openBot: (botId, chatId) => set({ botId, chatId, screen: "chat", railOpen: false }),
+  goHome: () => set({ screen: "chat", railOpen: false, adding: false }),
+  selectBot: (botId) => {
+    rememberBot(botId);
+    set({ botId, chatId: null, screen: "chat", railOpen: false });
+  },
+  openBot: (botId, chatId) => {
+    rememberBot(botId);
+    set({ botId, chatId, screen: "chat", railOpen: false });
+  },
   selectChat: (chatId) => set({ chatId, screen: "chat", railOpen: false }),
   setRoom: (roomId) => set({ roomId }),
   setProject: (projectId) => set({ projectId }),

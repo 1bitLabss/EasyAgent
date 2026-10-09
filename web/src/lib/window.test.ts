@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { mergeChat, visibleRange, windowChat } from "./window";
+import { approvalPollMs, mergeChat, shareChat, shareMessages, visibleRange, windowChat } from "./window";
 import type { Chat, ChatMessage } from "@/types";
 
 function message(id: string, content: string): ChatMessage {
@@ -30,6 +30,28 @@ describe("windowChat", () => {
     expect(sliced.messages).toHaveLength(80);
     expect(sliced.message_count).toBe(100);
     expect(sliced.window_start).toBe(20);
+  });
+});
+
+describe("approvalPollMs", () => {
+  it("asks every five seconds only while a run is active and the window is showing", () => {
+    expect(approvalPollMs(true, false)).toBe(5000);
+    expect(approvalPollMs(false, false)).toBe(false);
+    expect(approvalPollMs(true, true)).toBe(false);
+  });
+});
+
+describe("shareMessages", () => {
+  it("returns the same row objects when a poll repeats the transcript", () => {
+    const first = [message("m1", "Hello"), message("m2", "The reply is done.")];
+    const again = [message("m1", "Hello"), message("m2", "The reply is done.")];
+    const shared = shareMessages(first, again);
+    expect(shared).toBe(first);
+    expect(shared[1]).toBe(first[1]);
+    const run = { id: "", status: "idle" as const, started_at: null, last_activity_at: null, current_step: "", reason: "" };
+    const prev = chat(first, { run });
+    expect(shareChat(prev, chat([message("m1", "Hello"), message("m2", "The reply is done.")], { run }))).toBe(prev);
+    expect(shareMessages(first, [message("m1", "Hello"), message("m2", "Changed")])[1]).not.toBe(first[1]);
   });
 });
 

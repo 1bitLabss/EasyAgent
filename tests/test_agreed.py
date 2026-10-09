@@ -261,7 +261,7 @@ def test_tell_me_when_fires_once_for_a_message_and_a_failed_job(tmp_path, monkey
     notices = []
     mode = {"fail": False}
 
-    async def complete(*, base_url, api_key, model, messages, timeout=120):
+    async def complete(*, base_url, api_key, model, messages, timeout=120, **_extra):
         if mode["fail"]:
             raise ProviderError("the job missed its slot")
         return "ack"
@@ -340,7 +340,7 @@ def test_night_pass_drops_a_proposal_without_a_counterexample_and_does_not_insta
             return "NONE"
         return "variant: the person asks for a long design note here"
 
-    async def complete(*, base_url, api_key, model, messages, timeout=120):
+    async def complete(*, base_url, api_key, model, messages, timeout=120, **_extra):
         system = messages[0]["content"]
         if system.startswith("Propose one skill"):
             return propose(messages)
@@ -411,7 +411,7 @@ def test_a_playbook_edit_is_dropped_without_a_counterexample(tmp_path, monkeypat
     before = {path.name: path.read_bytes() for path in sorted(PLAYBOOK_DIR.glob("*.md"))}
     phase = {"break": 0}
 
-    async def complete(*, base_url, api_key, model, messages, timeout=120):
+    async def complete(*, base_url, api_key, model, messages, timeout=120, **_extra):
         system = messages[0]["content"]
         if system.startswith("Propose one skill"):
             transcript = messages[-1]["content"]

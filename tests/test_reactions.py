@@ -192,11 +192,91 @@ def test_the_bot_can_react_to_the_persons_message(tmp_path, monkeypatch):
     stored = _send(client, bot, chat, "hello there")
     assert stored["messages"][0]["content"] == "hello there"
     assert stored["messages"][0]["reaction"] == "👍"
+    assert stored["messages"][0]["reaction_by"] == "bot"
     assert stored["messages"][1]["content"] == "Okay."
+    from easyagent.context import _fold_line
+    from easyagent.store import reaction_signal
+
+    heard = reaction_signal(stored["messages"][0])
+    assert heard.startswith("You reacted")
+    assert "The person reacted" not in heard
+    assert "[you reacted 👍]" in _fold_line(stored["messages"][0])
     assert "```" not in stored["messages"][1]["content"]
     page = client.get("/static/app.js")
     assert "toggleReaction" in page.text
     assert "/reaction" in page.text
+
+
+def test_a_reaction_only_turn_finishes_without_an_empty_error(tmp_path):
+    import json
+    import re
+    import threading
+    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+    class Handler(BaseHTTPRequestHandler):
+        protocol_version = "HTTP/1.1"
+
+        def do_POST(self) -> None:
+            length = int(self.headers.get("Content-Length") or 0)
+            raw = self.rfile.read(length).decode("utf-8", "replace")
+            match = re.search(r"- person ([0-9a-f-]{36}):", raw)
+            mid = match.group(1) if match else ""
+            word = "Done" if "one word" in raw else ""
+            fence = f"```react\n❤️\n{mid}\n```"
+            content = f"{fence}\n{word}".strip()
+            events = [
+                {"choices": [{"delta": {"reasoning_content": "I will put a heart on that message."}}]},
+                {"choices": [{"delta": {"content": content}}]},
+            ]
+            chunks = [f"data: {json.dumps(event)}\n\n".encode() for event in events]
+            chunks.append(b"data: [DONE]\n\n")
+            body = b"".join(chunks)
+            self.send_response(200)
+            self.send_header("Content-Type", "text/event-stream")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, fmt: str, *args) -> None:
+            return
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    port = server.server_address[1]
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    try:
+        client = TestClient(create_app(tmp_path))
+        endpoint = client.post(
+            "/api/endpoints",
+            json={"name": "local", "base_url": f"http://127.0.0.1:{port}/v1"},
+        ).json()
+        bot = client.post("/api/bots", json={"name": "Ada", "endpoint_id": endpoint["id"]}).json()
+        chat = client.post(f"/api/bots/{bot['id']}/chats").json()
+        url = f"/api/bots/{bot['id']}/chats/{chat['id']}/messages"
+        headers = {"Accept": "text/event-stream"}
+        with client.stream("POST", url, json={"content": "put a heart reaction on my message"}, headers=headers) as response:
+            assert response.status_code == 200, response.read()
+            response.read()
+        stored = client.get(f"/api/bots/{bot['id']}/chats/{chat['id']}").json()
+        assert stored["messages"][0]["reaction"] == "❤️"
+        assert stored["messages"][0]["reaction_by"] == "bot"
+        assert stored.get("run", {}).get("status") != "error"
+        for message in stored["messages"]:
+            assert "Stopped:" not in (message.get("content") or "")
+            assert message.get("error") is not True
+        with client.stream(
+            "POST",
+            url,
+            json={"content": "put a heart reaction on my message, reply with one word"},
+            headers=headers,
+        ) as response:
+            assert response.status_code == 200, response.read()
+            response.read()
+        follow = client.get(f"/api/bots/{bot['id']}/chats/{chat['id']}").json()
+        assert follow["messages"][-1]["content"] == "Done"
+        assert follow["messages"][-1].get("error") is not True
+        assert "Stopped:" not in follow["messages"][-1]["content"]
+    finally:
+        server.shutdown()
 
 
 def test_a_native_react_call_names_the_emoji_and_the_message():

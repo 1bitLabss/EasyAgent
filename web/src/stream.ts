@@ -12,6 +12,9 @@ export type Live = {
   run: Run | null;
   heardAt: number;
   steps?: string[];
+  thoughtAt?: number;
+  thoughtSeconds?: number;
+  reasoningLive?: boolean;
 };
 
 type Flight = {
@@ -22,9 +25,11 @@ type Flight = {
   live: Live | null;
   sending: boolean;
   replaced: boolean;
+  settled: boolean;
 };
 
 const flights = new Map<string, Flight>();
+const settledRuns = new Map<string, { runId: string; at: number }>();
 
 export function flightKey(botId: string, chatId: string) {
   return `${botId}:${chatId}`;
@@ -32,6 +37,42 @@ export function flightKey(botId: string, chatId: string) {
 
 export function flightFor(botId: string, chatId: string): Flight | null {
   return flights.get(flightKey(botId, chatId)) || null;
+}
+
+export function resetStreamForTests() {
+  for (const flight of flights.values()) flight.control.abort();
+  flights.clear();
+  settledRuns.clear();
+}
+
+function releaseRun(chat: Chat): Chat {
+  if (chat.run?.status !== "running") return chat;
+  return {
+    ...chat,
+    run: { id: "", status: "idle", started_at: null, last_activity_at: null, current_step: "", reason: "" },
+  };
+}
+
+/** A run we already finished must not keep the transcript polling. */
+export function runIsFinished(botId: string, chatId: string, status?: string | null, runId?: string | null): boolean {
+  const done = settledRuns.get(flightKey(botId, chatId));
+  if (!done) return false;
+  if (status !== "running") return true;
+  const same = !runId || !done.runId || runId === done.runId;
+  if (same || Date.now() - done.at < 30_000) return true;
+  settledRuns.delete(flightKey(botId, chatId));
+  return false;
+}
+
+export function chatStillPolling(botId: string, chatId: string, status?: string | null, runId?: string | null): number | false {
+  if (runIsFinished(botId, chatId, status, runId)) return false;
+  return status === "running" ? 2000 : false;
+}
+
+export function settleIncoming(botId: string, chatId: string, chat: Chat): Chat {
+  if (chat.run?.status !== "running") return chat;
+  if (!runIsFinished(botId, chatId, chat.run.status, chat.run.id)) return chat;
+  return releaseRun(chat);
 }
 
 export function anySending(botId: string): Flight | null {
@@ -73,17 +114,43 @@ function remember(flight: Flight, live: Live) {
   paint(flight);
 }
 
+function carry(live: Live, patch: Partial<Live>): Live {
+  return {
+    phase: patch.phase ?? live.phase,
+    label: patch.label ?? live.label,
+    text: patch.text ?? live.text,
+    reasoning: patch.reasoning ?? live.reasoning,
+    run: patch.run === undefined ? live.run : patch.run,
+    heardAt: Date.now(),
+    steps: patch.steps ?? live.steps,
+    thoughtAt: patch.thoughtAt === undefined ? live.thoughtAt : patch.thoughtAt,
+    thoughtSeconds: patch.thoughtSeconds === undefined ? live.thoughtSeconds : patch.thoughtSeconds,
+    reasoningLive: patch.reasoningLive === undefined ? live.reasoningLive : patch.reasoningLive,
+  };
+}
+
+function freezeThought(live: Live): number | undefined {
+  if (live.thoughtSeconds) return live.thoughtSeconds;
+  if (!live.thoughtAt) return undefined;
+  return Math.max(1, Math.round((Date.now() - live.thoughtAt) / 1000));
+}
+
 function finish(flight: Flight, chat?: Chat) {
+  const runId = flight.runId || flight.live?.run?.id || chat?.run?.id || "";
+  settledRuns.set(flightKey(flight.botId, flight.chatId), { runId, at: Date.now() });
+  flight.settled = true;
   flight.sending = false;
   flight.live = null;
-  if (chat) {
-    const prev = queryClient.getQueryData<Chat>(["chat", flight.botId, flight.chatId]);
-    queryClient.setQueryData(["chat", flight.botId, flight.chatId], mergeChat(prev, chat));
+  const key = ["chat", flight.botId, flight.chatId] as const;
+  const prev = queryClient.getQueryData<Chat>(key);
+  const next = chat ? releaseRun(chat) : prev ? releaseRun(prev) : undefined;
+  if (next) {
+    queryClient.setQueryData(key, mergeChat(prev, next));
     void queryClient.invalidateQueries({ queryKey: ["chats", flight.botId] });
     void queryClient.invalidateQueries({ queryKey: ["unread"] });
   }
   paint(flight);
-  notifyFinished(flight, chat);
+  notifyFinished(flight, next);
 }
 
 function notifyFinished(flight: Flight, chat?: Chat) {
@@ -109,7 +176,7 @@ function apply(event: Record<string, unknown>, flight: Flight) {
   const live = flight.live || { phase: "thinking" as const, label: "Waiting on model", text: "", reasoning: "", run: null, heardAt: Date.now() };
   if (event.type === "run" && event.run) {
     const run = event.run as Run;
-    remember(flight, { ...live, label: run.current_step || live.label, run, heardAt: Date.now() });
+    remember(flight, carry(live, { label: run.current_step || live.label, run }));
     return;
   }
   if (event.type === "stopped") {
@@ -122,35 +189,46 @@ function apply(event: Record<string, unknown>, flight: Flight) {
     if (run && event.text) run.current_step = label;
     const prev = live.steps || [];
     const steps = prev[prev.length - 1] === label ? prev : [...prev, label].slice(-8);
-    remember(flight, { phase: "thinking", label, text: live.text, reasoning: live.reasoning, run, heardAt: Date.now(), steps });
+    remember(flight, carry(live, { phase: "thinking", label, run, steps }));
     return;
   }
   if (event.type === "replay") {
-    remember(flight, { phase: "thinking", label: live.label || "Model not answering, retrying…", text: live.text, reasoning: String(event.text || ""), run: live.run, heardAt: Date.now() });
+    const reasoning = String(event.text || "");
+    remember(flight, carry(live, {
+      phase: "thinking",
+      label: live.label || "Model not answering, retrying…",
+      reasoning,
+      reasoningLive: Boolean(reasoning.trim()),
+    }));
     return;
   }
   if (event.type === "replace") {
-    remember(flight, { phase: "thinking", label: "Searching", text: "", reasoning: live.reasoning, run: live.run, heardAt: Date.now() });
+    remember(flight, carry(live, { phase: "thinking", label: "Searching", text: "" }));
     return;
   }
   if (event.type === "line") {
-    remember(flight, { phase: "thinking", label: live.label || "Thinking", text: live.text + String(event.text || ""), reasoning: live.reasoning, run: live.run, heardAt: Date.now() });
+    remember(flight, carry(live, { phase: "thinking", label: live.label || "Thinking", text: live.text + String(event.text || "") }));
     return;
   }
   if (event.type === "thinking") {
     const label = !live.label || live.label === "Waiting on model" ? "Thinking" : live.label;
-    remember(flight, {
+    const chunk = String(event.text || "");
+    remember(flight, carry(live, {
       phase: live.phase === "reply" ? "reply" : "thinking",
       label,
-      text: live.text,
-      reasoning: live.reasoning + String(event.text || ""),
-      run: live.run,
-      heardAt: Date.now(),
-    });
+      reasoning: live.reasoning + chunk,
+      reasoningLive: true,
+      thoughtAt: live.thoughtAt || Date.now(),
+    }));
     return;
   }
   if (event.type === "delta") {
-    remember(flight, { phase: "reply", label: live.label, text: live.text + String(event.text || ""), reasoning: live.reasoning, run: live.run, heardAt: Date.now() });
+    remember(flight, carry(live, {
+      phase: "reply",
+      text: live.text + String(event.text || ""),
+      reasoningLive: false,
+      thoughtSeconds: freezeThought(live),
+    }));
     return;
   }
   if (event.type === "face") {
@@ -162,7 +240,7 @@ function apply(event: Record<string, unknown>, flight: Flight) {
   if (event.type === "error") {
     pokeFace(flight.botId, "sad");
     flight.sending = false;
-    remember(flight, { phase: "error", label: "Stopped", text: String(event.detail || "The reply failed."), reasoning: "", run: live.run, heardAt: Date.now() });
+    remember(flight, carry(live, { phase: "error", label: "Stopped", text: String(event.detail || "The reply failed."), reasoning: "", reasoningLive: false }));
     if (event.chat) finish(flight, event.chat as Chat);
     return;
   }
@@ -210,14 +288,16 @@ function begin(botId: string, chatId: string) {
     previous.sending = false;
     previous.control.abort();
   }
+  settledRuns.delete(key);
   const flight: Flight = {
     botId,
     chatId,
     runId: "",
     control: new AbortController(),
-    live: { phase: "thinking", label: "Waiting on model", text: "", reasoning: "", run: null, heardAt: Date.now() },
+    live: { phase: "thinking", label: "Waiting on model", text: "", reasoning: "", run: null, heardAt: Date.now(), reasoningLive: false },
     sending: true,
     replaced: false,
+    settled: false,
   };
   flights.set(key, flight);
   paint(flight);
@@ -260,16 +340,7 @@ export async function sendMessage(botId: string, chatId: string, text: string, f
       return;
     }
     const ended = await readEvents(response, flight);
-    if (ended !== "done" && ended !== "error" && ended !== "stopped") {
-      const chat = await api<Chat>(`/api/bots/${botId}/chats/${chatId}?window=80`);
-      if (chat.run?.status === "running") {
-        flight.live = flight.live || { phase: "thinking", label: chat.run.current_step || "Thinking", text: "", reasoning: "", run: chat.run, heardAt: Date.now() };
-        flight.live.run = chat.run;
-        paint(flight);
-      } else {
-        finish(flight, chat);
-      }
-    }
+    await afterStream(flight, botId, chatId, ended);
   } catch (error) {
     if (flight.replaced || (error instanceof DOMException && error.name === "AbortError")) return;
     flight.sending = false;
@@ -278,6 +349,7 @@ export async function sendMessage(botId: string, chatId: string, text: string, f
       label: "Stopped",
       text: error instanceof Error ? error.message : "The reply failed.",
       reasoning: "",
+      reasoningLive: false,
       run: flight.live?.run || null,
       heardAt: Date.now(),
     });
@@ -294,7 +366,8 @@ export async function retryMessage(botId: string, chatId: string) {
       finish(flight, data.chat || data);
       return;
     }
-    await readEvents(response, flight);
+    const ended = await readEvents(response, flight);
+    await afterStream(flight, botId, chatId, ended);
   } catch (error) {
     if (flight.replaced || (error instanceof DOMException && error.name === "AbortError")) return;
     remember(flight, {
@@ -302,9 +375,37 @@ export async function retryMessage(botId: string, chatId: string) {
       label: "Stopped",
       text: error instanceof Error ? error.message : "The reply failed.",
       reasoning: "",
+      reasoningLive: false,
       run: null,
       heardAt: Date.now(),
     });
+  }
+}
+
+async function afterStream(flight: Flight, botId: string, chatId: string, ended: string) {
+  if (flight.replaced) return;
+  if (ended === "done" || ended === "error" || ended === "stopped") {
+    if (flight.settled) return;
+    let chat = queryClient.getQueryData<Chat>(["chat", botId, chatId]);
+    try {
+      chat = await api<Chat>(`/api/bots/${botId}/chats/${chatId}?window=80`);
+    } catch {
+      /* the cached transcript still leaves this run idle */
+    }
+    finish(flight, chat);
+    return;
+  }
+  try {
+    const chat = await api<Chat>(`/api/bots/${botId}/chats/${chatId}?window=80`);
+    if (chat.run?.status === "running") {
+      flight.live = flight.live || { phase: "thinking", label: chat.run.current_step || "Thinking", text: "", reasoning: "", run: chat.run, heardAt: Date.now() };
+      flight.live.run = chat.run;
+      paint(flight);
+    } else {
+      finish(flight, chat);
+    }
+  } catch {
+    /* the page can retry */
   }
 }
 

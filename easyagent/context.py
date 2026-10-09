@@ -137,7 +137,8 @@ def _fold_line(message: dict) -> str:
     line = f"- {message.get('role', 'user')}: {_excerpt(model_content(message))}"
     emoji = message.get("reaction")
     if isinstance(emoji, str) and emoji:
-        line += f" [person reacted {emoji}]"
+        who = "you" if message.get("reaction_by") == "bot" else "person"
+        line += f" [{who} reacted {emoji}]"
     return line
 
 

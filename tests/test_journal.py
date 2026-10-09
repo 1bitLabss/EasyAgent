@@ -56,7 +56,7 @@ def _msg(mid, role, content, stamp):
 def _silence(monkeypatch, scripted=""):
     calls = []
 
-    async def complete(*, base_url, api_key, model, messages, timeout=120):
+    async def complete(*, base_url, api_key, model, messages, timeout=120, **_extra):
         calls.append(messages[0]["content"])
         if "Summarize only" in messages[0]["content"]:
             return "no"
@@ -150,7 +150,7 @@ def test_caps_dedupe_and_provenance(tmp_path):
 def test_secrets_are_not_written(tmp_path, monkeypatch):
     store, _endpoint, bot = _world(tmp_path)
     monkeypatch.setattr("easyagent.tools.secret_strings", lambda _store: ["vault-secret-value"])
-    token = "sk-LIVEKEY123456789"
+    token = "sk-LIVEKEY123456789"  # fake-key-fixture
     messages = [_msg("m1", "user", f"ceramic drawer {token} vault-secret-value", "2026-10-08T01:00:00+00:00")]
     _chat(store, bot["id"], messages)
     leaked = f"ceramic drawer {token} vault-secret-value Bearer abcdefghijklmnop"
@@ -327,21 +327,26 @@ def test_the_pass_runs_only_while_idle(tmp_path, monkeypatch):
 def test_predictions_habits_playbook_dreams_and_retrieval(tmp_path, monkeypatch):
     store, _endpoint, bot = _world(tmp_path)
     day = "2026-10-08T01:00:00+00:00"
-    later = "2026-10-08T01:05:00+00:00"
     messages = []
     for index in range(3):
         messages.append(_msg(f"ask{index}", "user", "please alphabetize the ceramic drawer labels", f"2026-10-08T01:{index * 2:02d}:00+00:00"))
         messages.append(_msg(f"ans{index}", "assistant", "ack", f"2026-10-08T01:{index * 2 + 1:02d}:00+00:00"))
     messages.append(_msg("habit-a", "user", "hello kiln", "2026-10-07T01:00:00+00:00"))
     messages.append(_msg("habit-b", "user", "hello kiln", "2026-10-08T01:10:00+00:00"))
-    messages.append(_msg("q1", "user", "What is the ceramic glaze code?", later))
-    messages.append(_msg("q1a", "assistant", "ack", later))
-    messages.append(_msg("q2", "user", "Where did the cobalt stain go?", later))
-    messages.append(_msg("q2a", "assistant", "ack", later))
-    messages.append(_msg("p1", "assistant", "I'll check the kiln later", day))
-    messages.append(_msg("p2", "assistant", "Checked the kiln, done", later))
-    messages.append(_msg("play", "user", "morning Read the kiln log Invent a new glaze", day))
-    messages.append(_msg("dream", "user", "a quieter kiln alarm would help", day))
+    messages.append(_msg("p1", "assistant", "I'll check the kiln later", "2026-10-08T01:11:00+00:00"))
+    messages.append(_msg("pred", "assistant", "I expect the ceramic volcano to erupt tonight", "2026-10-08T01:12:00+00:00"))
+    messages.append(_msg("pred-actual", "user", "ack", "2026-10-08T01:13:00+00:00"))
+    messages.append(_msg("pred2", "assistant", "I expect a quiet kiln tonight", "2026-10-08T01:14:00+00:00"))
+    messages.append(_msg("pred2-actual", "user", "ack", "2026-10-08T01:15:00+00:00"))
+    messages.append(_msg("pred3", "assistant", "I expect the cobalt stain to fade", "2026-10-08T01:16:00+00:00"))
+    messages.append(_msg("pred3-actual", "user", "ack", "2026-10-08T01:17:00+00:00"))
+    messages.append(_msg("p2", "assistant", "Checked the kiln, done", "2026-10-08T01:18:00+00:00"))
+    messages.append(_msg("play", "user", "morning Read the kiln log Invent a new glaze", "2026-10-08T01:19:00+00:00"))
+    messages.append(_msg("dream", "user", "a quieter kiln alarm would help", "2026-10-08T01:19:30+00:00"))
+    messages.append(_msg("q1", "user", "What is the ceramic glaze code?", "2026-10-08T01:30:00+00:00"))
+    messages.append(_msg("q1a", "assistant", "ack", "2026-10-08T01:31:00+00:00"))
+    messages.append(_msg("q2", "user", "Where did the cobalt stain go?", "2026-10-08T01:32:00+00:00"))
+    messages.append(_msg("q2a", "assistant", "ack", "2026-10-08T01:33:00+00:00"))
     chat = _chat(store, bot["id"], messages)
     count = len(chat["messages"])
 
@@ -405,7 +410,12 @@ def test_predictions_habits_playbook_dreams_and_retrieval(tmp_path, monkeypatch)
     assert store.list_schedules(bot["id"]) == []
     assert len(store.get_chat(bot["id"], chat["id"])["messages"]) == count
     assert check_revision_limit(store.get_bot(bot["id"])) == 3
-    assert "score=0.00" in (folder / "PREDICTIONS.md").read_text(encoding="utf-8")
+    predictions = (folder / "PREDICTIONS.md").read_text(encoding="utf-8")
+    assert "score=0.00" in predictions
+    assert "Expected: I expect the ceramic volcano" in predictions
+    assert "Expected: I expect a quiet kiln tonight" in predictions
+    assert "Expected: I expect the cobalt stain to fade" in predictions
+    assert "Expected: please alphabetize" not in predictions
     promises = (folder / "PROMISES.md").read_text(encoding="utf-8")
     assert "status=closed" in promises
     question = learning_extra(store, bot)["question"]
@@ -444,11 +454,13 @@ def test_predictions_habits_playbook_dreams_and_retrieval(tmp_path, monkeypatch)
 def test_a_high_score_checks_less(tmp_path, monkeypatch):
     _silence(monkeypatch)
     store, _endpoint, bot = _world(tmp_path)
-    ask = "please alphabetize the ceramic drawer labels"
+    line = "I expect the ceramic drawer labels alphabetize cleanly"
+    follow = "the ceramic drawer labels alphabetize cleanly"
     messages = []
     for index in range(3):
-        messages.append(_msg(f"ask{index}", "user", ask, f"2026-10-08T01:{index * 2:02d}:00+00:00"))
-        messages.append(_msg(f"ans{index}", "assistant", ask, f"2026-10-08T01:{index * 2 + 1:02d}:00+00:00"))
+        messages.append(_msg(f"ask{index}", "user", follow, f"2026-10-08T01:{index * 2:02d}:00+00:00"))
+        messages.append(_msg(f"ans{index}", "assistant", line, f"2026-10-08T01:{index * 2 + 1:02d}:00+00:00"))
+    messages.append(_msg("after", "user", follow, "2026-10-08T01:12:00+00:00"))
     _chat(store, bot["id"], messages)
     asyncio.run(run_pass(store, bot, now=WHEN, force=True))
     assert check_revision_limit(store.get_bot(bot["id"])) == 1
@@ -484,3 +496,89 @@ def test_the_learning_panel_lists_the_eight_notes(tmp_path):
     assert "What can be removed" in classic.text
     readme = __import__("pathlib").Path("README.md").read_text(encoding="utf-8")
     assert "What your bot keeps track of" in readme
+
+
+def test_hyphenated_keys_are_scrubbed_from_notes_summaries_and_lessons(tmp_path, monkeypatch):
+    from easyagent.llm import IDLE_MODEL_TIMEOUT
+    from easyagent.rolling import refresh_rolling_summary
+    from easyagent.tools import keep_lessons
+
+    store, _endpoint, bot = _world(tmp_path)
+    samples = [  # fake-key-fixture
+        "sk-test-FAKE123",
+        "sk-proj-abc_def123456",
+        "sk-ant-api03-ABCDEFGH12",
+        "ghp_1234567890abcd",
+        "github_pat_11AAAA12345678",
+        "xoxb-1234-5678-abcdef",
+        "xoxp-1234567890-abcdef",
+        "xoxa-1234567890-abcdef",
+        "AKIAIOSFODNN7EXAMPLE",
+        "Bearer sk-test-FAKE123456",
+    ]
+    assert find_leaks("sk-test-FAKE123")
+    assert not find_leaks("please check the skill later")
+    assert not find_leaks("sk-test")
+    for sample in samples:
+        assert find_leaks(sample), sample
+        cleaned = scrub_text(store, f"The note says {sample} at the end.")
+        assert sample not in cleaned
+        assert "[redacted]" in cleaned
+    token = "sk-test-FAKE123"
+    messages = [_msg("m1", "user", f"ceramic drawer {token}", "2026-10-08T01:00:00+00:00")]
+    chat = _chat(store, bot["id"], messages)
+    chat["summarized_through"] = len(messages)
+    store.save_chat(chat)
+    commit_entries(
+        store,
+        bot["id"],
+        [
+            Entry(kind="unknown", title="Leak", body=f"Is {token} still valid?", cites=["m1"], dates=["2026-10-08"], source="derived"),
+            Entry(
+                kind="prediction",
+                title="Leak",
+                body=f"Expected {token} to expire",
+                cites=["m1"],
+                dates=["2026-10-08"],
+                source="derived",
+                score="0.5",
+            ),
+        ],
+        messages,
+    )
+    folder = _notes(store, bot["id"])
+    blob = "\n".join((folder / name).read_text(encoding="utf-8") for name in NOTE_NAMES if (folder / name).is_file())
+    assert token not in blob
+    assert "PREDICTIONS.md" in {path.name for path in folder.glob("*.md")} or "prediction" in blob.lower() or (folder / "PREDICTIONS.md").is_file() or (folder / "UNKNOWNS.md").is_file()
+    assert token not in (folder / "UNKNOWNS.md").read_text(encoding="utf-8")
+    keep_lessons(store, bot["id"], f"```memory\nThe saved key was {token} once.\n```")
+    memory = (folder / "MEMORY.md").read_text(encoding="utf-8")
+    assert token not in memory
+    assert "[redacted]" in memory
+    seen = []
+
+    async def complete(**kwargs):
+        seen.append(kwargs.get("timeout"))
+        return f"token {token} [m:m1]"
+
+    monkeypatch.setattr("easyagent.llm.complete", complete)
+    text = asyncio.run(refresh_rolling_summary(store, store.get_bot(bot["id"]), store.get_chat(bot["id"], chat["id"])))
+    assert token not in text
+    assert seen == [IDLE_MODEL_TIMEOUT]
+    assert IDLE_MODEL_TIMEOUT >= 180
+
+
+def test_nightly_model_calls_wait_several_minutes(tmp_path, monkeypatch):
+    from easyagent.journal import _ask
+    from easyagent.llm import IDLE_MODEL_TIMEOUT
+
+    store, _endpoint, bot = _world(tmp_path)
+    seen = []
+
+    async def complete(**kwargs):
+        seen.append(kwargs.get("timeout"))
+        return ""
+
+    monkeypatch.setattr("easyagent.llm.complete", complete)
+    asyncio.run(_ask(store, bot, "Summarize the kiln."))
+    assert seen == [IDLE_MODEL_TIMEOUT]

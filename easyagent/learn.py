@@ -96,11 +96,6 @@ def stopped() -> bool:
     return _STOP
 
 
-def looks_like_llama(base_url: str, model: str | None) -> bool:
-    blob = f"{base_url} {model or ''}".lower()
-    return "llama" in blob
-
-
 def task_type(text: str) -> str:
     skip = {"the", "a", "an", "to", "of", "and", "or", "for", "in", "on", "please", "with"}
     words = [word for word in re.findall(r"[a-z0-9]+", (text or "").lower()) if word not in skip and len(word) > 2]
@@ -206,6 +201,7 @@ def rollback(store: Store, ledger_id: str) -> dict:
             path.write_text(text if text.endswith("\n") else text + "\n", encoding="utf-8")
         elif path.is_file():
             path.unlink()
+        _mark_rolled(store, ledger_id)
         return {"kind": "skill", "key": slug, "restored": True}
     if row.get("kind") == "memory":
         bot_id, _, slug = str(row.get("key") or "").partition("/")
@@ -217,6 +213,7 @@ def rollback(store: Store, ledger_id: str) -> dict:
             path.write_text(text if text.endswith("\n") else text + "\n", encoding="utf-8")
         elif path.is_file():
             path.unlink()
+        _mark_rolled(store, ledger_id)
         return {"kind": "memory", "key": row.get("key"), "restored": True}
     if row.get("kind") == "notes":
         bot_id = str(row.get("key") or "")
@@ -240,6 +237,7 @@ def rollback(store: Store, ledger_id: str) -> dict:
                 path.write_text(body if body.endswith("\n") else body + "\n", encoding="utf-8")
             elif path.is_file():
                 path.unlink()
+        _mark_rolled(store, ledger_id)
         return {"kind": "notes", "key": bot_id, "restored": True}
     raise StoreError("That backup is not a skill or a memory file.", 400)
 
@@ -253,7 +251,7 @@ def rollback_for_bot(store: Store, bot_id: str, ledger_id: str) -> dict:
 
 
 def rollback_latest(store: Store, bot_id: str) -> dict:
-    rows = ledger_rows(store, bot_id)
+    rows = [row for row in ledger_rows(store, bot_id) if not row.get("rolled")]
     if not rows:
         raise StoreError("There is nothing to roll back.", 404)
     return rollback(store, rows[-1]["id"])
@@ -510,6 +508,17 @@ def run_check(check: dict, *, cwd: Path) -> tuple[bool, str]:
     return True, "The command check passed."
 
 
+def _mark_rolled(store: Store, ledger_id: str) -> None:
+    index_path = store.skills_dir / "_ledger" / "index.json"
+    rows = _read_json(index_path, [])
+    if not isinstance(rows, list):
+        return
+    for row in rows:
+        if isinstance(row, dict) and row.get("id") == ledger_id:
+            row["rolled"] = True
+    _write_json(index_path, rows)
+
+
 def _candidate_path(store: Store, bot_id: str, candidate_id: str) -> Path:
     return _candidates_dir(store, bot_id) / f"{candidate_id}.json"
 
@@ -660,6 +669,11 @@ def note_failed_check(store: Store, bot_id: str, request: str, problem: str, *, 
             print("heuristic learn: the retry failed, so the lesson expired", flush=True)
             return ""
     text = " ".join((problem or "The check failed.").split())[:180]
+    from easyagent.safety import lesson_weakens
+
+    if lesson_weakens(text):
+        print("heuristic learn: a lesson that would weaken the guardrails was rejected", flush=True)
+        return ""
     rows.append(
         {
             "id": new_id(),
@@ -700,6 +714,12 @@ def note_check_passed(store: Store, bot_id: str, request: str) -> str:
     else:
         body = "Notes that a later try confirmed."
         description = "Notes that passed a retry."
+    from easyagent.safety import lesson_weakens
+
+    if lesson_weakens(hit.get("text") or ""):
+        hit["status"] = "rejected"
+        _write_lessons(store, bot_id, rows)
+        return ""
     nxt = merge_text(body, hit.get("text") or "")
     if nxt is None:
         hit["status"] = "capped"
@@ -913,17 +933,30 @@ def approve_candidate(store: Store, bot: dict, candidate_id: str) -> dict:
     return _promote(store, bot, found, float(found.get("with_rate") or 1), float(found.get("without_rate") or 0))
 
 
+def reject_candidate(store: Store, bot: dict, candidate_id: str) -> dict:
+    """Turn a waiting candidate down. It is not installed."""
+    found = next((item for item in list_candidates(store, bot["id"]) if item.get("id") == candidate_id), None)
+    if found is None:
+        raise StoreError("That candidate is not there.", 404)
+    if found.get("status") not in {"candidate", "ready"}:
+        raise StoreError("That candidate is not waiting.", 400)
+    found["status"] = "rejected"
+    found["reason"] = "You rejected it."
+    return _update_candidate(store, found)
+
+
 async def propose_json(
     *,
     base_url: str,
     api_key: str | None,
     model: str | None,
     notes: str,
+    timeout: float | None = None,
+    yield_to_chats: bool = False,
 ) -> dict | None:
-    """One proposal from this bot's model. A schema is sent when the server is llama.cpp."""
+    """One proposal from this bot's model. Tools are never sent with the schema."""
     from easyagent import llm
 
-    grammar = CANDIDATE_GRAMMAR if looks_like_llama(base_url, model) else None
     messages = [
         {
             "role": "system",
@@ -936,33 +969,96 @@ async def propose_json(
         },
         {"role": "user", "content": notes[:4000]},
     ]
+    call = {
+        "base_url": base_url,
+        "api_key": api_key,
+        "model": model,
+        "messages": messages,
+        "tools": False,
+        "yield_to_chats": yield_to_chats,
+    }
+    if timeout is not None:
+        call["timeout"] = timeout
     try:
-        text = await llm.complete(
-            base_url=base_url,
-            api_key=api_key,
-            model=model,
-            messages=messages,
-            response_schema=CANDIDATE_SCHEMA,
-            grammar=grammar,
-        )
+        text = await llm.complete(**call, response_schema=CANDIDATE_SCHEMA)
+    except llm.YieldLater:
+        return None
     except llm.ProviderError:
-        text = await llm.complete(
-            base_url=base_url,
-            api_key=api_key,
-            model=model,
-            messages=messages,
-        )
+        try:
+            text = await llm.complete(**call)
+        except (llm.ProviderError, llm.YieldLater):
+            return None
     return _parse_proposal(text)
 
 
-def _parse_proposal(text: str) -> dict | None:
-    raw = (text or "").strip()
-    start = raw.find("{")
-    end = raw.rfind("}")
-    if start < 0 or end <= start:
+async def propose_from_signal(
+    store: Store,
+    bot: dict,
+    notes: str,
+    *,
+    reason: str,
+    task: str = "",
+    timeout: float | None = None,
+    quarantine: bool = False,
+) -> dict | None:
+    """Ask this bot's model for one skill and save it as a candidate. Replay still decides."""
+    if os.environ.get("EASYAGENT_LEARN") == "0":
+        return None
+    if not isinstance(bot, dict) or bot_paused(bot):
+        return None
+    notes = " ".join((notes or "").split())
+    if len(notes) < 8:
         return None
     try:
-        data = json.loads(raw[start : end + 1])
+        from easyagent.journal import scrub_text
+
+        notes = scrub_text(store, notes)
+    except Exception:
+        pass
+    fingerprint = notes[:180]
+    for item in list_candidates(store, bot["id"], status="candidate"):
+        source = item.get("source") if isinstance(item.get("source"), dict) else {}
+        if source.get("reason") == reason and source.get("notes") == fingerprint:
+            return item
+    try:
+        endpoint = store.get_endpoint(bot["endpoint_id"])
+    except Exception:
+        endpoint = None
+    if not endpoint:
+        return None
+    data = await propose_json(
+        base_url=endpoint["base_url"],
+        api_key=endpoint.get("api_key") or None,
+        model=bot.get("model") or endpoint.get("model"),
+        notes=notes[:4000],
+        timeout=timeout,
+        yield_to_chats=timeout is not None,
+    )
+    if not isinstance(data, dict):
+        return None
+    return save_candidate(
+        store,
+        bot["id"],
+        data,
+        source={
+            "reason": reason,
+            "notes": fingerprint,
+            "task": " ".join((task or "").split())[:400],
+            "model": str(bot.get("model") or endpoint.get("model") or ""),
+            "connection": str(endpoint.get("name") or ""),
+            "quarantine": quarantine,
+        },
+    )
+
+
+def _parse_proposal(text: str) -> dict | None:
+    from easyagent.llm import extract_json_text
+
+    raw = extract_json_text(text)
+    if not raw:
+        return None
+    try:
+        data = json.loads(raw)
     except json.JSONDecodeError:
         return None
     return data if isinstance(data, dict) else None

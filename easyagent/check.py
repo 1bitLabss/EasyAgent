@@ -123,6 +123,7 @@ async def _grade(
                 {"role": "system", "content": CHECK_PROMPT},
                 {"role": "user", "content": user},
             ],
+            tools=False,
         )
     except turn_mod.TurnCancelled:
         raise
@@ -165,6 +166,7 @@ async def review_turn(run_turn, **kwargs):
         request = _request_text(list(kwargs.get("messages") or []))
         if should_skip(final, tools):
             if revisions:
+                await _offer_revision(store, bot, request, final, revisions)
                 yield "check", json.dumps({"badge": "revised", "problems": []})
                 yield "face", "sad"
             lesson = _close_learning(
@@ -185,12 +187,16 @@ async def review_turn(run_turn, **kwargs):
         if grade is None or not grade.get("parsed"):
             if grade is not None:
                 yield "thinking", "The check did not return a grade.\n"
+            if revisions:
+                await _offer_revision(store, bot, request, final, revisions)
             lesson = pending if pending.startswith("Learned:") else ""
             if lesson.startswith("Learned:"):
                 yield "lesson", lesson
             yield "final", final
             return
         if grade.get("pass") or revisions >= limit:
+            if revisions:
+                await _offer_revision(store, bot, request, final, revisions)
             badge = "revised" if revisions else ("checked" if grade.get("pass") else "")
             note = _note(grade, revisions)
             if note:
@@ -228,6 +234,24 @@ async def review_turn(run_turn, **kwargs):
             {"role": "assistant", "content": final or "(empty reply)"},
             {"role": "user", "content": _revision_note(grade)},
         ]
+
+
+async def _offer_revision(store, bot, request: str, final: str, revisions: int) -> None:
+    """A revised reply can become a candidate. The replay gate still has to pass."""
+    if not revisions or not isinstance(bot, dict) or not bot.get("id"):
+        return
+    try:
+        from easyagent.learn import propose_from_signal
+
+        await propose_from_signal(
+            store,
+            bot,
+            f"The check revised the reply. Request: {(request or '')[:400]} Reply: {(final or '')[:400]}",
+            reason="checker",
+            task=request or "",
+        )
+    except Exception:
+        return
 
 
 def _close_learning(store, bot_id, chat_id, request, reply, tools, grade, revisions, closing: bool = True) -> str:

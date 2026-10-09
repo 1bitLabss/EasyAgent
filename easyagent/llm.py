@@ -17,11 +17,107 @@ import httpx
 
 from easyagent import gate
 from easyagent import retry
+
+# Idle notes and the rolling summary run at night. A local 27B often needs
+# minutes, not a few seconds, before the first token.
+IDLE_MODEL_TIMEOUT = 180.0
 from easyagent import turn as turn_mod
 
 
 class ProviderError(Exception):
     """The endpoint did not return a usable chat completion."""
+
+
+class YieldLater(Exception):
+    """A background model call stepped aside so a chat can use the connection."""
+
+
+_LLAMA_CACHE: dict[str, bool] = {}
+_LLAMA_LOCK = threading.Lock()
+_THINK_BLOCK = re.compile(r"<think\b[^>]*>[\s\S]*?</think>", re.IGNORECASE)
+_PLAIN_JSON = (
+    "Reply with one JSON object and no other text. "
+    "Do not call a tool. Do not run a shell command. Do not use markdown fences."
+)
+
+
+def _llama_key(base_url: str) -> str:
+    return (base_url or "").rstrip("/").lower()
+
+
+def remember_llama(base_url: str, found: bool) -> None:
+    with _LLAMA_LOCK:
+        _LLAMA_CACHE[_llama_key(base_url)] = bool(found)
+
+
+def cached_llama(base_url: str) -> bool | None:
+    with _LLAMA_LOCK:
+        key = _llama_key(base_url)
+        if key in _LLAMA_CACHE:
+            return _LLAMA_CACHE[key]
+    return None
+
+
+def clear_llama_cache() -> None:
+    with _LLAMA_LOCK:
+        _LLAMA_CACHE.clear()
+
+
+def grammar_rejected(detail: str) -> bool:
+    """llama.cpp answers 400 when a JSON schema is combined with the tool list."""
+    lowered = (detail or "").lower()
+    return "failed to parse grammar" in lowered or ("grammar" in lowered and "400" in lowered)
+
+
+def _server_root(base_url: str) -> str:
+    url = (base_url or "").rstrip("/")
+    if url.endswith("/v1"):
+        url = url[:-3]
+    return url
+
+
+async def server_is_llama(base_url: str, api_key: str | None = None) -> bool:
+    """True when /props looks like llama.cpp. A later grammar 400 can still mark it."""
+    cached = cached_llama(base_url)
+    if cached is not None:
+        return cached
+    headers = {"Authorization": f"Bearer {api_key}"} if api_key else {}
+    url = _server_root(base_url).rstrip("/") + "/props"
+    try:
+        async with httpx.AsyncClient(timeout=httpx.Timeout(2.0, connect=1.0)) as client:
+            response = await client.get(url, headers=headers)
+        if response.status_code < 400:
+            data = response.json()
+            found = isinstance(data, dict) and any(
+                key in data for key in ("default_generation_settings", "total_slots", "model_path")
+            )
+            remember_llama(base_url, found)
+            return found
+    except Exception:
+        pass
+    remember_llama(base_url, False)
+    return False
+
+
+def extract_json_text(text: str) -> str:
+    """The JSON object in a reply. Think blocks and code fences are not part of it."""
+    raw = _THINK_BLOCK.sub("", text or "")
+    raw = re.sub(r"```(?:json)?", "", raw, flags=re.IGNORECASE)
+    start = raw.find("{")
+    end = raw.rfind("}")
+    if start < 0 or end <= start:
+        return ""
+    return raw[start : end + 1].strip()
+
+
+def _plain_json_messages(messages: list[dict]) -> list[dict]:
+    copied = [dict(item) for item in messages]
+    if copied and copied[0].get("role") == "system":
+        content = str(copied[0].get("content") or "")
+        if _PLAIN_JSON not in content:
+            copied[0]["content"] = content.rstrip() + "\n" + _PLAIN_JSON
+        return copied
+    return [{"role": "system", "content": _PLAIN_JSON}, *copied]
 
 
 def connection_error_text(detail: str, endpoint: dict | None, model: str | None = None, bot_name: str = "") -> str:
@@ -284,8 +380,12 @@ def _completion_payload(
     stream: bool,
     response_schema: dict | None = None,
     grammar: str | None = None,
+    tools: bool = True,
 ) -> dict:
-    payload: dict = {"messages": messages, "tools": native_tools()}
+    """A schema or a grammar never rides along with the tool list. llama.cpp rejects that pair."""
+    payload: dict = {"messages": messages}
+    if tools and not response_schema and not grammar:
+        payload["tools"] = native_tools()
     if stream:
         payload["stream"] = True
     if model:
@@ -560,6 +660,15 @@ def _raise_transport(exc: BaseException, base_url: str) -> None:
     raise exc
 
 
+async def _watch_for_chat(client: httpx.AsyncClient) -> None:
+    """Close this request when a user chat is waiting on the only slot."""
+    while True:
+        await asyncio.sleep(0.2)
+        if gate.user_waiting():
+            await client.aclose()
+            return
+
+
 async def _complete_once(
     *,
     base_url: str,
@@ -569,6 +678,8 @@ async def _complete_once(
     timeout: float,
     response_schema: dict | None = None,
     grammar: str | None = None,
+    tools: bool = True,
+    yield_to_chats: bool = False,
 ) -> str:
     """One non-streaming completion. The caller decides whether to retry."""
     _native_calls.set(None)
@@ -579,19 +690,29 @@ async def _complete_once(
         stream=False,
         response_schema=response_schema,
         grammar=grammar,
+        tools=tools,
     )
     headers = {"Content-Type": "application/json"}
     if api_key:
         headers["Authorization"] = f"Bearer {api_key}"
     client = httpx.AsyncClient(timeout=_http_timeout(timeout, stream=False))
     turn_mod.attach_client(client)
+    watcher = asyncio.create_task(_watch_for_chat(client)) if yield_to_chats else None
     try:
         turn_mod.raise_if_cancelled()
         try:
             response = await client.post(url, json=payload, headers=headers)
         except (httpx.HTTPError, asyncio.TimeoutError) as exc:
+            if yield_to_chats and gate.user_waiting():
+                raise YieldLater() from exc
             _raise_transport(exc, base_url)
     finally:
+        if watcher is not None:
+            watcher.cancel()
+            try:
+                await watcher
+            except asyncio.CancelledError:
+                pass
         turn_mod.detach_client(client)
         await client.aclose()
     if response.status_code >= 400:
@@ -624,6 +745,51 @@ async def _complete_once(
     return answer
 
 
+async def _dispatch_complete(
+    *,
+    base_url: str,
+    api_key: str | None,
+    model: str | None,
+    messages: list[dict],
+    timeout: float,
+    response_schema: dict | None,
+    grammar: str | None,
+    tools: bool,
+    yield_to_chats: bool,
+) -> str:
+    if not gate.inner_retry_allowed():
+        try:
+            permit = await gate.reserve(step_aside=yield_to_chats)
+        except gate.BusyLane as exc:
+            raise YieldLater() from exc
+        try:
+            await permit.acquire()
+            return await _complete_once(
+                base_url=base_url,
+                api_key=api_key,
+                model=model,
+                messages=messages,
+                timeout=timeout,
+                response_schema=response_schema,
+                grammar=grammar,
+                tools=tools,
+                yield_to_chats=yield_to_chats,
+            )
+        finally:
+            await permit.release()
+    return await _complete_window(
+        base_url=base_url,
+        api_key=api_key,
+        model=model,
+        messages=messages,
+        timeout=timeout,
+        response_schema=response_schema,
+        grammar=grammar,
+        tools=tools,
+        yield_to_chats=yield_to_chats,
+    )
+
+
 async def _complete_window(
     *,
     base_url: str,
@@ -633,11 +799,16 @@ async def _complete_window(
     timeout: float,
     response_schema: dict | None = None,
     grammar: str | None = None,
+    tools: bool = True,
+    yield_to_chats: bool = False,
 ) -> str:
     """Retry a completion that never returned, and free the slot during the pause."""
     window = retry.Window()
     while True:
-        permit = await gate.reserve()
+        try:
+            permit = await gate.reserve(step_aside=yield_to_chats)
+        except gate.BusyLane as exc:
+            raise YieldLater() from exc
         hold = True
         try:
             await permit.acquire()
@@ -650,8 +821,12 @@ async def _complete_window(
                     timeout=timeout,
                     response_schema=response_schema,
                     grammar=grammar,
+                    tools=tools,
+                    yield_to_chats=yield_to_chats,
                 )
             except turn_mod.TurnCancelled:
+                raise
+            except YieldLater:
                 raise
             except ProviderError as exc:
                 kind = window.plan(str(exc), started=False)
@@ -678,31 +853,47 @@ async def complete(
     timeout: float = 120.0,
     response_schema: dict | None = None,
     grammar: str | None = None,
+    tools: bool | None = None,
+    yield_to_chats: bool = False,
 ) -> str:
-    if not gate.inner_retry_allowed():
-        permit = await gate.reserve()
-        try:
-            await permit.acquire()
-            return await _complete_once(
+    """One completion. Structured and internal calls omit tools. llama.cpp gets plain JSON."""
+    structured = bool(response_schema or grammar)
+    send_tools = False if tools is False or structured else True
+    schema = response_schema
+    gram = grammar
+    outgoing = messages
+    if structured and await server_is_llama(base_url, api_key):
+        schema = None
+        gram = None
+        send_tools = False
+        outgoing = _plain_json_messages(messages)
+    try:
+        return await _dispatch_complete(
+            base_url=base_url,
+            api_key=api_key,
+            model=model,
+            messages=outgoing,
+            timeout=timeout,
+            response_schema=schema,
+            grammar=gram,
+            tools=send_tools,
+            yield_to_chats=yield_to_chats,
+        )
+    except ProviderError as exc:
+        if structured and grammar_rejected(str(exc)):
+            remember_llama(base_url, True)
+            return await _dispatch_complete(
                 base_url=base_url,
                 api_key=api_key,
                 model=model,
-                messages=messages,
+                messages=_plain_json_messages(messages),
                 timeout=timeout,
-                response_schema=response_schema,
-                grammar=grammar,
+                response_schema=None,
+                grammar=None,
+                tools=False,
+                yield_to_chats=yield_to_chats,
             )
-        finally:
-            await permit.release()
-    return await _complete_window(
-        base_url=base_url,
-        api_key=api_key,
-        model=model,
-        messages=messages,
-        timeout=timeout,
-        response_schema=response_schema,
-        grammar=grammar,
-    )
+        raise
 
 
 def _choice_text(choice: dict) -> str:

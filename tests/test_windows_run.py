@@ -156,17 +156,18 @@ def test_the_final_save_says_when_the_chat_file_stays_locked(tmp_path, monkeypat
 
 
 def test_thought_chunks_and_steps_do_not_run_together():
-    assert thought_gap("check the X account first", "Let me first check") == " "
-    assert thought_gap("see what is going on.", "Let me start") == "\n\n"
+    from easyagent.tools import join_segments
+
+    assert thought_gap("check the X account first", "Let me first check") == ""
+    assert thought_gap("see what is going on.", "Let me start") == ""
     assert thought_gap("Hel", "lo") == ""
+    assert thought_gap("FA", "KE123") == ""
     assert thought_gap("step 0. ", "step 1. ") == ""
     assert thought_gap("see what is going on.", "Let me start", new_step=True) == "\n\n"
-    joined = "check the X account first" + thought_gap("check the X account first", "Let me first check") + "Let me first check"
-    assert joined == "check the X account first Let me first check"
-    assert "firstLet" not in joined
+    parts = ["facts:", "\n", "1", ". key sk-test-FA", "KE123", "\n", "2", ". a PROM", "ISE", "S.md"]
+    assert join_segments(parts) == "".join(parts)
     stepped = "see what is going on." + thought_gap("see what is going on.", "Let me start", new_step=True) + "Let me start"
     assert stepped == "see what is going on.\n\nLet me start"
-    assert "on.Let" not in stepped
 
 
 def test_windows_shell_is_powershell_and_empty_output_names_the_exit_code(tmp_path, monkeypatch):

@@ -26,7 +26,25 @@ def test_face_color_is_stable_for_an_id_and_not_written_until_chosen(tmp_path):
         assert "face_color" not in on_disk
 
         other = client.post("/api/bots", json={"name": "Bea", "endpoint_id": endpoint["id"]}).json()
-        assert other["face_color"] == face_color_for(other["id"])
+        listed = {item["id"]: item["face_color"] for item in client.get("/api/bots").json()}
+        assert listed[bot["id"]] in PALETTE
+        assert listed[other["id"]] in PALETTE
+        assert listed[bot["id"]] != listed[other["id"]]
+
+
+def test_face_colors_skip_a_color_another_bot_already_has(tmp_path):
+    natural = face_color_for("bea")
+    assert face_color_for("bea", taken=[natural]) != natural
+    assert face_color_for("bea", taken=[natural]) in PALETTE
+    with TestClient(create_app(tmp_path)) as client:
+        endpoint = client.post("/api/endpoints", json={"name": "local", "base_url": "http://127.0.0.1:9/v1"}).json()
+        for index in range(len(PALETTE)):
+            client.post("/api/bots", json={"name": f"Bot {index}", "endpoint_id": endpoint["id"]})
+        listed = client.get("/api/bots").json()
+        seen = [bot["face_color"] for bot in listed]
+        assert len(seen) == len(PALETTE)
+        assert len(set(seen)) == len(PALETTE)
+        assert set(seen) == set(PALETTE)
 
 
 def test_a_palette_color_overrides_and_a_bad_color_is_refused(tmp_path):

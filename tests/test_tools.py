@@ -348,6 +348,28 @@ def test_long_directory_listing_does_not_appear_in_the_chat(tmp_path, monkeypatc
     assert "noise-150.tmp" not in saved
 
 
+def test_a_finished_answer_that_mentions_a_later_check_is_kept(tmp_path, monkeypatch):
+    from easyagent.tools import _is_announcement
+
+    prose = (
+        "The kiln cooled overnight and the glaze is even across the whole shelf. "
+        "The batch is usable as it stands. I will check the next firing later."
+    )
+    assert not _is_announcement(prose)
+    assert _is_announcement("I will check the next firing later.")
+    assert _is_announcement("Let me check the file sizes for you.")
+    client, bot, chat, recorder = _world(tmp_path, monkeypatch)
+    before = len(recorder.seen)
+    recorder.reply = [prose, "This second reply should not replace the answer."]
+    sent = client.post(
+        f"/api/bots/{bot['id']}/chats/{chat['id']}/messages",
+        json={"content": "How did the firing go?"},
+    )
+    assert sent.status_code == 200, sent.text
+    assert sent.json()["chat"]["messages"][-1]["content"] == prose
+    assert len(recorder.seen) == before + 1
+
+
 def test_an_announcement_is_not_the_answer_and_the_largest_file_is(tmp_path, monkeypatch):
     from easyagent.tools import _implied_tool, _is_announcement
 

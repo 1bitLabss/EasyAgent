@@ -28,6 +28,89 @@ export function windowChat(chat: Chat): Chat {
   return { ...chat, messages: tail, message_count: total, window_start: Math.max(0, total - tail.length) };
 }
 
+function sameList(left?: string[], right?: string[]) {
+  if (left === right) return true;
+  if (!left?.length && !right?.length) return true;
+  if (!left || !right || left.length !== right.length) return false;
+  return left.every((item, index) => item === right[index]);
+}
+
+export function sameMessage(left: ChatMessage, right: ChatMessage): boolean {
+  return (
+    left.id === right.id &&
+    left.role === right.role &&
+    left.content === right.content &&
+    left.thinking === right.thinking &&
+    left.reaction === right.reaction &&
+    left.reaction_by === right.reaction_by &&
+    left.error === right.error &&
+    left.thought_seconds === right.thought_seconds &&
+    left.check === right.check &&
+    left.lesson === right.lesson &&
+    left.speaker_name === right.speaker_name &&
+    sameList(left.choices, right.choices) &&
+    sameList(left.skills_saved, right.skills_saved) &&
+    (left.attachment?.id || "") === (right.attachment?.id || "") &&
+    (left.attachment?.excerpt || "") === (right.attachment?.excerpt || "")
+  );
+}
+
+export function shareMessages(prev: ChatMessage[] | undefined, incoming: ChatMessage[]): ChatMessage[] {
+  if (!prev?.length) return incoming;
+  const byId = new Map(prev.filter((message) => message.id).map((message) => [message.id as string, message]));
+  let same = prev.length === incoming.length;
+  const next = incoming.map((message, index) => {
+    const old = message.id ? byId.get(message.id) : undefined;
+    const kept = old && sameMessage(old, message) ? old : message;
+    if (kept !== prev[index]) same = false;
+    return kept;
+  });
+  return same ? prev : next;
+}
+
+function sameRun(left: Chat["run"], right: Chat["run"]) {
+  if (left === right) return true;
+  if (!left || !right) return !left && !right;
+  return left.id === right.id && left.status === right.status && left.started_at === right.started_at && left.last_activity_at === right.last_activity_at && left.current_step === right.current_step && left.reason === right.reason;
+}
+
+/** Keep the previous chat object when a poll repeats the transcript. */
+export function shareChat(prev: unknown, incoming: unknown): unknown {
+  if (!prev || !incoming || typeof prev !== "object" || typeof incoming !== "object") return incoming;
+  const older = prev as Chat;
+  const next = incoming as Chat;
+  if (!Array.isArray(next.messages)) return incoming;
+  const messages = shareMessages(older.messages, next.messages);
+  if (
+    messages === older.messages &&
+    older.id === next.id &&
+    older.title === next.title &&
+    older.message_count === next.message_count &&
+    older.window_start === next.window_start &&
+    older.updated_at === next.updated_at &&
+    sameRun(older.run, next.run)
+  ) {
+    return older;
+  }
+  return { ...next, messages };
+}
+
+/** Approval cards while a reply is running. Idle and hidden windows do not ask. */
+export const APPROVAL_POLL_MS = 5000;
+
+export function approvalPollMs(active: boolean, hidden = false): number | false {
+  if (hidden || !active) return false;
+  return APPROVAL_POLL_MS;
+}
+
+/** One unread poll per window. A hidden tab does not ask. */
+export const UNREAD_POLL_MS = 8000;
+
+export function unreadRefetchInterval(): number | false {
+  if (typeof document !== "undefined" && document.hidden) return false;
+  return UNREAD_POLL_MS;
+}
+
 export function mergeChat(prev: Chat | undefined, incoming: Chat): Chat {
   const incomingMessages = incoming.messages || [];
   const total = incoming.message_count ?? incomingMessages.length;

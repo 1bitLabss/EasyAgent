@@ -58,11 +58,11 @@ _LONG = re.compile(r"[a-z0-9]{6,}")
 _DATE = re.compile(r"\d{4}-\d{2}-\d{2}")
 _LEAK = re.compile(
     r"(?i)(?<![A-Za-z0-9])(?:"
-    r"sk-[A-Za-z0-9]{8,}"
-    r"|pk-[A-Za-z0-9]{8,}"
+    r"sk-[A-Za-z0-9_-]{8,}"
+    r"|pk-[A-Za-z0-9_-]{8,}"
     r"|ghp_[A-Za-z0-9]{8,}"
     r"|github_pat_[A-Za-z0-9_]{8,}"
-    r"|xox[baprs]-[A-Za-z0-9-]{8,}"
+    r"|xox[abprs]-[A-Za-z0-9-]{8,}"
     r"|AKIA[0-9A-Z]{16}"
     r"|Bearer\s+[A-Za-z0-9._-]{12,}"
     r"|(?:api[_-]?key|token|secret|password)\s*[:=]\s*[^\s\]]{8,}"
@@ -71,6 +71,9 @@ _LEAK = re.compile(
 _GENERIC = frozenset("please check later still around expected actual would could should there their about".split())
 _PROMISE = re.compile(
     r"(?i)\b(?:i'll|i will)\s+(?:check|look|finish|get back|come back|do that|handle|verify|read|update)\b[^.!\n]{0,160}"
+)
+_EXPECT = re.compile(
+    r"(?i)\b(?:i expect|i predict|my guess is|i think it will)\b[^.!\n]{0,220}"
 )
 _ATTR = re.compile(r"([a-z]+)=([^\s]+)")
 _HHMM = re.compile(r"^(\d{2}):(\d{2})$")
@@ -512,10 +515,17 @@ def acceptable(entry: Entry, messages: list[dict]) -> bool:
     return True
 
 
+def _cut(text: str, limit: int) -> str:
+    cleaned = text or ""
+    if len(cleaned) <= limit:
+        return cleaned
+    return cleaned[:limit].rstrip()
+
+
 def _scrub_entry(store: Store, entry: Entry) -> Entry | None:
-    title = scrub_text(store, entry.title)
-    body = scrub_text(store, entry.body)
-    steps = [scrub_text(store, step) for step in entry.steps]
+    title = _cut(scrub_text(store, entry.title), 80)
+    body = _cut(scrub_text(store, entry.body), 2000)
+    steps = [_cut(scrub_text(store, step), 240) for step in entry.steps]
     cleaned = Entry(
         kind=entry.kind,
         title=title,
@@ -654,7 +664,7 @@ def _promise_entries(messages: list[dict]) -> list[Entry]:
         found.append(
             Entry(
                 kind="promise",
-                title=quote[:80],
+                title=quote,
                 body=quote,
                 cites=[mid],
                 dates=[when.date().isoformat()],
@@ -690,36 +700,37 @@ def _close_promises(entries: list[Entry], messages: list[dict]) -> None:
 
 
 def _prediction_entries(messages: list[dict], prior: float) -> list[Entry]:
+    """Expected is the bot's own prediction. A reaction with no words is not one."""
     rows = []
     for index, message in enumerate(messages):
-        if message.get("role") != "user":
+        if message.get("role") != "assistant":
             continue
-        ask = " ".join(str(message.get("content") or "").split())
-        if len(ask.split()) < 6:
+        text = " ".join(str(message.get("content") or "").split())
+        match = _EXPECT.search(text)
+        if not match:
             continue
+        expected = " ".join(match.group(0).split())
         when = parse_when(str(message.get("created_at") or ""))
         mid = str(message.get("id") or "")
-        if not mid or when is None:
+        if not mid or when is None or not expected:
             continue
         outcome = ""
         outcome_id = ""
         for later in messages[index + 1 :]:
-            if later.get("role") == "user":
-                break
-            if later.get("role") == "assistant":
-                outcome = " ".join(str(later.get("content") or "").split())
-                outcome_id = str(later.get("id") or "")
-                break
-        if not outcome_id:
+            outcome = " ".join(str(later.get("content") or "").split())
+            if not outcome:
+                continue
+            outcome_id = str(later.get("id") or "")
+            break
+        if not outcome_id or not outcome:
             continue
-        score = _outcome_score(ask, outcome)
-        cites = [mid] if not outcome_id else [mid, outcome_id]
+        score = _outcome_score(expected, outcome)
         rows.append(
             Entry(
                 kind="prediction",
-                title=ask[:80],
-                body=f"Expected: {ask[:240]}\nActual: {outcome[:240]}",
-                cites=cites,
+                title=expected,
+                body=f"Expected: {expected}\nActual: {outcome}",
+                cites=[mid, outcome_id],
                 dates=[when.date().isoformat()],
                 score=f"{score:.2f}",
                 status=f"confidence={prior:.2f}",
@@ -763,8 +774,8 @@ def _unknown_entries(messages: list[dict]) -> list[Entry]:
         rows.append(
             Entry(
                 kind="unknown",
-                title=ask[:80],
-                body=ask[:240],
+                title=ask,
+                body=ask,
                 cites=[mid],
                 dates=[when.date().isoformat()],
                 status="verified" if verified else "open",
@@ -854,7 +865,7 @@ def _row_entry(kind: str, parts: list[str], cites: list[str], date: str) -> Entr
         title, wrong, cause, fix = parts[3], parts[4], parts[5], parts[6]
         return Entry(
             kind=kind,
-            title=title[:80],
+            title=title,
             body=f"Wrong: {wrong}\nCause: {cause}\nFix: {fix}",
             cites=cites,
             dates=[date],
@@ -862,14 +873,14 @@ def _row_entry(kind: str, parts: list[str], cites: list[str], date: str) -> Entr
         )
     if kind == "promise" and len(parts) >= 5:
         status = "closed" if parts[3].lower() == "closed" else "open"
-        return Entry(kind=kind, title=parts[4][:80], body=parts[4], cites=cites, dates=[date], status=status, source="model")
+        return Entry(kind=kind, title=parts[4], body=parts[4], cites=cites, dates=[date], status=status, source="model")
     if kind == "unknown" and len(parts) >= 5:
         status = "verified" if parts[3].lower() == "verified" else "open"
-        return Entry(kind=kind, title=parts[4][:80], body=parts[4], cites=cites, dates=[date], status=status, source="model")
+        return Entry(kind=kind, title=parts[4], body=parts[4], cites=cites, dates=[date], status=status, source="model")
     if kind == "habit" and len(parts) >= 5:
         return Entry(
             kind=kind,
-            title=parts[3][:80],
+            title=parts[3],
             body=parts[4],
             cites=cites,
             dates=[date],
@@ -880,7 +891,7 @@ def _row_entry(kind: str, parts: list[str], cites: list[str], date: str) -> Entr
         steps = [step.strip() for step in parts[4].split("/") if step.strip()]
         return Entry(
             kind=kind,
-            title=parts[3][:80],
+            title=parts[3],
             body="\n".join(f"- {step}" for step in steps),
             cites=cites,
             dates=[date],
@@ -888,7 +899,7 @@ def _row_entry(kind: str, parts: list[str], cites: list[str], date: str) -> Entr
             steps=steps,
         )
     if kind == "world" and len(parts) >= 5:
-        return Entry(kind=kind, title=parts[3][:80], body=parts[4], cites=cites, dates=[date], source="model")
+        return Entry(kind=kind, title=parts[3], body=parts[4], cites=cites, dates=[date], source="model")
     if kind == "dream" and len(parts) >= 5:
         try:
             score = float(parts[3])
@@ -900,7 +911,7 @@ def _row_entry(kind: str, parts: list[str], cites: list[str], date: str) -> Entr
             score = 1.0
         return Entry(
             kind=kind,
-            title=parts[4][:80],
+            title=parts[4],
             body=parts[4],
             cites=cites,
             dates=[date],
@@ -921,12 +932,29 @@ def _day_messages(messages: list[dict], now: datetime) -> list[dict]:
     return kept
 
 
-def _prompt(messages: list[dict]) -> str:
+def _zone_label(now: datetime) -> str:
+    name = now.tzname() or "local"
+    offset = now.strftime("%z")
+    if len(offset) == 5:
+        return f"{name} (UTC{offset[:3]}:{offset[3:]})"
+    if offset:
+        return f"{name} ({offset})"
+    return name
+
+
+def _prompt(messages: list[dict], now: datetime) -> str:
     lines = []
+    example_id = ""
+    example_date = now.date().isoformat()
     for message in messages:
         mid = str(message.get("id") or "")
         if not mid:
             continue
+        if not example_id:
+            example_id = mid
+            when = parse_when(str(message.get("created_at") or ""))
+            if when is not None:
+                example_date = when.astimezone(now.tzinfo).date().isoformat()
         text = " ".join(str(message.get("content") or "").split())
         if len(text) > 240:
             text = text[:239].rstrip() + "…"
@@ -942,9 +970,18 @@ def _prompt(messages: list[dict]) -> str:
     blob = "\n".join(lines)
     if len(blob) > 8000:
         blob = blob[-8000:]
+    today = now.date().isoformat()
+    example = (
+        f"PROMISE|[m:{example_id}]|{example_date}|open|I will check the boiler tomorrow"
+        if example_id
+        else f"PROMISE|[m:id]|{today}|open|I will check the boiler tomorrow"
+    )
     return (
-        "Update your own notes from the lines below. Use only facts in those lines. "
-        "Every row cites an id copied from the lines. Do not include passwords, keys, or tokens. "
+        f"Today is {today}. The timezone is {_zone_label(now)}. "
+        "Do not call a tool. Do not run a shell command. Do not print a date command. "
+        "Use only facts in the lines below. Every row cites an id copied from the lines. "
+        "The date on every row is that message's date, written YYYY-MM-DD. "
+        "Do not include passwords, keys, or tokens. "
         "One pipe row per fact and no other text.\n"
         "MISTAKE|[m:id]|YYYY-MM-DD|title|what went wrong|root cause|fix\n"
         "PROMISE|[m:id]|YYYY-MM-DD|open or closed|commitment\n"
@@ -952,7 +989,8 @@ def _prompt(messages: list[dict]) -> str:
         "HABIT|[m:id]|YYYY-MM-DD|pattern|suggestion\n"
         "PLAYBOOK|[m:id]|YYYY-MM-DD|title|step / step\n"
         "WORLD|[m:id]|YYYY-MM-DD|name|what changed\n"
-        "DREAM|[m:id]|YYYY-MM-DD|0.5|idea\n\n"
+        "DREAM|[m:id]|YYYY-MM-DD|0.5|idea\n"
+        f"Example:\n{example}\n\n"
         f"Lines:\n{blob}"
     )
 
@@ -1290,23 +1328,61 @@ def _write_last(store: Store, bot_id: str, payload: dict) -> None:
     atomic_write_text(folder / "last-night.json", json.dumps(payload, indent=2) + "\n")
 
 
+async def _propose_nightly(store: Store, bot: dict, summary: str) -> None:
+    """Turn an open observation or a new note into a candidate. Replay still decides."""
+    try:
+        from easyagent.learn import open_observations, propose_from_signal
+    except Exception:
+        return
+    observations = open_observations(store, bot["id"])
+    bits = [str(item.get("text") or "").strip() for item in observations[-6:] if str(item.get("text") or "").strip()]
+    folder = notes_dir(store, bot["id"])
+    for name in ("MISTAKES.md", "UNKNOWNS.md", "PLAYBOOK.md"):
+        text = _read(folder / name).strip()
+        if text:
+            bits.append(text[-400:])
+    notes = "\n".join(bits).strip()
+    if not notes:
+        return
+    try:
+        await propose_from_signal(
+            store,
+            bot,
+            notes[:2000],
+            reason="nightly",
+            task=summary[:400],
+            timeout=llm.IDLE_MODEL_TIMEOUT,
+        )
+    except Exception:
+        return
+
+
 async def _ask(store: Store, bot: dict, prompt: str) -> str:
+    from easyagent import gate
+
     try:
         endpoint = store.get_endpoint(bot["endpoint_id"])
     except StoreError:
         endpoint = None
     if not endpoint:
         return ""
+    token = gate.bind_connection(endpoint, bot.get("name") or "notes")
     try:
         return await llm.complete(
             base_url=endpoint["base_url"],
             api_key=endpoint.get("api_key") or None,
             model=(bot.get("model") or endpoint.get("model") or None),
             messages=[{"role": "user", "content": scrub_text(store, prompt)}],
-            timeout=8.0,
+            timeout=llm.IDLE_MODEL_TIMEOUT,
+            tools=False,
+            yield_to_chats=True,
         )
+    except llm.YieldLater:
+        raise
     except Exception:
         return ""
+    finally:
+        gate.reset_connection(token)
 
 
 async def run_pass(store: Store, bot: dict, *, now: datetime | None = None, force: bool = False) -> dict:
@@ -1343,7 +1419,11 @@ async def run_pass(store: Store, bot: dict, *, now: datetime | None = None, forc
     incoming.extend(world_entries(store, now.date().isoformat(), now.date().isoformat()))
     model_text = ""
     if today:
-        model_text = await _ask(store, bot, _prompt(today))
+        try:
+            model_text = await _ask(store, bot, _prompt(today, now))
+        except llm.YieldLater:
+            _log(store, bot_id, now, "skipped", "a chat is using the connection")
+            return {"result": "skipped", "reason": "a chat is using the connection"}
     incoming.extend(parse_model_rows(model_text, messages))
     _close_promises(incoming, messages)
     # Closing can also apply to promises already on disk. Fold them in before commit
@@ -1399,6 +1479,7 @@ async def run_pass(store: Store, bot: dict, *, now: datetime | None = None, forc
     }
     _write_last(store, bot_id, payload)
     _log(store, bot_id, now, "updated", summary)
+    await _propose_nightly(store, bot, summary)
     return payload
 
 

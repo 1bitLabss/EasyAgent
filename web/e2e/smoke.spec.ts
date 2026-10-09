@@ -31,7 +31,7 @@ test("create a bot, keep a stream going, delete a chat, and remove the bot", asy
   await page.locator("form").getByRole("button", { name: "Add bot" }).click();
   await expect(page.getByRole("heading", { name: "Bea" })).toBeVisible();
 
-  await page.getByRole("button", { name: "Ada" }).click();
+  await page.getByRole("button", { name: "Ada", exact: true }).click();
   await page.getByLabel("Message").fill("take your time");
   await page.getByRole("button", { name: "Send" }).click();
   await expect(page.getByText("Here")).toBeVisible();
@@ -50,7 +50,7 @@ test("create a bot, keep a stream going, delete a chat, and remove the bot", asy
     return (chat.messages || []).map((message: { content?: string }) => message.content || "").join("\n");
   }).toContain("today.");
 
-  await page.getByRole("button", { name: "Ada" }).click();
+  await page.getByRole("button", { name: "Ada", exact: true }).click();
   await expect(page.getByText("today.")).toBeVisible();
 
   await page.getByRole("button", { name: "You" }).click();
@@ -65,6 +65,6 @@ test("create a bot, keep a stream going, delete a chat, and remove the bot", asy
   await page.getByRole("button", { name: "Remove bot" }).click();
   await page.getByLabel(/Type Ada to confirm/).fill("  aDa ");
   await page.getByRole("dialog").getByRole("button", { name: "Remove bot" }).click();
-  await expect(page.getByRole("button", { name: "Ada" })).toHaveCount(0);
-  await expect(page.getByRole("button", { name: "Bea" })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Ada", exact: true })).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "Bea", exact: true })).toBeVisible();
 });

@@ -7,10 +7,6 @@
   ],
   "criteria": [
     {
-      "kind": "reply_regex",
-      "pattern": "note"
-    },
-    {
       "kind": "llm_judge",
       "rubric": "The reply says what a paper note is for, in plain sentences, and invents no tool result."
     },

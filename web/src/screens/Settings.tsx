@@ -7,7 +7,9 @@ import { Input, Textarea } from "@/components/ui/input";
 import { Switch } from "@/components/ui/switch";
 import { pokeFace } from "@/lib/mood";
 import { contextNote } from "@/lib/run";
+import { localWhen } from "@/lib/time";
 import { windowChat } from "@/lib/window";
+import { PhoneAccess } from "@/screens/Phone";
 import { useApp } from "@/store";
 import type { Bot, Chat, ChatSummary, Endpoint, Job, Learning, MemoryLine, MemoryTopic, Project, Schedule, Skill } from "@/types";
 
@@ -21,6 +23,73 @@ function Block({ id, title, children }: { id?: string; title: string; children: 
       <h2 className="text-base font-semibold">{title}</h2>
       {children}
     </section>
+  );
+}
+
+function SafetyBlock({ botId, botName, mode, unlocks, onError }: { botId: string; botName: string; mode: string; unlocks: string[]; onError: (text: string) => void }) {
+  const audit = useQuery({ queryKey: ["audit", botId], queryFn: () => api<{ at?: string; decision?: string; rule?: string; why?: string; detail?: string }[]>(`/api/bots/${botId}/audit`) });
+  const trash = useQuery({ queryKey: ["trash", botId], queryFn: () => api<{ id: string; kind?: string; names?: string[]; name?: string; from?: string }[]>(`/api/bots/${botId}/trash`) });
+  const [nextMode, setNextMode] = useState(mode);
+  const [confirm, setConfirm] = useState("");
+  const [unlock, setUnlock] = useState(unlocks.join(", "));
+
+  useEffect(() => {
+    setNextMode(mode);
+    setUnlock(unlocks.join(", "));
+    setConfirm("");
+  }, [botId, mode, unlocks]);
+
+  async function save() {
+    const list = unlock.split(",").map((item) => item.trim()).filter(Boolean);
+    await api(`/api/bots/${botId}/safety`, {
+      method: "POST",
+      json: { mode: nextMode, confirm_name: confirm, unlocks: nextMode === "advanced" ? list : [] },
+    });
+    await queryClient.invalidateQueries({ queryKey: ["bots"] });
+  }
+
+  return (
+    <Block id="safety" title="Safety">
+      <Note>Careful is the default. A risky action waits for you in the chat. Normal also allows replacing a file inside this bot's workspace. Advanced asks you to type the bot's name, and a blocked action stays blocked unless you unlock that one rule. An unlocked rule still waits for a yes. It is never automatic.</Note>
+      <label className="block text-sm">Mode
+        <select className="mt-1 h-9 w-full rounded-md border border-border bg-card px-2" value={nextMode} onChange={(event) => setNextMode(event.target.value)}>
+          <option value="careful">Careful</option>
+          <option value="normal">Normal</option>
+          <option value="advanced">Advanced</option>
+        </select>
+      </label>
+      {nextMode === "advanced" ? (
+        <>
+          <label className="block text-sm">Type {botName} to turn on Advanced
+            <Input className="mt-1" value={confirm} onChange={(event) => setConfirm(event.target.value)} />
+          </label>
+          <label className="block text-sm">Unlocked block rules, comma separated
+            <Input className="mt-1" value={unlock} onChange={(event) => setUnlock(event.target.value)} />
+          </label>
+        </>
+      ) : null}
+      <Button type="button" onClick={() => void save().catch((reason: Error) => onError(reason.message))}>Save safety</Button>
+      <h3 className="text-sm font-medium">Audit log</h3>
+      <ul className="space-y-2 text-sm" data-testid="audit-log">
+        {(audit.data || []).length ? (audit.data || []).slice().reverse().map((row, index) => (
+          <li key={`${row.at}-${index}`} className="rounded-lg bg-black/5 p-2 dark:bg-white/10">
+            <span className="font-medium">{row.decision}</span>
+            <span className="text-muted"> · {row.rule}</span>
+            <p>{row.why}</p>
+            {row.detail ? <pre className="mt-1 whitespace-pre-wrap text-xs text-muted">{row.detail}</pre> : null}
+          </li>
+        )) : <li className="text-muted">No safety decisions yet.</li>}
+      </ul>
+      <h3 className="text-sm font-medium">Trash</h3>
+      <ul className="space-y-2 text-sm">
+        {(trash.data || []).length ? (trash.data || []).slice().reverse().map((item) => (
+          <li key={item.id} className="flex items-center justify-between gap-2">
+            <span>{item.kind === "snapshot" ? item.name : (item.names || []).join(", ") || item.id}</span>
+            <Button size="sm" variant="outline" onClick={() => void api(`/api/bots/${botId}/trash/${item.id}/restore`, { method: "POST" }).then(() => queryClient.invalidateQueries({ queryKey: ["trash", botId] })).catch((reason: Error) => onError(reason.message))}>Restore</Button>
+          </li>
+        )) : <li className="text-muted">Trash is empty.</li>}
+      </ul>
+    </Block>
   );
 }
 
@@ -78,7 +147,15 @@ export function SettingsScreen() {
   const watches = useQuery({ queryKey: ["watches"], queryFn: () => api<{ kind?: string; id?: string }[]>("/api/watches") });
 
   if (!bot || !botId) {
-    return <section className="p-6"><h1 className="text-2xl font-semibold">Pick a bot first.</h1><p className="mt-2 text-sm text-muted">Settings belong to one bot. Chats are not changed here.</p></section>;
+    return (
+      <div className="h-full space-y-4 overflow-y-auto p-6">
+        <PhoneAccess />
+        <section>
+          <h1 className="text-2xl font-semibold">Pick a bot first.</h1>
+          <p className="mt-2 text-sm text-muted">The rest of Settings belongs to one bot. Chats are not changed here.</p>
+        </section>
+      </div>
+    );
   }
 
   async function save(form: FormData) {
@@ -105,6 +182,9 @@ export function SettingsScreen() {
 
   return (
     <div className="h-full overflow-y-auto">
+      <div className="px-6 pt-5">
+        <PhoneAccess />
+      </div>
       <header className="px-6 py-5">
         <p className="text-xs uppercase tracking-wide text-muted">Bot settings</p>
         <h1 className="text-2xl font-semibold">{bot.name}</h1>
@@ -176,7 +256,7 @@ export function SettingsScreen() {
             <ul className="space-y-1 text-sm">
               {(learning.data?.prune?.pending || []).map((row) => (
                 <li key={`${row.chat_id}:${row.message_id}`}>
-                  {row.created_at || "undated"} — {row.preview || row.message_id}
+                  {localWhen(row.created_at)} — {row.preview || row.message_id}
                   {learning.data?.prune?.pruning === false || learning.data?.prune?.keep_forever ? " (staying)" : ""}
                 </li>
               ))}
@@ -257,6 +337,8 @@ export function SettingsScreen() {
           <Button type="submit">Save</Button>
         </form>
 
+        <SafetyBlock botId={bot.id} botName={bot.name} mode={bot.safety_mode || "careful"} unlocks={bot.safety_unlocks || []} onError={setError} />
+
         <Block id="learning" title="Learning">
           <Note>After a hard turn, this bot can propose a skill. The proposal stays a candidate until a check passes and a replay does not do worse. Skills and memory you wrote are left alone.</Note>
           <h3 className="text-sm font-medium">What changed last night</h3>
@@ -292,7 +374,7 @@ export function SettingsScreen() {
             <ul className="space-y-1 text-sm">
               {(learning.data?.ledger || []).filter((row) => row.kind === "notes").map((row) => (
                 <li key={row.id} className="flex items-center justify-between gap-2">
-                  <span>Notes snapshot {row.created_at || row.id}</span>
+                  <span>Notes snapshot {localWhen(row.created_at) || row.id}</span>
                   <Button size="sm" variant="ghost" onClick={() => void api(`/api/bots/${botId}/learning/rollback/${row.id}`, { method: "POST" }).then(() => { setNote("Rolled back that notes snapshot."); return queryClient.invalidateQueries({ queryKey: ["learning", botId] }); }).catch((reason: Error) => setError(reason.message))}>Roll back</Button>
                 </li>
               ))}
@@ -307,7 +389,7 @@ export function SettingsScreen() {
             <Switch checked={Boolean(learning.data?.manual)} onCheckedChange={(on) => void api(`/api/bots/${botId}/learning/manual`, { method: "POST", json: { on } }).then(() => queryClient.invalidateQueries({ queryKey: ["learning", botId] }))} />
           </label>
           <div className="flex flex-wrap gap-2">
-            <Button type="button" variant="outline" size="sm" onClick={() => void api(`/api/bots/${botId}/learning/rollback`, { method: "POST" }).then(() => { setNote("Rolled back the last change."); return queryClient.invalidateQueries({ queryKey: ["learning", botId] }); }).catch((reason: Error) => setError(reason.message))}>Roll back the last change</Button>
+            <Button type="button" variant="outline" size="sm" disabled={(learning.data?.ledger || []).filter((row) => !row.rolled).length === 0} onClick={() => void api(`/api/bots/${botId}/learning/rollback`, { method: "POST" }).then(() => { setNote("Rolled back the last change."); return queryClient.invalidateQueries({ queryKey: ["learning", botId] }); }).catch((reason: Error) => setError(reason.message || "There is nothing to roll back."))}>Roll back the last change</Button>
             <Button type="button" variant="ghost" size="sm" onClick={() => void api(`/api/bots/${botId}/learning/stop`, { method: "POST" }).catch((reason: Error) => setError(reason.message))}>Stop</Button>
           </div>
           {(["waiting", "promoted", "rejected"] as const).map((key) => (
@@ -318,7 +400,12 @@ export function SettingsScreen() {
                   {(learning.data?.[key] || []).map((row) => (
                     <li key={row.id} className="flex items-center justify-between gap-2">
                       <span>{row.name || row.id}{row.reason ? ` — ${row.reason}` : ""}</span>
-                      {key === "waiting" ? <Button size="sm" variant="outline" onClick={() => void api(`/api/bots/${botId}/learning/approve/${row.id}`, { method: "POST" }).then(() => { pokeFace(botId, "glad"); return queryClient.invalidateQueries({ queryKey: ["learning", botId] }); })}>Approve</Button> : null}
+                      {key === "waiting" ? (
+                        <span className="flex gap-1">
+                          <Button size="sm" variant="outline" onClick={() => void api(`/api/bots/${botId}/learning/approve/${row.id}`, { method: "POST" }).then(() => { pokeFace(botId, "glad"); return queryClient.invalidateQueries({ queryKey: ["learning", botId] }); }).catch((reason: Error) => setError(reason.message))}>Approve</Button>
+                          <Button size="sm" variant="ghost" onClick={() => void api(`/api/bots/${botId}/learning/reject/${row.id}`, { method: "POST" }).then(() => { setNote("Rejected that candidate."); return queryClient.invalidateQueries({ queryKey: ["learning", botId] }); }).catch((reason: Error) => setError(reason.message))}>Reject</Button>
+                        </span>
+                      ) : null}
                     </li>
                   ))}
                 </ul>

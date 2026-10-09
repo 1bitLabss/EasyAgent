@@ -45,10 +45,10 @@
 }
 
 .buddy-face .shell { fill: var(--face); }
-.buddy-face.is-waiting,
-.buddy-face.is-reconnecting { --state: #d0892a; }
-.buddy-face.is-waiting .shell,
-.buddy-face.is-reconnecting .shell { fill: #d0892a; }
+.buddy-face.is-waiting { --state: #d0892a; }
+.buddy-face.is-waiting .shell { fill: #d0892a; }
+.buddy-face.is-reconnecting { --state: #3d7ea6; }
+.buddy-face.is-reconnecting .shell { fill: #3d7ea6; }
 .buddy-face.is-thinking { --state: #5c4d9a; }
 .buddy-face.is-thinking .shell { fill: #5c4d9a; }
 .buddy-face.is-tool { --state: #2a6fdb; }

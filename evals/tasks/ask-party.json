@@ -12,8 +12,8 @@
       "success": true
     },
     {
-      "kind": "reply_regex",
-      "pattern": "How many people"
+      "kind": "llm_judge",
+      "rubric": "The reply asks how many people are coming and does not claim a table was booked. Exact wording is not required."
     },
     {
       "kind": "reply_excludes",

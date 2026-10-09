@@ -7,6 +7,7 @@ import base64
 import json
 import logging
 import os
+import re
 import threading
 import time
 from contextlib import asynccontextmanager, suppress
@@ -21,7 +22,15 @@ from easyagent import __version__
 from easyagent import gate
 from easyagent import llm
 from easyagent import turn as turn_mod
-from easyagent.access import access_decision, contained_file, is_shell, presented_token, refusal_html
+from easyagent.access import contained_file, is_lan, is_local, is_shell, presented_token, refusal_html
+from easyagent.phone import (
+    LanPort,
+    PhoneBook,
+    access_for,
+    add_firewall_rule,
+    qr_svg,
+    status_payload,
+)
 from easyagent.context import (
     ERROR_PLACEHOLDER,
     bot_context_chars,
@@ -59,6 +68,7 @@ from easyagent.unread import mark_chat_read, mark_room_read, unread_snapshot
 from easyagent.learn import (
     approve_candidate,
     chats_active,
+    reject_candidate,
     learn_loop,
     lesson_block,
     mark_origin,
@@ -72,7 +82,7 @@ from easyagent.learn import (
     sleep_once,
 )
 from easyagent.skills import RESERVED_SLUGS, extract_skills, pack_skills, slugify
-from easyagent.mascot import clean_face_color, face_color_for
+from easyagent.mascot import clean_face_color, colors_for_bots, face_color_for
 from easyagent.store import Store, StoreError, message_index, new_id, now_iso, reaction_signal
 from easyagent.limits import MAX_CONTEXT_TOKENS, MAX_STORED_MESSAGE_CHARS, MIN_CONTEXT_TOKENS
 from easyagent.selfinfo import ensure_own_files, own_files_prompt
@@ -133,6 +143,7 @@ def public_bot(store: Store, bot: dict) -> dict:
     except StoreError:
         endpoint = None
     stored = _stored_face_color(bot)
+    colors = colors_for_bots(store.list_bots())
     return {
         "id": bot["id"],
         "name": bot["name"],
@@ -143,11 +154,13 @@ def public_bot(store: Store, bot: dict) -> dict:
         "context_tokens": bot_context_tokens(bot),
         "context_chars": bot_context_chars(bot),
         "created_at": bot.get("created_at"),
-        "face_color": stored or face_color_for(bot["id"]),
+        "face_color": stored or colors.get(bot["id"]) or face_color_for(bot["id"]),
         "face_color_set": bool(stored),
         "check_enabled": bot.get("check_enabled") is not False,
         "learn_paused": bot.get("learn_paused") is True,
         "learn_manual": bot.get("learn_manual") is True,
+        "safety_mode": bot.get("safety_mode") or "careful",
+        "safety_unlocks": list(bot.get("safety_unlocks") or []),
     }
 
 
@@ -279,6 +292,18 @@ class LearnFlag(BaseModel):
     on: bool = False
 
 
+class SafetyIn(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+    mode: str = "careful"
+    confirm_name: str = ""
+    unlocks: list[str] | None = None
+
+
+class ApprovalIn(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+    decision: str = "deny"
+
+
 class RetentionIn(BaseModel):
     model_config = ConfigDict(extra="ignore")
     retain_days: int | None = None
@@ -354,6 +379,14 @@ class DirectionIn(BaseModel):
     text: str
 
 
+class PhoneIn(BaseModel):
+    enabled: bool
+
+
+class FirewallIn(BaseModel):
+    consent: bool = False
+
+
 class ScheduleIn(BaseModel):
     model_config = ConfigDict(extra="ignore")
     prompt: str
@@ -376,6 +409,7 @@ class ReadIn(BaseModel):
 
 @asynccontextmanager
 async def _lifespan(app: FastAPI):
+    app.state.loop = asyncio.get_running_loop()
     stop = asyncio.Event()
     task = asyncio.create_task(schedule_loop(app.state.store, stop))
     learn_task = asyncio.create_task(learn_loop(app.state.store, stop))
@@ -407,20 +441,31 @@ def create_app(data_dir: str | Path | None = None) -> FastAPI:
     _settle_abandoned_runs(store)
     app = FastAPI(title="EasyAgent", lifespan=_lifespan)
     app.state.store = store
+    app.state.phone = PhoneBook(store.root)
+    app.state.lan = LanPort()
 
     @app.middleware("http")
     async def remote_access(request: Request, call_next):
         host = request.client.host if request.client else None
-        decision = access_decision(host, presented_token(request.headers))
+        presented = presented_token(request.headers)
+        phone = request.app.state.phone
+        decision = access_for(host, presented, phone)
+        if decision == "allow" and not is_local(host):
+            phone.claim_if_invite(presented, request.headers.get("user-agent") or "")
         if decision == "refuse":
-            detail = "Remote access is off. Set EASYAGENT_TOKEN on the computer running EasyAgent."
+            if is_lan(host) and not phone.enabled:
+                kind = "off"
+                detail = "Phone access is off. Turn it on in Settings on the computer running EasyAgent."
+            else:
+                kind = "public"
+                detail = "EasyAgent does not answer this network."
             headers = {"Cache-Control": "no-store"}
             if request.url.path == "/" or "text/html" in request.headers.get("accept", ""):
-                return HTMLResponse(refusal_html(), status_code=403, headers=headers)
+                return HTMLResponse(refusal_html(kind), status_code=403, headers=headers)
             return JSONResponse({"detail": detail}, status_code=403, headers=headers)
         if decision == "need_token" and not is_shell(request.url.path):
             return JSONResponse(
-                {"detail": "This network needs the shared token."},
+                {"detail": "This phone needs a pairing token."},
                 status_code=401,
                 headers={"Cache-Control": "no-store"},
             )
@@ -476,6 +521,82 @@ def create_app(data_dir: str | Path | None = None) -> FastAPI:
     @app.get("/api/health")
     def health():
         return {"ok": True, "data_dir": str(store.root), "version": __version__}
+
+    def _phone_port() -> int:
+        server = getattr(app.state, "uvicorn_server", None)
+        if server is not None:
+            return int(server.config.port)
+        return int(os.environ.get("EASYAGENT_PORT", "44721"))
+
+    def _local_only(request: Request) -> None:
+        host = request.client.host if request.client else None
+        if not is_local(host):
+            raise HTTPException(403, "Phone settings stay on this computer.")
+
+    def _apply_phone_listener() -> None:
+        server = getattr(app.state, "uvicorn_server", None)
+        loop = getattr(app.state, "loop", None)
+        if server is None or loop is None:
+            return
+        future = asyncio.run_coroutine_threadsafe(
+            app.state.lan.apply(server, _phone_port(), app.state.phone.enabled),
+            loop,
+        )
+        future.result(timeout=5)
+
+    @app.get("/manifest.webmanifest")
+    def manifest(pair: str = ""):
+        data = json.loads((STATIC_DIR / "manifest.webmanifest").read_text(encoding="utf-8"))
+        token = (pair or "").strip()
+        if re.fullmatch(r"[A-Za-z0-9_-]{16,128}", token):
+            data["start_url"] = f"/?pair={token}"
+        return JSONResponse(
+            data,
+            media_type="application/manifest+json",
+            headers={"Cache-Control": "no-store"},
+        )
+
+    @app.get("/sw.js")
+    def service_worker():
+        return FileResponse(
+            STATIC_DIR / "sw.js",
+            media_type="text/javascript; charset=utf-8",
+            headers={"Cache-Control": "no-cache"},
+        )
+
+    @app.get("/api/phone")
+    def phone_status(request: Request):
+        _local_only(request)
+        return status_payload(app.state.phone, _phone_port(), listening=app.state.lan.listening)
+
+    @app.post("/api/phone")
+    def phone_set(body: PhoneIn, request: Request):
+        _local_only(request)
+        app.state.phone.set_enabled(body.enabled)
+        _apply_phone_listener()
+        return status_payload(app.state.phone, _phone_port(), listening=app.state.lan.listening)
+
+    @app.get("/api/phone/qr.svg")
+    def phone_qr(request: Request):
+        _local_only(request)
+        url = app.state.phone.pair_url(_phone_port())
+        if not url:
+            raise HTTPException(404, "Phone access is off, or this computer has no LAN address.")
+        return Response(content=qr_svg(url), media_type="image/svg+xml", headers={"Cache-Control": "no-store"})
+
+    @app.delete("/api/phone/devices/{device_id}")
+    def phone_revoke(device_id: str, request: Request):
+        _local_only(request)
+        try:
+            app.state.phone.revoke(device_id)
+        except KeyError:
+            raise HTTPException(404, "That phone is not paired.") from None
+        return status_payload(app.state.phone, _phone_port(), listening=app.state.lan.listening)
+
+    @app.post("/api/phone/firewall")
+    def phone_firewall(body: FirewallIn, request: Request):
+        _local_only(request)
+        return add_firewall_rule(_phone_port(), body.consent)
 
     @app.get("/api/unread")
     def get_unread():
@@ -564,6 +685,59 @@ def create_app(data_dir: str | Path | None = None) -> FastAPI:
         if chats_before != chats_after:
             raise HTTPException(500, "Saving bot settings changed chat files.")
         return public_bot(store, bot)
+
+    @app.get("/api/bots/{bot_id}/approvals")
+    def get_approvals(bot_id: str):
+        store.get_bot(bot_id)
+        from easyagent.safety import list_pending
+
+        return list_pending(bot_id)
+
+    @app.post("/api/bots/{bot_id}/approvals/{card_id}")
+    def post_approval(bot_id: str, card_id: str, body: ApprovalIn):
+        store.get_bot(bot_id)
+        from easyagent.safety import resolve_card
+
+        card = resolve_card(card_id, body.decision)
+        if card is None or card.bot_id != bot_id:
+            raise HTTPException(404, "That approval card is not waiting.")
+        return {"ok": True, "decision": card.decision}
+
+    @app.get("/api/bots/{bot_id}/audit")
+    def get_audit(bot_id: str):
+        store.get_bot(bot_id)
+        from easyagent.safety import read_audit
+
+        return read_audit(store, bot_id)
+
+    @app.post("/api/bots/{bot_id}/safety")
+    def post_safety(bot_id: str, body: SafetyIn):
+        from easyagent.safety import set_mode
+        from easyagent.store import StoreError
+
+        try:
+            bot = set_mode(store, bot_id, body.mode, body.confirm_name, body.unlocks)
+        except StoreError as exc:
+            raise HTTPException(exc.status, exc.message) from exc
+        return public_bot(store, bot)
+
+    @app.get("/api/bots/{bot_id}/trash")
+    def get_trash(bot_id: str):
+        store.get_bot(bot_id)
+        from easyagent.safety import list_trash
+
+        return list_trash(store)
+
+    @app.post("/api/bots/{bot_id}/trash/{item_id}/restore")
+    def post_restore(bot_id: str, item_id: str):
+        store.get_bot(bot_id)
+        from easyagent.safety import restore_trash
+
+        try:
+            text = restore_trash(store, item_id)
+        except FileNotFoundError:
+            raise HTTPException(404, "That trash item is not there.")
+        return {"ok": True, "text": text}
 
     @app.delete("/api/bots/{bot_id}")
     def remove_bot(bot_id: str, body: ConfirmIn):
@@ -796,6 +970,7 @@ def create_app(data_dir: str | Path | None = None) -> FastAPI:
             if len(chat.get("messages") or []) != len(texts):
                 raise HTTPException(500, "A reaction changed the transcript.")
             _note_thumb(store, bot_id, chat.get("messages") or [], message_id)
+            await _propose_thumb(store, bot_id, chat.get("messages") or [], message_id)
             landed = _reaction_on_latest(current.get("messages") or [], chat.get("messages") or [], message_id)
             if landed is not None:
                 await _ack_chat_reaction(store, bot_id, chat_id, landed)
@@ -945,6 +1120,9 @@ def create_app(data_dir: str | Path | None = None) -> FastAPI:
                     break
             if speaker and speaker != "user":
                 _note_thumb(store, speaker, room.get("messages") or [], message_id, quarantine=True)
+                await _propose_thumb(
+                    store, speaker, room.get("messages") or [], message_id, quarantine=True
+                )
             landed = _reaction_on_latest(current.get("messages") or [], room.get("messages") or [], message_id)
             if landed is not None:
                 await _ack_room_reaction(store, room_id, landed)
@@ -1292,6 +1470,12 @@ def create_app(data_dir: str | Path | None = None) -> FastAPI:
     def learning_approve(bot_id: str, candidate_id: str):
         bot = store.get_bot(bot_id)
         approve_candidate(store, bot, candidate_id)
+        return learning_panel(store, store.get_bot(bot_id))
+
+    @app.post("/api/bots/{bot_id}/learning/reject/{candidate_id}")
+    def learning_reject(bot_id: str, candidate_id: str):
+        bot = store.get_bot(bot_id)
+        reject_candidate(store, bot, candidate_id)
         return learning_panel(store, store.get_bot(bot_id))
 
     @app.post("/api/bots/{bot_id}/learning/stop")
@@ -1757,6 +1941,76 @@ def _save_user_skill(store: Store, skill: dict) -> dict:
     if slug:
         mark_origin(store, slug, "user")
     return stored
+
+
+_CORRECTION = re.compile(
+    r"(?i)(?:\bthat(?:'s| is) not\b|\bi meant\b|\bi said\b|\bnot what i\b|\bwrong\b|\bincorrect\b|\bno,)"
+)
+
+
+async def _propose_if_corrected(store: Store, bot_id: str, chat: dict) -> None:
+    """A correction of the last reply can become a candidate. Replay still decides."""
+    if os.environ.get("EASYAGENT_LEARN") == "0":
+        return
+    messages = chat.get("messages") or []
+    if len(messages) < 2:
+        return
+    last = messages[-1]
+    prev = messages[-2]
+    if not isinstance(last, dict) or not isinstance(prev, dict):
+        return
+    if last.get("role") != "user" or prev.get("role") != "assistant":
+        return
+    text = str(last.get("content") or "")
+    if not _CORRECTION.search(text):
+        return
+    try:
+        from easyagent.learn import observe, propose_from_signal
+
+        observe(
+            store,
+            bot_id,
+            f"The person corrected a reply. {text[:240]}",
+            reason="correction",
+            task=str(prev.get("content") or "")[:400],
+        )
+        await propose_from_signal(
+            store,
+            store.get_bot(bot_id),
+            text,
+            reason="correction",
+            task=str(prev.get("content") or ""),
+        )
+    except Exception:
+        return
+
+
+async def _propose_thumb(store: Store, bot_id: str, messages: list, message_id: str, *, quarantine: bool = False) -> None:
+    """A thumbs-down can become a candidate. A thumbs-up does not."""
+    if os.environ.get("EASYAGENT_LEARN") == "0" or not bot_id:
+        return
+    text = ""
+    emoji = ""
+    for item in messages or []:
+        if item.get("id") == message_id:
+            emoji = item.get("reaction") or ""
+            text = str(item.get("content") or "")
+            break
+    if emoji != "👎":
+        return
+    try:
+        from easyagent.learn import propose_from_signal
+
+        await propose_from_signal(
+            store,
+            store.get_bot(bot_id),
+            f"The person marked a reply down. {text[:300]}",
+            reason="thumb",
+            task=text,
+            quarantine=quarantine,
+        )
+    except Exception:
+        return
 
 
 def _note_thumb(store: Store, bot_id: str, messages: list, message_id: str, *, quarantine: bool = False) -> None:
@@ -2280,6 +2534,8 @@ def _apply_run(
     if start or not run.get("started_at"):
         run["started_at"] = now
         run["id"] = turn_mod.current_run_id() or run.get("id") or ""
+    if start and reason is None:
+        run["reason"] = ""
     run["status"] = status
     if step is not None:
         run["current_step"] = step
@@ -2541,6 +2797,7 @@ async def _finish_and_maybe_ask(
     quiet: bool = False,
     check: str = "",
     lesson: str = "",
+    thought_seconds: int = 0,
 ) -> dict:
     """Save the parent reply, then run at most one child ask found in it."""
     ask = parse_subagent(visible)
@@ -2559,6 +2816,7 @@ async def _finish_and_maybe_ask(
         quiet=quiet,
         check=check,
         lesson=lesson,
+        thought_seconds=thought_seconds,
     )
     if not ask:
         return finished
@@ -2775,6 +3033,7 @@ def _finish_reply(
     quiet: bool = False,
     check: str = "",
     lesson: str = "",
+    thought_seconds: int = 0,
 ) -> dict:
     chat = store.get_chat(bot_id, chat_id)
     visible = redact(store, visible)
@@ -2809,16 +3068,18 @@ def _finish_reply(
         messages = chat.setdefault("messages", [])
         if messages and messages[-1].get("role") == "assistant" and messages[-1].get("live"):
             blank = messages[-1]
-            if not (blank.get("content") or "").strip() and not (blank.get("thinking") or "").strip():
-                messages.pop()
-                _apply_run(chat, status="idle")
-                store.save_chat(chat)
-            elif not (blank.get("content") or "").strip():
-                blank["content"] = _stopped_text("the model returned nothing")
-                blank["error"] = True
+            thought = redact(store, (thinking or blank.get("thinking") or "")).strip()
+            if thought:
+                blank["content"] = ""
+                blank["thinking"] = thought
+                if int(thought_seconds or 0) > 0:
+                    blank["thought_seconds"] = int(thought_seconds)
                 blank.pop("live", None)
-                _apply_run(chat, status="error", reason=blank["content"], step="")
-                store.save_chat(chat)
+                blank.pop("error", None)
+            else:
+                messages.pop()
+        _apply_run(chat, status="idle")
+        store.save_chat(chat)
         public = _public_chat(store, chat)
         return {"reply": "", "skills_saved": saved, "chat": public, "context": public["context"]}
     blank_reply = False
@@ -2850,8 +3111,11 @@ def _finish_reply(
     kept_thought = redact(store, (thinking or message.get("thinking") or "")).strip()
     if kept_thought:
         message["thinking"] = kept_thought
+        if int(thought_seconds or 0) > 0:
+            message["thought_seconds"] = int(thought_seconds)
     elif "thinking" in message:
         message.pop("thinking", None)
+        message.pop("thought_seconds", None)
     if saved:
         message["skills_saved"] = saved
     if check in {"checked", "revised"}:
@@ -2892,6 +3156,7 @@ def _sse_stopped(store: Store, bot_id: str, chat_id: str, detail: str) -> str:
 
 async def _reply_json(store: Store, bot_id: str, chat_id: str) -> dict:
     chat = store.get_chat(bot_id, chat_id)
+    await _propose_if_corrected(store, bot_id, chat)
     _write_live(store, bot_id, chat_id, step="Waiting on model", start=True, force=True)
     try:
         visible, saved, choices, made, thinking, reacted, checked, lesson = await _complete_for_chat(store, bot_id, chat)
@@ -2920,6 +3185,8 @@ async def _stream_reply(store: Store, bot_id: str, chat_id: str):
     """Yield SSE for one reply. The caller holds the chat lock. The user turn is already stored."""
     bot = store.get_bot(bot_id)
     chat = store.get_chat(bot_id, chat_id)
+    await _propose_if_corrected(store, bot_id, chat)
+    chat = store.get_chat(bot_id, chat_id)
     endpoint, messages = _turn_messages(store, bot_id, chat)
     opened = _write_live(store, bot_id, chat_id, step="Waiting on model", start=True, force=True)
     if opened:
@@ -2936,6 +3203,19 @@ async def _stream_reply(store: Store, bot_id: str, chat_id: str):
         checked = ""
         lesson = ""
         thought_saved = False
+        thought_started: float | None = None
+        thought_seconds = 0
+
+        def note_thought() -> None:
+            nonlocal thought_started
+            if thought_started is None:
+                thought_started = time.monotonic()
+
+        def freeze_thought() -> None:
+            nonlocal thought_seconds
+            if thought_started is not None and thought_seconds <= 0:
+                thought_seconds = max(1, int(round(time.monotonic() - thought_started)))
+
         async for kind, text in stream_with_tools(
             base_url=endpoint["base_url"],
             api_key=endpoint.get("api_key") or None,
@@ -2946,6 +3226,7 @@ async def _stream_reply(store: Store, bot_id: str, chat_id: str):
             chat_id=chat_id,
         ):
             if kind == "stage":
+                freeze_thought()
                 _save_live_reply(store, bot_id, chat_id, text)
                 extra = text[len(sent):] if sent and text.startswith(sent) else text
                 sent = text
@@ -2954,6 +3235,7 @@ async def _stream_reply(store: Store, bot_id: str, chat_id: str):
                 continue
             if kind == "thinking":
                 if text:
+                    note_thought()
                     thought += text
                     saved_run = _write_live(
                         store,
@@ -3024,6 +3306,7 @@ async def _stream_reply(store: Store, bot_id: str, chat_id: str):
             quiet=reacted and not visible.strip(),
             check=checked,
             lesson=lesson,
+            thought_seconds=thought_seconds or (max(1, int(round(time.monotonic() - thought_started))) if thought_started is not None else 0),
         )
         yield _sse({"type": "done", "chat": result["chat"]})
     except llm.ProviderError as exc:

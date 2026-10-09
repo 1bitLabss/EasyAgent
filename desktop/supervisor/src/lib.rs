@@ -11,6 +11,9 @@ use std::time::Duration;
 
 pub const DEFAULT_PORT: u16 = 44721;
 
+/// Tray unread. The icon still updates while the window is hidden, but not every two seconds.
+pub const UNREAD_POLL: Duration = Duration::from_secs(15);
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ServerCommand {
     pub program: String,
@@ -511,6 +514,11 @@ mod tests {
     use std::io::{Read, Write};
     use std::net::TcpListener;
     use std::thread;
+
+    #[test]
+    fn unread_poll_waits_at_least_fifteen_seconds() {
+        assert!(UNREAD_POLL.as_secs() >= 15);
+    }
 
     #[test]
     fn titles_match_the_python_tray() {

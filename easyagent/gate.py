@@ -172,6 +172,20 @@ def _grant(lane: _Lane) -> None:
         seat.ready.set()
 
 
+class BusyLane(Exception):
+    """This connection is already in use. A background call should try later."""
+
+
+def user_waiting() -> bool:
+    """True when a chat is lined up behind the call that holds this connection."""
+    info = _conn.get()
+    if not info or not info.get("id"):
+        return False
+    lane = _lane(info["id"])
+    with lane.lock:
+        return any(seat.waiting for seat in lane.queue)
+
+
 def queued_label(connection: str, holders: list[str]) -> str:
     names = [name for name in holders if name]
     if len(names) == 1:
@@ -184,8 +198,12 @@ def queued_label(connection: str, holders: list[str]) -> str:
     return f"Queued: waiting for {who} (busy with {busy})"
 
 
-async def reserve():
-    """Take a slot, or return a seat that is waiting at the back of the line."""
+async def reserve(*, step_aside: bool = False):
+    """Take a slot, or return a seat that is waiting at the back of the line.
+
+    A background call passes step_aside so it leaves the line when a chat is
+    already using the connection, instead of holding the only slot.
+    """
     info = _conn.get()
     if not info or _inside.get() or not info.get("id"):
         return _Open()
@@ -194,6 +212,8 @@ async def reserve():
     seat.lane = lane
     with lane.lock:
         lane.limit = clamp_parallel(info["max_parallel"])
+        if step_aside and (lane.holders or lane.queue):
+            raise BusyLane()
         busy = [item.bot_name for item in lane.holders]
         if len(lane.holders) < lane.limit and not lane.queue:
             seat.holding = True

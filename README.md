@@ -8,7 +8,7 @@ The pixel drawing is traced from [mascot-original.jpg](assets/mascot-original.jp
 
 EasyAgent is a free local agent harness for any OpenAI-compatible model. You run it on your own computer. It gives you multiple bots, real tools, markdown memory, and a goal, plan, build, and check loop. It does not include a model, an account, or a cloud copy of your chats.
 
-Version 0.2.1. [MIT license](LICENSE). Copyright Nathan / 1bitLabs.
+Version 0.3.3. [MIT license](LICENSE). Copyright Nathan / 1bitLabs.
 
 I built this for myself, and I'm sharing it free. It is the harness I wanted on my own machine: a few bots, the model I already run, and the files on that computer.
 
@@ -53,7 +53,7 @@ That opens a dev server on http://127.0.0.1:44731 and proxies `/api`, `/static`,
   - Windows: `%LOCALAPPDATA%\EasyAgent`
   - macOS: `~/Library/Application Support/EasyAgent`
   - Linux: `$XDG_DATA_HOME/EasyAgent`, or `~/.local/share/EasyAgent` when `XDG_DATA_HOME` is unset
-- Bind address: `0.0.0.0` (override with `EASYAGENT_HOST`). Another machine is refused until you set `EASYAGENT_TOKEN`. Set `EASYAGENT_HOST=127.0.0.1` when this computer should be the only client.
+- Bind address: `127.0.0.1`. Phone access in Settings also listens on this computer's LAN address. It is off until you turn it on. An address outside the home network is refused.
 
 `pip install -r requirements.txt` installs the server. On Windows it also installs the tray dependencies. The tray is optional. `EASYAGENT_TRAY=0` skips it.
 
@@ -122,7 +122,7 @@ The model can use tools on this computer. The chat shows a short line that somet
 - Ask you to pick one of a few choices.
 - Finish a turn.
 
-A printed tool call is not the answer. The call runs, and the result goes back to the model. One send keeps going while the work is still unfinished. The turn stops when it is stuck: the same tool with the same arguments and nothing new, a real blocker, a question only you can answer, or finish.
+A printed tool call is not the answer. The call runs, and the result goes back to the model. One send keeps going while the work is still unfinished. The turn stops when it is stuck: the same tool with the same arguments and nothing new, a real blocker, a question only you can answer, or finish. A risky call does not run until you approve it. See [Safety](#safety).
 
 Saved computer passwords and keys are sealed in an encrypted vault. The page asks for them in a sign-in prompt. They are not written into the chat.
 
@@ -187,6 +187,26 @@ Stop ends that chat's run and says why: you pressed Stop, the reply stopped befo
 ### Reactions
 
 You can put one emoji on a message: 👍, 👎, ❤️, or 👀. Tapping that same emoji again removes it. The message text stays. The emoji and which message go to the bot on the next turn. A reaction on the latest reply can get one short answer. The bot can put one of those four emoji back on a message you sent.
+
+## Safety
+
+EasyAgent does not do something dangerous or irreversible until you say yes, in the chat, for that exact action. The rules are in [SAFETY.md](SAFETY.md).
+
+A fixed rules list decides first. If a command does not match a rule, the same model this bot is already connected to reviews it. There is no second model. If that review cannot run, the action waits.
+
+- Allowed without a card: reading, listing, search, a harmless command, and writing a new file in the bot's workspace. The workspace is the app-data folder, this bot's workspace folder, the working folder, any folder you named, and the system temp folder.
+- Asked, with an approval card: deleting, moving, or renaming a file; replacing a file you did not just create and did not ask to replace; writing outside the workspace; installing or removing software; changing a service, a scheduled task, or a startup entry; a destructive git command; posting, uploading, sending a message, or spending money; a change on a remote computer; downloading a program.
+- Blocked, even if you would have approved it: wiping a disk, deleting the disk root or a user profile, turning off the firewall or Defender, dumping credentials, reading browser cookies or saved passwords, piping a download into a shell, a fork bomb, and editing EasyAgent's own guardrails. Advanced can unlock one of those rules. It still waits for a yes. It is never automatic.
+
+The card names the bot, shows the exact command or path, names the tier and the rule, and says why in one sentence. Approve once runs it. Deny stops it. Always allow is only for that exact command on that bot, and it is not offered for a blocked rule. If the card expires, that is a denial. A denial is final. The bot does not retry it, reword it, or reach the same result another way.
+
+An approved delete on this computer goes to EasyAgent Trash. Settings can restore it. Before an approved overwrite, EasyAgent keeps a snapshot and Settings can restore that too. A delete on a remote computer is not moved to Trash.
+
+Careful is the default. Normal also allows replacing a file inside the workspace, and it still keeps a snapshot. Advanced asks you to type the bot's name.
+
+Text from a web page, a file, or a tool is marked untrusted. The bot is told that instructions inside those markers are data. A tool call that copies a command out of that text waits for you.
+
+A lesson, a nightly proposal, a playbook, or a note cannot turn the guardrails down. A lesson that tries is rejected. One turn also stops after 48 tool calls or 20 minutes of tool time.
 
 ## Day to day
 
@@ -262,16 +282,21 @@ npm run build
 
 `npm test` in `desktop/` runs `cargo test -p easyagent-supervisor`. It checks attach versus start, the health JSON, and the tray title. It does not need a display.
 
+## Phone on the home Wi-Fi
+
+The page is an installable app. On the computer, open **Phone** in the You menu, or the Phone access block in Settings, and turn it on. Settings shows a QR code for `http://<lan-ip>:44721/?pair=<token>`. Scan it once. The phone stores the token and the code changes. Revoke a phone from that same screen. `http://127.0.0.1:44721` on the computer does not ask for a token.
+
+The server listens on `127.0.0.1` until Phone access is on. It then also listens on the LAN address. A request from outside the home network is refused, with or without a token. A LAN request without the pairing token is refused. The token is not accepted in the URL as a way to call the API. `EASYAGENT_TOKEN`, when set, is an extra token for the home network and only while Phone access is on. It is not printed.
+
+iPhone: open the Camera app and point it at the code. Safari opens EasyAgent. From that page, Share, then Add to Home Screen. The icon is the mascot face. The home-screen app opens full screen, under the notch, and keeps the pairing token. Android: Chrome can add the page to the home screen. Chrome's Install app button needs a secure page, and this address is `http` on purpose. The manifest and the service worker are already on the page. The icon is painted from the locked face. It is not a new drawing.
+
+On a small screen the faces sit in a bar along the bottom, the message box stays above the keyboard, and the Thinking box keeps its scroll cap. Tap targets are at least 44 pixels. A finished reply can notify the phone after you allow it in Phone access.
+
+Windows Defender Firewall, Advanced settings, Inbound Rules: allow TCP port 44721 from the local subnet. Settings has **Add the Windows Firewall rule**, and it adds that rule only after you press it. Starting with `EASYAGENT_FIREWALL=1` is the same consent from the launcher. On any other system the button does not change a firewall.
+
+A Tauri v2 iOS and Android shell is scaffolded in [desktop/MOBILE.md](desktop/MOBILE.md). It loads this same page and pairs the same way. The home-screen app does not need it.
+
 ## Phone and relay
-
-A phone on the same network uses this same page. Transcripts stay in `./data` on the computer that runs EasyAgent.
-
-```bash
-export EASYAGENT_TOKEN='replace-this-with-a-long-random-string'
-python -m easyagent
-```
-
-Leave `EASYAGENT_HOST` unset so the process listens on `0.0.0.0`. The log prints the phone URL. Open that URL on the phone and type the token. `http://127.0.0.1:44721` on the computer itself does not ask for it. If `EASYAGENT_TOKEN` is unset, a phone is refused. Do not put the token in the URL.
 
 Away from home, the computer dials out to the relay in `Dockerfile`. The phone has the relay URL and the token. The relay stores no transcripts. `docker-compose.yml` is that service with no volume. On your computer, set `EASYAGENT_RELAY_URL` to the relay's public URL and use the same token. If this computer is disconnected, the phone says EasyAgent is offline.
 
@@ -289,6 +314,7 @@ That listens on port `44731`. Point `EASYAGENT_RELAY_URL` at `http://127.0.0.1:4
 | Path | Contents |
 | --- | --- |
 | `data/endpoints.json` | Connection names, base URLs, optional keys, optional model ids, and the at-once limit |
+| `data/phone.json` | Phone access on or off, the current pairing code, and a hash for each paired phone |
 | `data/bots/<id>/bot.json` | Bot name, connection, optional model, token budget |
 | `data/bots/<id>/chats/<id>.json` | Full transcript, summary, and how far the summary covers |
 | `data/bots/<id>/chats/<id>/files/` | A file or picture attached in that chat |

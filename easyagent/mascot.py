@@ -16,17 +16,17 @@ from pathlib import Path
 
 PALETTE = (
     "#c4532a",
-    "#2a6fdb",
     "#1f8a4c",
     "#c43b7a",
     "#b86e12",
-    "#5c4d9a",
     "#0e7c86",
-    "#8f2d28",
     "#3d6b4f",
     "#a34b2e",
     "#3a4f8a",
     "#6b4a2a",
+    "#7a4e8a",
+    "#2f6f5e",
+    "#9a3d62",
 )
 
 INK = "#1c1b19"
@@ -106,10 +106,44 @@ FACE_SMALL = """\
 _INK_CHARS = "#AEMF"
 
 
-def face_color_for(bot_id: str) -> str:
-    """A stable palette color for a bot that has not chosen one."""
+def face_color_for(bot_id: str, taken: list[str] | tuple[str, ...] | None = None) -> str:
+    """A stable palette color. Skip colors another bot already has."""
     digest = hashlib.sha256(str(bot_id).encode("utf-8")).digest()
-    return PALETTE[digest[0] % len(PALETTE)]
+    start = digest[0] % len(PALETTE)
+    used = {item for item in (taken or []) if item in PALETTE}
+    if len(used) >= len(PALETTE):
+        return PALETTE[start]
+    for offset in range(len(PALETTE)):
+        color = PALETTE[(start + offset) % len(PALETTE)]
+        if color not in used:
+            return color
+    return PALETTE[start]
+
+
+def colors_for_bots(bots: list[dict]) -> dict[str, str]:
+    """One color per bot. A saved color stays. The rest avoid colors already taken."""
+    ordered = sorted(bots or [], key=lambda bot: (str(bot.get("created_at") or ""), str(bot.get("id") or "")))
+    saved: dict[str, str] = {}
+    for bot in ordered:
+        raw = bot.get("face_color")
+        if not isinstance(raw, str) or not raw.strip():
+            continue
+        try:
+            color = clean_face_color(raw)
+        except Exception:
+            continue
+        if color:
+            saved[str(bot.get("id") or "")] = color
+    taken = list(saved.values())
+    chosen = dict(saved)
+    for bot in ordered:
+        bot_id = str(bot.get("id") or "")
+        if not bot_id or bot_id in chosen:
+            continue
+        color = face_color_for(bot_id, taken)
+        chosen[bot_id] = color
+        taken.append(color)
+    return chosen
 
 
 def clean_face_color(value: str | None):

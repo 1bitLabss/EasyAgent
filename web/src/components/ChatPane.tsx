@@ -1,16 +1,19 @@
 import { useQuery } from "@tanstack/react-query";
 import { ArrowUp, MessageSquare, Mic, Plus, Square, Terminal } from "lucide-react";
-import { useEffect, useLayoutEffect, useRef, useState, type ReactNode } from "react";
+import { memo, useCallback, useEffect, useLayoutEffect, useRef, useState, type ReactNode } from "react";
 import { api, queryClient } from "@/api";
+import { ApprovalCard } from "@/components/ApprovalCard";
 import { Face } from "@/components/Face";
 import { Markdown } from "@/components/Markdown";
+import { ThinkingBox } from "@/components/ThinkingBox";
 import { WindowControls } from "@/components/WindowControls";
 import { moodForReaction, pokeFace } from "@/lib/mood";
 import { describeRun, faceStateFor, runTone } from "@/lib/run";
+import { hideWhileSending, messageHasBubble, reactionWho } from "@/lib/transcript";
 import { cn } from "@/lib/utils";
-import { ESTIMATE, mergeChat, visibleRange, type MessagePage } from "@/lib/window";
+import { ESTIMATE, mergeChat, sameMessage, shareChat, visibleRange, type MessagePage } from "@/lib/window";
 import { useApp } from "@/store";
-import { canResume, flightFor, retryMessage, sendMessage, stopMessage } from "@/stream";
+import { canResume, chatStillPolling, flightFor, retryMessage, sendMessage, settleIncoming, stopMessage } from "@/stream";
 import type { Bot, Chat, ChatMessage } from "@/types";
 
 const REACTIONS = ["👍", "👎", "❤️", "👀"];
@@ -56,12 +59,27 @@ function Quiet({ icon, text, detail }: { icon?: ReactNode; text: string; detail?
   );
 }
 
-function MessageRow({ message, last, onChoose }: { message: ChatMessage; last: boolean; onChoose: (choice: string) => void }) {
+const MessageRow = memo(function MessageRow({
+  message,
+  last,
+  botName,
+  sending,
+  onChoose,
+}: {
+  message: ChatMessage;
+  last: boolean;
+  botName: string;
+  sending: boolean;
+  onChoose: (choice: string) => void;
+}) {
   const botId = useApp((state) => state.botId);
   const chatId = useApp((state) => state.chatId);
+  if (hideWhileSending(message, sending)) return null;
   const failed = Boolean(message.error);
   const mine = message.role === "user";
+  const showBubble = messageHasBubble(message);
   const choices = last && message.role === "assistant" && !failed && (message.choices || []).length > 1 ? message.choices || [] : [];
+  const who = reactionWho(message.reaction_by, botName);
   async function react(emoji: string) {
     if (!message.id || !botId || !chatId) return;
     const removing = message.reaction === emoji;
@@ -72,7 +90,8 @@ function MessageRow({ message, last, onChoose }: { message: ChatMessage; last: b
   }
   return (
     <li className={cn("flex flex-col", mine ? "items-end" : "items-start")}>
-      {message.role === "assistant" && !failed && (message.thinking || "").trim() ? <Quiet icon={<MessageSquare className="h-3 w-3" />} text="Thinking" detail={message.thinking} /> : null}
+      {message.role === "assistant" && !failed && (message.thinking || "").trim() ? <ThinkingBox text={message.thinking} seconds={message.thought_seconds} /> : null}
+      {showBubble ? (
       <div className={cn(mine ? "bubble-user" : "bubble-bot", failed && "bg-danger/10 text-danger")}>
         {message.speaker_name ? <p className="mb-1 text-xs opacity-70">{message.speaker_name}</p> : null}
         <div className={mine ? "whitespace-pre-wrap" : ""}>
@@ -88,12 +107,13 @@ function MessageRow({ message, last, onChoose }: { message: ChatMessage; last: b
           </div>
         ) : null}
       </div>
+      ) : null}
       {message.check === "revised" ? <Quiet text="Revised after check" /> : null}
       {message.check === "checked" ? <Quiet text="Checked" /> : null}
       {message.lesson?.startsWith("Learned:") ? <Quiet text={message.lesson} /> : null}
       {message.id ? (
-        <div className="mt-1 flex items-center gap-1 px-1 opacity-0 hover:opacity-100 focus-within:opacity-100">
-          {message.reaction ? <button type="button" className="text-sm" title="Remove this reaction" onClick={() => void react(message.reaction || "")}>{message.reaction}</button> : null}
+        <div className="mt-1 flex items-center gap-1 px-1">
+          {message.reaction ? <button type="button" className="text-sm" title={`${who} reacted`} onClick={() => void react(message.reaction || "")}>{message.reaction}</button> : null}
           {REACTIONS.map((emoji) => (
             <button key={emoji} type="button" className="rounded px-0.5 text-sm" onClick={() => void react(emoji)}>{emoji}</button>
           ))}
@@ -101,7 +121,51 @@ function MessageRow({ message, last, onChoose }: { message: ChatMessage; last: b
       ) : null}
     </li>
   );
-}
+}, (prev, next) =>
+  prev.last === next.last &&
+  prev.sending === next.sending &&
+  prev.botName === next.botName &&
+  sameMessage(prev.message, next.message)
+);
+
+const Transcript = memo(function Transcript({
+  rows,
+  start,
+  end,
+  botName,
+  sending,
+  onChoose,
+}: {
+  rows: ChatMessage[];
+  start: number;
+  end: number;
+  botName: string;
+  sending: boolean;
+  onChoose: (choice: string) => void;
+}) {
+  const windowed = rows.length > 40;
+  return (
+    <>
+      {windowed && start > 0 ? <div style={{ height: start * ESTIMATE }} /> : null}
+      <ol className="flex flex-col gap-4">
+        {rows.slice(start, end).map((message, index) => {
+          const at = start + index;
+          return (
+            <MessageRow
+              key={message.id || at}
+              message={message}
+              last={at === rows.length - 1}
+              botName={botName}
+              sending={sending}
+              onChoose={onChoose}
+            />
+          );
+        })}
+      </ol>
+      {windowed && end < rows.length ? <div style={{ height: (rows.length - end) * ESTIMATE }} /> : null}
+    </>
+  );
+});
 
 export function ChatPane() {
   const botId = useApp((state) => state.botId);
@@ -119,7 +183,11 @@ export function ChatPane() {
     queryKey: ["chat", botId, chatId],
     enabled: Boolean(botId && chatId),
     queryFn: () => api<Chat>(`/api/bots/${botId}/chats/${chatId}?window=80`),
-    refetchInterval: (query) => (query.state.data?.run?.status === "running" ? 2000 : false),
+    refetchInterval: (query) => chatStillPolling(botId || "", chatId || "", query.state.data?.run?.status, query.state.data?.run?.id),
+    structuralSharing: (prev, incoming) => {
+      if (!incoming || typeof incoming !== "object") return incoming;
+      return shareChat(prev, settleIncoming(botId || "", chatId || "", incoming as Chat));
+    },
   });
   const [now, setNow] = useState(() => Date.now());
   const [draft, setDraft] = useState("");
@@ -135,6 +203,9 @@ export function ChatPane() {
   void tick;
   const flight = botId && chatId ? flightFor(botId, chatId) : null;
   const live = flight?.live || null;
+  const readSent = useRef("");
+  const chooseRef = useRef<(choice: string) => void>(() => undefined);
+  const onChoose = useCallback((choice: string) => chooseRef.current(choice), []);
 
   useEffect(() => {
     const id = ongoing.data?.id;
@@ -149,12 +220,21 @@ export function ChatPane() {
   }, []);
 
   useEffect(() => {
-    if (!botId || !chat.data) return;
-    void api(`/api/bots/${botId}/chats/${chat.data.id}/read`, {
-      method: "POST",
-      json: { through: chat.data.message_count ?? (chat.data.messages || []).length },
-    }).then(() => queryClient.invalidateQueries({ queryKey: ["unread"] })).catch(() => undefined);
-  }, [botId, chat.data]);
+    if (!botId || !chat.data?.id) return;
+    const chatKey = chat.data.id;
+    const through = chat.data.message_count ?? (chat.data.messages || []).length;
+    const token = `${botId}:${chatKey}:${through}`;
+    if (readSent.current === token) return;
+    const timer = window.setTimeout(() => {
+      if (readSent.current === token) return;
+      readSent.current = token;
+      void api(`/api/bots/${botId}/chats/${chatKey}/read`, {
+        method: "POST",
+        json: { through },
+      }).then(() => queryClient.invalidateQueries({ queryKey: ["unread"] })).catch(() => undefined);
+    }, 500);
+    return () => window.clearTimeout(timer);
+  }, [botId, chat.data?.id, chat.data?.message_count]);
 
   const [range, setRange] = useState({ start: 0, end: 40 });
   const stick = useRef(true);
@@ -233,9 +313,12 @@ export function ChatPane() {
     sending, phase, label, text, runStatus: status, step,
   });
 
+  if (bots.isLoading || (bots.data || []).length > 0) {
+    if (!bot) return <p className="p-6 text-sm text-muted">Loading bots…</p>;
+  }
   if (!bot) {
     return (
-      <section className="relative flex h-full flex-col">
+      <section className="relative flex h-full min-h-0 flex-col">
         <div className="title-drag absolute inset-x-0 top-0 h-10" data-tauri-drag-region />
         <WindowControls />
         <div className="flex flex-1 flex-col items-center justify-center px-6 text-center">
@@ -255,7 +338,15 @@ export function ChatPane() {
   const tone = view ? runTone(view.words, running ? "running" : open?.run?.status || "idle") : "thinking";
   const face = faceFor(Boolean(flight?.sending), live?.phase, view?.words, live?.text, running ? "running" : open?.run?.status, view?.words);
   const asking = (open?.messages || []).slice(-1)[0]?.choices;
+  const rows = open?.messages || [];
+  const windowed = rows.length > 40;
+  const rowStart = windowed ? Math.min(range.start, rows.length) : 0;
+  const rowEnd = windowed ? Math.max(rowStart, Math.min(range.end, rows.length)) : rows.length;
   const steps = (live?.steps || []).filter((item) => item && item !== "Thinking" && item !== view?.words);
+
+  chooseRef.current = (choice) => {
+    void submit(choice);
+  };
 
   async function submit(text: string) {
     if (!botId || !chatId) return;
@@ -289,11 +380,11 @@ export function ChatPane() {
   }
 
   return (
-    <section className="relative flex h-full min-h-0 flex-col">
-      <div className="title-drag absolute inset-x-0 top-0 z-10 h-11" data-tauri-drag-region />
+    <section className="relative flex h-full min-h-0 flex-1 flex-col">
+      <div className="title-drag relative z-10 flex h-14 shrink-0 items-center justify-center" data-tauri-drag-region>
       <WindowControls />
-      <div className="pointer-events-none absolute inset-x-0 top-3 z-20 flex justify-center">
-        <div className="pointer-events-auto relative">
+      <div className="relative z-20 flex justify-center" data-testid="bot-pill">
+        <div className="relative">
           <button
             type="button"
             aria-label={`${bot.name} menu`}
@@ -339,8 +430,9 @@ export function ChatPane() {
           ) : null}
         </div>
       </div>
+      </div>
 
-      <div ref={scroller} onScroll={onScroll} className="min-h-0 flex-1 overflow-y-auto px-4 pb-4 pt-16">
+      <div ref={scroller} onScroll={onScroll} className="min-h-0 flex-1 overflow-y-auto px-4 pb-4 pt-2">
         <div className="mx-auto flex w-full max-w-[760px] flex-col gap-4">
           {!chatId || !open ? (
             <div className="flex flex-1 flex-col items-center justify-center px-6 py-24 text-center">
@@ -359,36 +451,21 @@ export function ChatPane() {
               {(open.window_start ?? 0) > 0 ? (
                 <button type="button" className="sys-line" onClick={() => void loadOlder()}>Earlier messages</button>
               ) : null}
-              {(() => {
-                const rows = open.messages || [];
-                const windowed = rows.length > 40;
-                const start = windowed ? Math.min(range.start, rows.length) : 0;
-                const end = windowed ? Math.max(start, Math.min(range.end, rows.length)) : rows.length;
-                return (
-                  <>
-                    {windowed && start > 0 ? <div style={{ height: start * ESTIMATE }} /> : null}
-                    <ol className="flex flex-col gap-4">
-                      {rows.slice(start, end).map((message, index) => {
-                        const at = start + index;
-                        return (
-                          <MessageRow
-                            key={message.id || at}
-                            message={message}
-                            last={at === rows.length - 1}
-                            onChoose={(choice) => void submit(choice)}
-                          />
-                        );
-                      })}
-                    </ol>
-                    {windowed && end < rows.length ? <div style={{ height: (rows.length - end) * ESTIMATE }} /> : null}
-                  </>
-                );
-              })()}
+              <Transcript
+                rows={rows}
+                start={rowStart}
+                end={rowEnd}
+                botName={bot?.name || "the bot"}
+                sending={Boolean(flight?.sending)}
+                onChoose={onChoose}
+              />
               {steps.map((item) => (
                 <Quiet key={item} icon={runTone(item, "running") === "tool" ? <Terminal className="h-3 w-3" /> : <MessageSquare className="h-3 w-3" />} text={item} />
               ))}
-              {live && (live.reasoning || "").trim() && live.phase !== "error" ? <Quiet icon={<MessageSquare className="h-3 w-3" />} text="Thinking" detail={live.reasoning} /> : null}
-              {live && live.phase !== "error" && live.phase !== "stopped" && (live.phase === "reply" || live.text) ? (
+              {live && (live.reasoning || "").trim() && live.phase !== "error" && live.phase !== "stopped" ? (
+                <ThinkingBox text={live.reasoning} streaming={Boolean(live.reasoningLive)} seconds={live.thoughtSeconds} startedAt={live.thoughtAt} now={now} />
+              ) : null}
+              {live && live.phase !== "error" && live.phase !== "stopped" && (live.text || "").trim() ? (
                 <div className="bubble-bot">
                   <Markdown text={live.text} />
                 </div>
@@ -411,8 +488,11 @@ export function ChatPane() {
         </div>
       </div>
 
+      <div className="shrink-0 px-4">
+        {botId && bot ? <ApprovalCard botId={botId} botName={bot.name} active={running} /> : null}
+      </div>
       <form
-        className="px-4 pb-5 pt-1"
+        className="composer-dock shrink-0 px-4 pb-5 pt-1"
         onSubmit={(event) => {
           event.preventDefault();
           void submit(draft.trim());

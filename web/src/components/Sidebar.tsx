@@ -3,7 +3,7 @@ import { LayoutGrid, Moon, Plus, Sun, UserRound } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { api, queryClient } from "@/api";
-import { Face } from "@/components/Face";
+import { Face, STATE_COLORS } from "@/components/Face";
 import { Sheet } from "@/components/Sheet";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -14,12 +14,12 @@ import { anySending } from "@/stream";
 import type { Bot, Chat, Endpoint, Unread } from "@/types";
 
 const RING: Record<string, string> = {
-  waiting: "#d0892a",
-  reconnecting: "#d0892a",
-  thinking: "#5c4d9a",
-  tool: "#2a6fdb",
+  waiting: STATE_COLORS.waiting,
+  reconnecting: STATE_COLORS.reconnecting,
+  thinking: STATE_COLORS.thinking,
+  tool: STATE_COLORS.tool,
   talking: "",
-  halted: "#8f2d28",
+  halted: STATE_COLORS.halted,
 };
 
 function BotTile({ bot }: { bot: Bot }) {
@@ -27,7 +27,13 @@ function BotTile({ bot }: { bot: Bot }) {
   const chatId = useApp((state) => state.chatId);
   const tick = useApp((state) => state.tick);
   const selectBot = useApp((state) => state.selectBot);
-  const unread = useQuery({ queryKey: ["unread"], queryFn: () => api<Unread>("/api/unread") });
+  const unread = useQuery({
+    queryKey: ["unread"],
+    queryFn: () => api<Unread>("/api/unread"),
+    enabled: false,
+    refetchOnMount: false,
+    refetchOnWindowFocus: false,
+  });
   const chat = useQuery({
     queryKey: ["chat", bot.id, chatId],
     enabled: selected && Boolean(chatId),
@@ -208,11 +214,11 @@ export function Sidebar() {
         >
           <img src="/static/mascot.svg" alt="" width={36} height={38} />
         </button>
-        <div className="my-2 h-px w-8 bg-black/10 dark:bg-white/15" />
-        <div className="flex min-h-0 w-full flex-1 flex-col items-center gap-1 overflow-y-auto py-1">
+        <div className="rail-divider my-2 h-px w-8 bg-black/10 dark:bg-white/15" />
+        <div className="rail-bots flex min-h-0 w-full flex-1 flex-col items-center gap-1 overflow-y-auto py-1">
           {(bots.data || []).map((bot) => <BotTile key={bot.id} bot={bot} />)}
         </div>
-        <div className="mt-2 flex flex-col items-center gap-1 pb-1">
+        <div className="rail-tools mt-2 flex flex-col items-center gap-1 pb-1">
           <button type="button" aria-label="Add bot" title="Add bot" className="flex h-10 w-10 items-center justify-center rounded-full text-foreground hover:bg-black/5 dark:hover:bg-white/10" onClick={() => setAdding(true)}>
             <Plus className="h-5 w-5" />
           </button>
@@ -239,7 +245,7 @@ export function Sidebar() {
               <UserRound className="h-4 w-4" />
             </button>
             {menu ? (
-              <div className="absolute bottom-0 left-12 z-40 w-48 rounded-2xl bg-background p-1.5 shadow-[0_8px_30px_rgba(0,0,0,0.12)]">
+              <div className="rail-menu absolute bottom-0 left-12 z-40 w-48 rounded-2xl bg-background p-1.5 shadow-[0_8px_30px_rgba(0,0,0,0.12)]">
                 {places.map((item) => (
                   <button
                     key={item.id}
@@ -250,6 +256,9 @@ export function Sidebar() {
                     {item.label}
                   </button>
                 ))}
+                <button type="button" className="block w-full rounded-xl px-3 py-2 text-left text-sm hover:bg-black/5 dark:hover:bg-white/10" onClick={() => { setMenu(false); setFocus("phone"); }}>
+                  Phone
+                </button>
                 {botId ? (
                   <button type="button" className="block w-full rounded-xl px-3 py-2 text-left text-sm hover:bg-black/5 dark:hover:bg-white/10" onClick={() => { setMenu(false); setScreen("settings"); }}>
                     This bot's settings

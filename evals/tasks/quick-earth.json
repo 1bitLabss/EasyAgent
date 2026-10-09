@@ -7,8 +7,8 @@
   ],
   "criteria": [
     {
-      "kind": "reply_regex",
-      "pattern": "Earth"
+      "kind": "llm_judge",
+      "rubric": "The reply names Earth as the planet we live on. A paraphrase passes. Exact wording is not required."
     },
     {
       "kind": "max_steps",

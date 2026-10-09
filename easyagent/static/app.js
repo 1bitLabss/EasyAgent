@@ -207,6 +207,20 @@ function show(node, on) {
   node.hidden = !on;
 }
 
+function localWhen(value) {
+  const raw = String(value || "").trim();
+  if (!raw) return "undated";
+  const parsed = Date.parse(raw);
+  if (Number.isNaN(parsed)) return raw;
+  return new Date(parsed).toLocaleString(undefined, {
+    month: "short",
+    day: "numeric",
+    year: "numeric",
+    hour: "numeric",
+    minute: "2-digit",
+  });
+}
+
 function formError(id, message) {
   const node = $(id);
   node.textContent = message || "";
@@ -868,7 +882,7 @@ function botIsLive(botId) {
   return Boolean(state.busyBots && state.busyBots.has(botId));
 }
 
-const FACE_PALETTE = ["#c4532a", "#2a6fdb", "#1f8a4c", "#c43b7a", "#b86e12", "#5c4d9a", "#0e7c86", "#8f2d28", "#3d6b4f", "#a34b2e", "#3a4f8a", "#6b4a2a"];
+const FACE_PALETTE = ["#c4532a", "#1f8a4c", "#c43b7a", "#b86e12", "#0e7c86", "#3d6b4f", "#a34b2e", "#3a4f8a", "#6b4a2a", "#7a4e8a", "#2f6f5e", "#9a3d62"];
 const FACE_FRAMES = ["eyes-mid", "eyes-left", "eyes-right", "eyes-up", "eyes-squint", "eyes-x", "mouth-smile", "mouth-flat", "mouth-open"];
 let faceTemplate = null;
 let faceSmallTemplate = null;
@@ -1546,8 +1560,15 @@ let unreadTimer = null;
 
 function watchUnread() {
   if (unreadTimer) return;
-  refreshUnread();
-  unreadTimer = setInterval(refreshUnread, 3000);
+  const tick = () => {
+    if (document.hidden) return;
+    refreshUnread();
+  };
+  tick();
+  unreadTimer = setInterval(tick, 8000);
+  document.addEventListener("visibilitychange", () => {
+    if (!document.hidden) tick();
+  });
 }
 
 async function markChatRead(botId, chatId, through) {
@@ -2733,7 +2754,7 @@ function renderLearning(botId, panel) {
     pruneList.replaceChildren();
     for (const row of pending) {
       const staying = panel.prune && (panel.prune.pruning === false || panel.prune.keep_forever) ? " Staying." : "";
-      pruneList.append(el("li", {}, [`${row.created_at || "undated"} — ${row.preview || row.message_id}${staying}`]));
+      pruneList.append(el("li", {}, [`${localWhen(row.created_at)} — ${row.preview || row.message_id}${staying}`]));
     }
   }
   if (pruneEmpty) show(pruneEmpty, pending.length === 0);

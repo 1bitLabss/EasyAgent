@@ -18,7 +18,7 @@ title: ""
 
 - OS:
 - Python version:
-- EasyAgent version: 0.2.1
+- EasyAgent version: 0.3.3
 - How you started it: browser or desktop window
 
 Do not paste API keys, tokens, passwords, chat logs, or personal paths. A shortened error line is enough.

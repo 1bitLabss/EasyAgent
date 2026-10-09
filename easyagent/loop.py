@@ -565,6 +565,9 @@ class Ledger:
             self._mark("C2", f"Read back HTML from {file}.")
 
     def observe(self, kind: str, action: str, path: str, result: str) -> None:
+        from easyagent.safety import strip_untrusted
+
+        result = strip_untrusted(result)
         if self.summary_path:
             if kind == "files" and action == "read" and (result or "").strip():
                 for note in self.note_paths:

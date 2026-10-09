@@ -1,4 +1,5 @@
 import { QueryClient } from "@tanstack/react-query";
+import { addressAfterPair, isIos, keepPairInAddress, manifestHref, readPairToken } from "@/lib/pair";
 import { useApp } from "@/store";
 
 export const queryClient = new QueryClient({
@@ -17,17 +18,60 @@ export class ApiError extends Error {
   }
 }
 
+const TOKEN_KEY = "easyagent.token";
+
 export function sharedToken(): string {
   try {
-    return sessionStorage.getItem("easyagent.token") || "";
+    return localStorage.getItem(TOKEN_KEY) || sessionStorage.getItem(TOKEN_KEY) || "";
   } catch {
     return "";
   }
 }
 
 export function saveToken(token: string) {
-  sessionStorage.setItem("easyagent.token", token);
+  try {
+    localStorage.setItem(TOKEN_KEY, token);
+  } catch {
+    /* a private window can refuse storage; the header is still sent this page */
+  }
+  try {
+    sessionStorage.setItem(TOKEN_KEY, token);
+  } catch {
+    /* same */
+  }
 }
+
+function runningStandalone(): boolean {
+  const nav = navigator as Navigator & { standalone?: boolean };
+  if (nav.standalone) return true;
+  try {
+    return window.matchMedia("(display-mode: standalone)").matches;
+  } catch {
+    return false;
+  }
+}
+
+export function capturePairingToken() {
+  if (typeof location === "undefined") return;
+  try {
+    const token = readPairToken(location.href);
+    if (!token) return;
+    saveToken(token);
+    const manifest = manifestHref(token);
+    const link = document.querySelector('link[rel="manifest"]');
+    if (manifest && link) link.setAttribute("href", manifest);
+    const keep = keepPairInAddress(
+      isIos(navigator.userAgent || "", navigator.platform || "", navigator.maxTouchPoints || 0),
+      runningStandalone(),
+    );
+    const next = addressAfterPair(location.href, keep);
+    if (next != null) history.replaceState(null, "", next);
+  } catch {
+    /* the page still loads */
+  }
+}
+
+capturePairingToken();
 
 function headers(extra?: HeadersInit, json = false): Headers {
   const result = new Headers(extra);

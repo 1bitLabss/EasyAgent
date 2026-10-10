@@ -3,7 +3,7 @@
   "category": "shell",
   "prompt": "Print WIN-LINE-7. On Windows run it in PowerShell with Write-Output. On Linux or macOS use printf. Put the output in your answer.",
   "mock": [
-    "```shell\nprintf 'WIN-LINE-7\\n'\n```",
+    "```shell\necho WIN-LINE-7\n```",
     "The output was WIN-LINE-7.",
     "The output was WIN-LINE-7."
   ],

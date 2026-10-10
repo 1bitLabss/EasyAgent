@@ -178,7 +178,9 @@ def test_approved_delete_goes_to_trash(tmp_path, monkeypatch):
     store.ensure()
     endpoint = store.add_endpoint(name="local", base_url="http://127.0.0.1:9/v1", api_key="")
     bot = store.add_bot(name="Ada", endpoint_id=endpoint["id"], model=None)
-    target = tmp_path / "notes.txt"
+    folder = tmp_path.parent / f"ea-del-{tmp_path.name}"
+    folder.mkdir()
+    target = folder / "notes.txt"
     target.write_text("keep", encoding="utf-8")
 
     async def run():

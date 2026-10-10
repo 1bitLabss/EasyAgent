@@ -1,6 +1,7 @@
 import { useQuery } from "@tanstack/react-query";
-import { useEffect, useState, type ReactNode } from "react";
+import { useEffect, useState, type FormEvent, type ReactNode } from "react";
 import { api, queryClient } from "@/api";
+import { ApprovalCard } from "@/components/ApprovalCard";
 import { FACE_PALETTE, Face } from "@/components/Face";
 import { Button } from "@/components/ui/button";
 import { Input, Textarea } from "@/components/ui/input";
@@ -23,6 +24,322 @@ function Block({ id, title, children }: { id?: string; title: string; children: 
       <h2 className="text-base font-semibold">{title}</h2>
       {children}
     </section>
+  );
+}
+
+function BrowserBlock({ onError }: { onError: (text: string) => void }) {
+  const install = useQuery({
+    queryKey: ["browser-install"],
+    queryFn: () => api<{ installed?: boolean; label?: string }>("/api/browser/install"),
+  });
+  const [busy, setBusy] = useState(false);
+  const label = install.data?.label || "Install browser (~700 MB)";
+
+  async function installBrowser() {
+    setBusy(true);
+    try {
+      await api("/api/browser/install", { method: "POST" });
+      await queryClient.invalidateQueries({ queryKey: ["browser-install"] });
+    } catch (reason) {
+      onError(reason instanceof Error ? reason.message : "The browser could not be installed.");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <Block id="browser" title="Browser">
+      <Note>Each bot has its own Chromium profile. It is not your browser. Chromium is not downloaded until you press the button or a bot opens a page.</Note>
+      <p data-testid="browser-install">{install.data?.installed ? "Browser installed." : "Browser not installed."}</p>
+      <Button type="button" disabled={busy || install.data?.installed} onClick={() => void installBrowser()}>{label}</Button>
+    </Block>
+  );
+}
+
+type ConnectorTool = { name: string; permission: string; description?: string };
+type ConnectorRow = {
+  id: string;
+  name: string;
+  transport: string;
+  command: string[];
+  url: string;
+  enabled: boolean;
+  secret_names: string[];
+  tools: ConnectorTool[];
+  starter: string;
+  package: string;
+  version: string;
+};
+
+function ConnectorsBlock({ botId, onError }: { botId: string; onError: (text: string) => void }) {
+  const rows = useQuery({
+    queryKey: ["connectors", botId],
+    queryFn: () => api<ConnectorRow[]>(`/api/bots/${botId}/connectors`),
+  });
+  const [name, setName] = useState("");
+  const [transport, setTransport] = useState("stdio");
+  const [command, setCommand] = useState("");
+  const [url, setUrl] = useState("");
+  const [pkg, setPkg] = useState("");
+  const [version, setVersion] = useState("");
+  const [envName, setEnvName] = useState("");
+  const [envValue, setEnvValue] = useState("");
+  const [note, setNote] = useState("");
+
+  async function addStarter(starter: string) {
+    setNote("");
+    try {
+      await api(`/api/bots/${botId}/connectors/starter`, { method: "POST", json: { starter, name: starter } });
+      setNote("Review the card before this server is installed.");
+      await queryClient.invalidateQueries({ queryKey: ["approvals", botId] });
+    } catch (reason) {
+      onError(reason instanceof Error ? reason.message : "That connector was not added.");
+    }
+  }
+
+  async function addCustom(event: FormEvent) {
+    event.preventDefault();
+    setNote("");
+    const secrets = envName.trim() && envValue ? { [envName.trim()]: envValue } : {};
+    try {
+      await api(`/api/bots/${botId}/connectors`, {
+        method: "POST",
+        json: {
+          name,
+          transport,
+          command: transport === "stdio" ? command.split(" ").filter(Boolean) : [],
+          url: transport === "http" ? url : "",
+          secrets,
+          package: pkg,
+          version,
+        },
+      });
+      setEnvValue("");
+      setNote("Review the card before this server is installed. The secret is not saved until you approve.");
+      await queryClient.invalidateQueries({ queryKey: ["approvals", botId] });
+    } catch (reason) {
+      onError(reason instanceof Error ? reason.message : "That connector was not added.");
+    }
+  }
+
+  async function setPermission(row: ConnectorRow, tool: string, permission: string) {
+    const tools: Record<string, string> = {};
+    for (const item of row.tools) tools[item.name] = item.name === tool ? permission : item.permission;
+    await api(`/api/bots/${botId}/connectors/${row.id}`, { method: "POST", json: { tools } });
+    await queryClient.invalidateQueries({ queryKey: ["connectors", botId] });
+  }
+
+  async function remove(id: string) {
+    await api(`/api/bots/${botId}/connectors/${id}`, { method: "DELETE" });
+    await queryClient.invalidateQueries({ queryKey: ["connectors", botId] });
+  }
+
+  return (
+    <Block id="connectors" title="Connectors">
+      <Note>Each bot has its own MCP servers. A write, delete, or send waits for you. Secrets stay in the secrets database and are handed only to that server. Nothing is installed until you approve the review card.</Note>
+      <div className="flex flex-wrap gap-2">
+        <Button type="button" variant="outline" onClick={() => void addStarter("filesystem")}>Filesystem</Button>
+        <Button type="button" variant="outline" onClick={() => void addStarter("fetch")}>Fetch</Button>
+        <Button type="button" variant="outline" onClick={() => void addStarter("git")}>Git</Button>
+        <Button type="button" variant="outline" onClick={() => void addStarter("sqlite")}>SQLite</Button>
+      </div>
+      <Note>Filesystem is this bot's workspace. It does not follow the server's working directory.</Note>
+      <form className="space-y-2" onSubmit={(event) => void addCustom(event)}>
+        <Input value={name} onChange={(event) => setName(event.target.value)} placeholder="Name" maxLength={80} />
+        <select className="h-9 w-full rounded-md border border-border bg-card px-2 text-sm" value={transport} onChange={(event) => setTransport(event.target.value)}>
+          <option value="stdio">stdio</option>
+          <option value="http">streamable HTTP</option>
+        </select>
+        {transport === "stdio" ? (
+          <Input value={command} onChange={(event) => setCommand(event.target.value)} placeholder="Command, with a pinned version" />
+        ) : (
+          <Input value={url} onChange={(event) => setUrl(event.target.value)} placeholder="https://example.com/mcp" />
+        )}
+        <div className="flex gap-2">
+          <Input value={pkg} onChange={(event) => setPkg(event.target.value)} placeholder="Package" />
+          <Input value={version} onChange={(event) => setVersion(event.target.value)} placeholder="1.2.3" />
+        </div>
+        <div className="flex gap-2">
+          <Input value={envName} onChange={(event) => setEnvName(event.target.value)} placeholder="Env name" autoComplete="off" />
+          <Input value={envValue} onChange={(event) => setEnvValue(event.target.value)} placeholder="Secret value" type="password" autoComplete="off" />
+        </div>
+        <Button type="submit">Review connector</Button>
+      </form>
+      {note ? <Note>{note}</Note> : null}
+      <ul className="space-y-3">
+        {(rows.data || []).map((row) => (
+          <li key={row.id} className="rounded-md border border-border p-3 text-sm">
+            <div className="flex items-start justify-between gap-2">
+              <div>
+                <p className="font-medium">{row.name}</p>
+                <p className="text-xs text-muted">{row.package || row.starter || row.transport} {row.version}</p>
+              </div>
+              <Button type="button" size="sm" variant="danger" onClick={() => void remove(row.id).catch((reason: Error) => onError(reason.message))}>Remove</Button>
+            </div>
+            <ul className="mt-2 space-y-1">
+              {row.tools.map((tool) => (
+                <li key={tool.name} className="flex items-center justify-between gap-2">
+                  <span>{tool.name}</span>
+                  <select aria-label={`${tool.name} permission`} className="h-8 rounded-md border border-border bg-card px-2" value={tool.permission} onChange={(event) => void setPermission(row, tool.name, event.target.value)}>
+                    <option value="allow">Allow</option>
+                    <option value="ask">Ask</option>
+                    <option value="block">Block</option>
+                  </select>
+                </li>
+              ))}
+            </ul>
+          </li>
+        ))}
+      </ul>
+    </Block>
+  );
+}
+
+function SearchBlock({ onError }: { onError: (text: string) => void }) {
+  const setup = useQuery({
+    queryKey: ["search-setup"],
+    queryFn: () => api<{ provider?: string; searxng_url?: string; has_brave_key?: boolean; has_tavily_key?: boolean }>("/api/search-setup"),
+  });
+  const [provider, setProvider] = useState("duckduckgo");
+  const [url, setUrl] = useState("");
+  const [brave, setBrave] = useState("");
+  const [tavily, setTavily] = useState("");
+
+  useEffect(() => {
+    if (!setup.data) return;
+    setProvider(setup.data.provider || "duckduckgo");
+    setUrl(setup.data.searxng_url || "");
+  }, [setup.data]);
+
+  async function save() {
+    await api("/api/search-setup", {
+      method: "PUT",
+      json: { provider, searxng_url: url, brave_key: brave || null, tavily_key: tavily || null },
+    });
+    setBrave("");
+    setTavily("");
+    await queryClient.invalidateQueries({ queryKey: ["search-setup"] });
+  }
+
+  return (
+    <Block id="search" title="Web search">
+      <Note>DuckDuckGo is the default. A Brave or Tavily key is stored in the encrypted secrets database, not in a settings file. A research answer has to cite the pages it fetched.</Note>
+      <label className="block text-sm">
+        Provider
+        <select className="mt-1 w-full rounded-md border border-border bg-background px-2 py-1" value={provider} onChange={(event) => setProvider(event.target.value)}>
+          <option value="duckduckgo">DuckDuckGo</option>
+          <option value="searxng">SearXNG</option>
+          <option value="brave">Brave</option>
+          <option value="tavily">Tavily</option>
+        </select>
+      </label>
+      <Input value={url} onChange={(event) => setUrl(event.target.value)} placeholder="SearXNG address (http or https)" />
+      <Input value={brave} onChange={(event) => setBrave(event.target.value)} placeholder={setup.data?.has_brave_key ? "Brave key saved" : "Brave key"} type="password" />
+      <Input value={tavily} onChange={(event) => setTavily(event.target.value)} placeholder={setup.data?.has_tavily_key ? "Tavily key saved" : "Tavily key"} type="password" />
+      <Button type="button" onClick={() => void save().catch((reason: Error) => onError(reason.message))}>Save search</Button>
+    </Block>
+  );
+}
+
+function ContainmentBlock({ botId, botName, onError }: { botId: string; botName: string; onError: (text: string) => void }) {
+  const status = useQuery({
+    queryKey: ["sandbox", botId],
+    queryFn: () => api<{ label?: string; status?: string; undo?: string }>(`/api/bots/${botId}/sandbox`),
+  });
+  const label = status.data?.label || "off";
+
+  async function act(action: "setup" | "undo") {
+    await api(`/api/bots/${botId}/sandbox`, { method: "POST", json: { action } });
+    await queryClient.invalidateQueries({ queryKey: ["sandbox", botId] });
+    await queryClient.invalidateQueries({ queryKey: ["approvals", botId] });
+  }
+
+  return (
+    <Block id="containment" title="OS containment">
+      <Note>Tool commands stay on the file guards until you turn this on once. The approval card explains the AppContainer profile and the folder grants. Credentials, Vault, and Protect are not changed. Remove it here, or with python -m easyagent contain --undo.</Note>
+      <p data-testid="sandbox-status">Status: {label}</p>
+      <div className="flex flex-wrap gap-2">
+        <Button type="button" onClick={() => void act("setup").catch((reason: Error) => onError(reason.message))}>Turn on OS containment</Button>
+        <Button type="button" variant="outline" onClick={() => void act("undo").catch((reason: Error) => onError(reason.message))}>Remove containment</Button>
+      </div>
+      <ApprovalCard botId={botId} botName={botName} active />
+    </Block>
+  );
+}
+
+type HonestySettings = {
+  receipts: boolean;
+  pushback: boolean;
+  excuse: boolean;
+  loop: boolean;
+  tripwires: boolean;
+  stall: boolean;
+  stall_minutes: number;
+};
+
+function HonestyBlock({ botId, onError }: { botId: string; onError: (text: string) => void }) {
+  const honesty = useQuery({
+    queryKey: ["honesty", botId],
+    queryFn: () => api<HonestySettings>(`/api/bots/${botId}/honesty`),
+  });
+  const data = honesty.data;
+
+  async function save(patch: Partial<HonestySettings>) {
+    try {
+      await api(`/api/bots/${botId}/honesty`, { method: "POST", json: patch });
+      await queryClient.invalidateQueries({ queryKey: ["honesty", botId] });
+    } catch (reason) {
+      onError(reason instanceof Error ? reason.message : "Could not save honesty settings.");
+    }
+  }
+
+  if (honesty.isError) {
+    return (
+      <Block id="honesty" title="Honesty">
+        <Note>Honesty settings could not be loaded.</Note>
+      </Block>
+    );
+  }
+  if (!data) {
+    return (
+      <Block id="honesty" title="Honesty">
+        <Note>Loading honesty settings.</Note>
+      </Block>
+    );
+  }
+
+  const row = (key: "receipts" | "pushback" | "excuse" | "loop" | "tripwires" | "stall", label: string) => (
+    <label key={key} className="flex items-center justify-between gap-3 text-sm">
+      <span>{label}</span>
+      <Switch checked={Boolean(data[key])} onCheckedChange={(on) => void save({ [key]: on })} />
+    </label>
+  );
+
+  return (
+    <Block id="honesty" title="Honesty">
+      <Note>These checks run in the harness. A claim of done needs a tool result from after the last change. A report that it is still broken starts a fresh look, without the previous explanation.</Note>
+      {row("receipts", "Receipts for done, fixed, created, and deleted")}
+      {row("pushback", "Fresh investigation when it is still broken")}
+      {row("excuse", "Re-check a pre-existing or unrelated claim")}
+      {row("loop", "Stop a third identical failure")}
+      {row("tripwires", "Mistake tripwires before a matching tool")}
+      {row("stall", "Stall watchdog")}
+      <label className="block text-sm">Minutes with no progress
+        <Input
+          type="number"
+          min={1}
+          max={120}
+          defaultValue={data.stall_minutes}
+          key={data.stall_minutes}
+          className="mt-1"
+          onBlur={(event) => {
+            const next = Number(event.target.value);
+            if (!Number.isFinite(next) || next === data.stall_minutes) return;
+            void save({ stall_minutes: next });
+          }}
+        />
+      </label>
+    </Block>
   );
 }
 
@@ -339,6 +656,16 @@ export function SettingsScreen() {
 
         <SafetyBlock botId={bot.id} botName={bot.name} mode={bot.safety_mode || "careful"} unlocks={bot.safety_unlocks || []} onError={setError} />
 
+        <HonestyBlock botId={bot.id} onError={setError} />
+
+        <ContainmentBlock botId={bot.id} botName={bot.name} onError={setError} />
+
+        <BrowserBlock onError={setError} />
+
+        <ConnectorsBlock botId={bot.id} onError={setError} />
+
+        <SearchBlock onError={setError} />
+
         <Block id="learning" title="Learning">
           <Note>After a hard turn, this bot can propose a skill. The proposal stays a candidate until a check passes and a replay does not do worse. Skills and memory you wrote are left alone.</Note>
           <h3 className="text-sm font-medium">What changed last night</h3>
@@ -531,22 +858,31 @@ export function SettingsScreen() {
           ) : null}
         </Block>
 
-        <Block title="Schedules">
-          <Note>A schedule runs a saved prompt on a timer. It writes the job log, not a chat.</Note>
-          <ScheduleForm botId={botId} onError={setError} />
-          {(schedules.data || []).length === 0 ? <Note>No schedules. Add one to run a prompt on a timer. Chats are not part of the job.</Note> : (
-            <ul className="space-y-2 text-sm">
+        <Block title="Routines">
+          <Note>A routine runs a saved prompt on your clock and posts the result into this bot's chat. The unread dot lights up. Quiet mode stays in the log when the reply is nothing new. A live chat keeps the model; the routine waits.</Note>
+          <RoutineForm botId={botId} onError={setError} />
+          {(schedules.data || []).length === 0 ? <Note>No routines yet. Add one, or ask in the chat and confirm the card.</Note> : (
+            <ul className="space-y-3 text-sm">
               {(schedules.data || []).map((item) => (
-                <li key={item.id} className="flex items-center justify-between gap-2">
-                  <span>{item.prompt} · {item.kind === "cron" ? item.cron : `every ${item.every_minutes} min`}{item.paused ? " · paused" : ""}</span>
-                  <span className="flex gap-2">
-                    <button type="button" className="text-xs underline" onClick={() => void api(`/api/bots/${botId}/schedules/${item.id}/pause`, { method: "POST", json: { paused: !item.paused } }).then(() => queryClient.invalidateQueries({ queryKey: ["schedules", botId] }))}>{item.paused ? "Resume" : "Pause"}</button>
-                    <button type="button" className="text-xs underline" onClick={() => void api(`/api/bots/${botId}/schedules/${item.id}`, { method: "DELETE" }).then(() => queryClient.invalidateQueries({ queryKey: ["schedules", botId] }))}>Remove</button>
-                  </span>
+                <li key={item.id} className="space-y-1">
+                  <div className="flex items-start justify-between gap-2">
+                    <span>
+                      <strong>{item.name || item.prompt}</strong>
+                      {item.paused ? " · paused" : ""}
+                      {item.quiet ? " · quiet" : ""}
+                    </span>
+                    <span className="flex shrink-0 gap-2">
+                      <button type="button" className="text-xs underline" onClick={() => void api(`/api/bots/${botId}/schedules/${item.id}/run`, { method: "POST" }).then(() => queryClient.invalidateQueries({ queryKey: ["schedules", botId] })).then(() => queryClient.invalidateQueries({ queryKey: ["jobs", botId] })).then(() => queryClient.invalidateQueries({ queryKey: ["unread"] })).catch((reason: Error) => setError(reason.message))}>Run now</button>
+                      <button type="button" className="text-xs underline" onClick={() => void api(`/api/bots/${botId}/schedules/${item.id}/pause`, { method: "POST", json: { paused: !item.paused } }).then(() => queryClient.invalidateQueries({ queryKey: ["schedules", botId] }))}>{item.paused ? "Resume" : "Pause"}</button>
+                      <button type="button" className="text-xs underline" onClick={() => void api(`/api/bots/${botId}/schedules/${item.id}`, { method: "DELETE" }).then(() => queryClient.invalidateQueries({ queryKey: ["schedules", botId] })).then(() => queryClient.invalidateQueries({ queryKey: ["routine-trash", botId] }))}>Delete</button>
+                    </span>
+                  </div>
+                  <p className="text-xs text-muted">{item.preview || item.label}</p>
                 </li>
               ))}
             </ul>
           )}
+          <RoutineTrash botId={botId} onError={setError} />
           <h3 className="text-sm font-medium">Job log</h3>
           {(jobs.data || []).length === 0 ? <Note>Nothing has fired yet.</Note> : (
             <ul className="space-y-1 text-xs text-muted">
@@ -624,35 +960,88 @@ export function SettingsScreen() {
   );
 }
 
-function ScheduleForm({ botId, onError }: { botId: string; onError: (message: string) => void }) {
+function RoutineForm({ botId, onError }: { botId: string; onError: (message: string) => void }) {
   const [open, setOpen] = useState(false);
-  const [kind, setKind] = useState("interval");
+  const [when, setWhen] = useState("weekdays");
+  const templates = useQuery({ queryKey: ["routine-templates"], queryFn: () => api<{ id: string; name: string; blurb: string }[]>("/api/routine-templates") });
   if (!open) return <Button type="button" variant="ghost" size="sm" onClick={() => setOpen(true)}>Add</Button>;
   return (
-    <form className="space-y-2" onSubmit={(event) => {
-      event.preventDefault();
-      const form = event.currentTarget;
-      const data = new FormData(form);
-      const body = kind === "cron"
-        ? { prompt: String(data.get("prompt") || ""), kind, cron: String(data.get("cron") || "") }
-        : { prompt: String(data.get("prompt") || ""), kind, every_minutes: Number(data.get("every_minutes") || 1) };
-      void api(`/api/bots/${botId}/schedules`, { method: "POST", json: body }).then(() => {
-        setOpen(false);
-        return queryClient.invalidateQueries({ queryKey: ["schedules", botId] });
-      }).catch((reason: Error) => onError(reason.message));
-    }}>
-      <Textarea name="prompt" required maxLength={4000} rows={2} placeholder="What should this bot do on its own?" />
-      <select className="h-9 rounded-md border border-border bg-card px-2" value={kind} onChange={(event) => setKind(event.target.value)}>
-        <option value="interval">Every N minutes</option>
-        <option value="cron">Cron, local time</option>
-      </select>
-      {kind === "cron" ? <Input name="cron" maxLength={80} placeholder="*/15 * * * *" /> : <Input name="every_minutes" type="number" min={1} max={1440} defaultValue={1} />}
-      <Note>Five fields are minute, hour, day, month, weekday, in local time. A stopped app runs a due slot once when it starts again, and does not run that slot twice.</Note>
-      <div className="flex gap-2">
-        <Button type="submit" size="sm">Save schedule</Button>
-        <Button type="button" size="sm" variant="ghost" onClick={() => setOpen(false)}>Cancel</Button>
+    <div className="space-y-2">
+      <div className="flex flex-wrap gap-2">
+        {(templates.data || []).map((item) => (
+          <Button key={item.id} type="button" size="sm" variant="outline" onClick={() => {
+            void api<Schedule>(`/api/bots/${botId}/schedules`, { method: "POST", json: { preset: item.id } }).then(() => {
+              setOpen(false);
+              return queryClient.invalidateQueries({ queryKey: ["schedules", botId] });
+            }).catch((reason: Error) => onError(reason.message));
+          }}>{item.name}</Button>
+        ))}
       </div>
-    </form>
+      <form className="space-y-2" onSubmit={(event) => {
+        event.preventDefault();
+        const data = new FormData(event.currentTarget);
+        const name = String(data.get("name") || "").trim();
+        const prompt = String(data.get("prompt") || "").trim();
+        const timezone = String(data.get("timezone") || "").trim();
+        const quiet = data.get("quiet") === "on";
+        const body: Record<string, unknown> = { name, prompt, quiet };
+        if (timezone) body.timezone = timezone;
+        if (when === "weekdays") body.weekdays = String(data.get("time") || "8:00 AM");
+        else if (when === "daily") body.daily = String(data.get("time") || "8:00 AM");
+        else if (when === "interval") {
+          body.kind = "interval";
+          body.every_minutes = Number(data.get("every_minutes") || 60);
+        } else {
+          body.kind = "cron";
+          body.cron = String(data.get("cron") || "");
+        }
+        void api<Schedule>(`/api/bots/${botId}/schedules`, { method: "POST", json: body }).then(() => {
+          setOpen(false);
+          return queryClient.invalidateQueries({ queryKey: ["schedules", botId] });
+        }).catch((reason: Error) => onError(reason.message));
+      }}>
+        <Input name="name" required maxLength={80} placeholder="Morning briefing" />
+        <Textarea name="prompt" required maxLength={4000} rows={2} placeholder="What should this bot do on its own?" />
+        <select className="h-9 rounded-md border border-border bg-card px-2" value={when} onChange={(event) => setWhen(event.target.value)}>
+          <option value="weekdays">Weekdays</option>
+          <option value="daily">Every day</option>
+          <option value="interval">Every N minutes</option>
+          <option value="cron">Cron</option>
+        </select>
+        {when === "weekdays" || when === "daily" ? <Input name="time" defaultValue="8:00 AM" placeholder="8:00 AM" /> : null}
+        {when === "interval" ? <Input name="every_minutes" type="number" min={5} max={10080} defaultValue={60} /> : null}
+        {when === "cron" ? <Input name="cron" maxLength={80} placeholder="0 8 * * 1-5" /> : null}
+        <Input name="timezone" placeholder="Local time, or America/Chicago" />
+        <label className="flex items-center gap-2 text-sm">
+          <input name="quiet" type="checkbox" />
+          Quiet. “Nothing new” does not post or light the unread dot.
+        </label>
+        <Note>The line under a saved routine is the next run in your local time. A gap under 5 minutes is refused.</Note>
+        <div className="flex gap-2">
+          <Button type="submit" size="sm">Save routine</Button>
+          <Button type="button" size="sm" variant="ghost" onClick={() => setOpen(false)}>Cancel</Button>
+        </div>
+      </form>
+    </div>
+  );
+}
+
+function RoutineTrash({ botId, onError }: { botId: string; onError: (message: string) => void }) {
+  const trash = useQuery({ queryKey: ["routine-trash", botId], enabled: Boolean(botId), queryFn: () => api<Schedule[]>(`/api/bots/${botId}/schedules/trash`) });
+  const rows = trash.data || [];
+  if (!rows.length) return null;
+  return (
+    <div className="space-y-1">
+      <h3 className="text-sm font-medium">Trash</h3>
+      <ul className="space-y-1 text-sm">
+        {rows.map((item) => (
+          <li key={item.id} className="flex items-center justify-between gap-2">
+            <span>{item.name || item.prompt}</span>
+            <button type="button" className="text-xs underline" onClick={() => void api(`/api/bots/${botId}/schedules/${item.id}/restore`, { method: "POST" }).then(() => queryClient.invalidateQueries({ queryKey: ["schedules", botId] })).then(() => queryClient.invalidateQueries({ queryKey: ["routine-trash", botId] })).catch((reason: Error) => onError(reason.message))}>Restore</button>
+          </li>
+        ))}
+      </ul>
+    </div>
   );
 }
 

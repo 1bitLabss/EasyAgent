@@ -17,7 +17,7 @@ from easyagent.app import (
 )
 from easyagent.llm import native_tools
 from easyagent.prompt import build_system
-from easyagent.store import Store, atomic_write_text, read_json
+from easyagent.store import Store, StoreError, _extended_win, _io_path, atomic_write_text, read_json
 from easyagent.tools import ToolError, ToolRequest, _run_shell, status_label, thought_gap
 
 
@@ -76,7 +76,8 @@ def test_read_json_retries_a_windows_permission_error(tmp_path, monkeypatch):
 
     def flaky(self, *args, **kwargs):
         calls["n"] += 1
-        if self == path and calls["n"] < 3:
+        wanted = os.path.normcase(os.fspath(_io_path(path)))
+        if os.path.normcase(os.fspath(self)) == wanted and calls["n"] < 3:
             err = PermissionError(13, "Access is denied")
             err.winerror = 5
             raise err
@@ -229,3 +230,55 @@ def test_linux_shell_still_says_when_a_command_prints_nothing(tmp_path, monkeypa
     monkeypatch.setattr(subprocess, "Popen", lambda *args, **kwargs: Proc())
     assert _run_shell(store, "true") == "command produced no output, exit code 0"
     assert "Running PowerShell" not in status_label(ToolRequest(kind="shell", command="echo hi"))
+
+
+def test_windows_file_io_uses_the_extended_length_prefix():
+    assert _extended_win(r"C:\data\bots\note") == "\\\\?\\C:\\data\\bots\\note"
+    assert _extended_win("\\\\?\\C:\\data\\note") == "\\\\?\\C:\\data\\note"
+    assert _extended_win("\\\\server\\share\\a") == "\\\\?\\UNC\\server\\share\\a"
+
+
+def test_a_chat_attachment_saves_under_a_deep_data_dir(tmp_path):
+    folder = tmp_path
+    while len(str(folder)) < 180:
+        folder = folder / ("nest" * 8)
+    folder.mkdir(parents=True)
+    assert len(str(folder)) > 130
+    store, bot, chat = _store(folder)
+    meta = store.save_chat_file(
+        bot["id"],
+        chat["id"],
+        name="note.txt",
+        media_type="text/plain",
+        data=b"deep-note",
+    )
+    found, blob = store.read_chat_file(bot["id"], chat["id"], meta["id"])
+    leaf = folder / "bots" / bot["id"] / "chats" / chat["id"] / "files" / meta["id"]
+    assert len(str(leaf)) > 260
+    assert blob == b"deep-note"
+    assert found["name"] == "note.txt"
+    assert _io_path(leaf).is_file()
+    assert store.get_chat(bot["id"], chat["id"])["id"] == chat["id"]
+
+
+def test_a_failed_attachment_write_says_so(tmp_path, monkeypatch):
+    from pathlib import Path
+
+    store, bot, chat = _store(tmp_path)
+
+    def denied(self, _data):
+        raise OSError(13, "Permission denied")
+
+    monkeypatch.setattr(Path, "write_bytes", denied)
+    with pytest.raises(StoreError, match="Could not save that file") as denied_err:
+        store.save_chat_file(bot["id"], chat["id"], name="a.txt", media_type="text/plain", data=b"a")
+    assert "too long" not in str(denied_err.value).lower()
+
+    def too_long(self, _data):
+        err = OSError(206, "The filename or extension is too long")
+        err.winerror = 206
+        raise err
+
+    monkeypatch.setattr(Path, "write_bytes", too_long)
+    with pytest.raises(StoreError, match="too long for Windows"):
+        store.save_chat_file(bot["id"], chat["id"], name="b.txt", media_type="text/plain", data=b"b")

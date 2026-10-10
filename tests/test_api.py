@@ -91,7 +91,7 @@ def test_endpoints_do_not_require_a_model(world):
     assert [item["name"] for item in listed] == ["local", "remote"]
     assert listed[0]["model"] is None
     assert listed[1]["model"] == "grid-model"
-    raw = json.loads((world.path / "endpoints.json").read_text())
+    raw = json.loads((world.path / "endpoints.json").read_text(encoding="utf-8"))
     assert raw[0]["model"] is None
     assert raw[1]["model"] == "grid-model"
     assert raw[1]["id"] == other["id"]
@@ -120,7 +120,8 @@ def test_api_key_is_not_returned(world):
     listed = world.client.get("/api/endpoints")
     assert "super-secret-key" not in listed.text
     assert listed.json()[0]["has_api_key"] is True
-    assert "super-secret-key" in (world.path / "endpoints.json").read_text()
+    assert "super-secret-key" not in (world.path / "endpoints.json").read_text(encoding="utf-8")
+    assert b"super-secret-key" not in (world.path / "secrets.db").read_bytes()
 
 
 def test_two_bots_keep_separate_histories_across_switches_and_restart(world):
@@ -192,7 +193,7 @@ def test_long_chat_bounds_the_request_and_keeps_the_transcript(world):
     assert body["context"]["bounded"] is True
     assert body["context"]["transcript_chars"] > body["context"]["context_chars"]
     assert len(body["chat"]["messages"]) == 40
-    stored = (world.path / "bots" / bot["id"] / "chats" / f"{chat['id']}.json").read_text()
+    stored = (world.path / "bots" / bot["id"] / "chats" / f"{chat['id']}.json").read_text(encoding="utf-8")
     assert first in stored
     payload = json.dumps(world.rec.calls[-1]["messages"])
     assert first not in payload
@@ -440,7 +441,7 @@ def test_direction_is_reread_each_turn_and_skills_are_reused(world):
     assert saved.json()["skills_saved"] == ["short-replies"]
     assert "```skill" not in saved.json()["reply"]
     skill_path = world.path / "skills" / "short-replies.md"
-    assert "Answer in one or two sentences." in skill_path.read_text()
+    assert "Answer in one or two sentences." in skill_path.read_text(encoding="utf-8")
 
     world.client.put("/api/direction", json={"text": "Custom rule: do not wipe chats.\n"})
     world.rec.reply = "ack"
@@ -781,7 +782,7 @@ def test_room_replies_stay_in_the_room_and_private_chats_do_not_change(world):
     assert "ann-in-room" not in seen_by_ben
     room_path = world.path / "rooms" / f"{room['id']}.json"
     assert room_path.is_file()
-    assert "ann private" not in room_path.read_text()
+    assert "ann private" not in room_path.read_text(encoding="utf-8")
 
     removed = world.client.delete(f"/api/rooms/{room['id']}/bots/{ann['id']}")
     assert removed.status_code == 200, removed.text
@@ -828,7 +829,7 @@ def test_room_keeps_going_when_one_bot_errors(world):
     assert messages[2]["speaker_name"] == "Ben" and messages[2]["content"] == "ben still answered"
     assert messages[2].get("error") is not True
     assert bot_files(world.path) == private
-    assert "keep ann" in (world.path / "bots" / ann["id"] / "chats" / f"{ann_chat['id']}.json").read_text()
+    assert "keep ann" in (world.path / "bots" / ann["id"] / "chats" / f"{ann_chat['id']}.json").read_text(encoding="utf-8")
 
 
 def test_two_bots_use_different_token_budgets_and_keep_every_turn(world):
@@ -868,13 +869,13 @@ def test_two_bots_use_different_token_budgets_and_keep_every_turn(world):
         return world.path / "bots" / bot_id / "chats" / f"{chats[bot_id]}.json"
 
     def user_texts(bot_id):
-        stored = json.loads(chat_path(bot_id).read_text())
+        stored = json.loads(chat_path(bot_id).read_text(encoding="utf-8"))
         return [item["content"] for item in stored["messages"] if item["role"] == "user"]
 
     assert user_texts(small["id"]) == sent[small["id"]]
     assert user_texts(wide["id"]) == sent[wide["id"]]
-    assert len(json.loads(chat_path(small["id"]).read_text())["messages"]) == 12
-    assert len(json.loads(chat_path(wide["id"]).read_text())["messages"]) == 12
+    assert len(json.loads(chat_path(small["id"]).read_text(encoding="utf-8"))["messages"]) == 12
+    assert len(json.loads(chat_path(wide["id"]).read_text(encoding="utf-8"))["messages"]) == 12
 
     small_view = world.client.get(f"/api/bots/{small['id']}/chats/{chats[small['id']]}").json()
     wide_view = world.client.get(f"/api/bots/{wide['id']}/chats/{chats[wide['id']]}").json()
@@ -890,7 +891,7 @@ def test_two_bots_use_different_token_budgets_and_keep_every_turn(world):
     assert len(small_view["messages"]) == 12
     assert len(wide_view["messages"]) == 12
     assert [item["content"] for item in small_view["messages"]] == [
-        item["content"] for item in json.loads(chat_path(small["id"]).read_text())["messages"]
+        item["content"] for item in json.loads(chat_path(small["id"]).read_text(encoding="utf-8"))["messages"]
     ]
 
     def last_request(name):
@@ -922,7 +923,7 @@ def test_two_bots_use_different_token_budgets_and_keep_every_turn(world):
     ]
     assert tightened["context"]["model_messages"] < wide_view["context"]["model_messages"]
     assert tightened["context"]["max_context_chars"] == small_chars
-    assert early in chat_path(wide["id"]).read_text()
+    assert early in chat_path(wide["id"]).read_text(encoding="utf-8")
 
     world.rec.calls.clear()
     follow = world.client.post(
@@ -931,7 +932,7 @@ def test_two_bots_use_different_token_budgets_and_keep_every_turn(world):
     )
     assert follow.status_code == 200, follow.text
     assert len(follow.json()["chat"]["messages"]) == 14
-    assert early in chat_path(wide["id"]).read_text()
+    assert early in chat_path(wide["id"]).read_text(encoding="utf-8")
     follow_tail = [item for item in world.rec.calls[-1]["messages"] if item["role"] != "system"]
     assert len(follow_tail) < len(wide_tail)
     assert "q" * 400 not in json.dumps(world.rec.calls[-1]["messages"])
@@ -1043,7 +1044,7 @@ def test_parent_asks_one_child_and_keeps_both_transcripts(world):
     assert len(failed_child) == 1
     assert failed_child[0]["messages"][0]["content"] == "FAIL-THIS-TASK now"
     assert failed_child[0]["messages"][1]["error"] is True
-    assert "RESULT-FROM-CHILD" in (world.path / "bots" / child["id"] / "chats" / f"{new_files[0]['id']}.json").read_text()
+    assert "RESULT-FROM-CHILD" in (world.path / "bots" / child["id"] / "chats" / f"{new_files[0]['id']}.json").read_text(encoding="utf-8")
 
     def fenced_reply(messages):
         system = messages[0]["content"]
@@ -1091,8 +1092,8 @@ def test_edit_connection_and_bot_keeps_the_original_chat(world):
     assert body["model"] == "your-model"
     assert body["has_api_key"] is True
     assert "secret" not in patched.text
-    stored_endpoints = (world.path / "endpoints.json").read_text()
-    assert "secret" in stored_endpoints
+    stored_endpoints = (world.path / "endpoints.json").read_text(encoding="utf-8")
+    assert "secret" not in stored_endpoints
     assert chat_files(world.path, ada["id"]) == before
     shown = world.client.get(f"/api/bots/{ada['id']}/chats/{chat['id']}").json()
     assert shown["messages"][0]["content"] == "keep-this-line"
@@ -1142,7 +1143,7 @@ def test_stream_reply_arrives_in_pieces_and_a_failure_stays_in_the_chat(world, m
     assert hel < lo < done
     stored = world.client.get(f"/api/bots/{bot['id']}/chats/{chat['id']}").json()
     assert [item["content"] for item in stored["messages"]] == ["hi there", "Hello"]
-    raw = (world.path / "bots" / bot["id"] / "chats" / f"{chat['id']}.json").read_text()
+    raw = (world.path / "bots" / bot["id"] / "chats" / f"{chat['id']}.json").read_text(encoding="utf-8")
     assert "hi there" in raw and "Hello" in raw
 
     async def fail(**kwargs):
@@ -1170,7 +1171,7 @@ def test_stream_reply_arrives_in_pieces_and_a_failure_stays_in_the_chat(world, m
     assert stored["messages"][3]["content"].startswith("Stopped:")
     assert "connection refused" in stored["messages"][3]["content"]
     assert stored["messages"][-1]["error"] is True
-    raw = (world.path / "bots" / bot["id"] / "chats" / f"{chat['id']}.json").read_text()
+    raw = (world.path / "bots" / bot["id"] / "chats" / f"{chat['id']}.json").read_text(encoding="utf-8")
     assert "hi there" in raw and "Hello" in raw and "second line" in raw
 
 
@@ -1254,7 +1255,7 @@ def test_a_closed_stream_keeps_partial_thinking_and_reply(world, monkeypatch):
     assert last["content"] == "Partial reply"
     assert last["thinking"] == "half a plan"
     assert last.get("error") is not True
-    raw = (world.path / "bots" / bot["id"] / "chats" / f"{chat['id']}.json").read_text()
+    raw = (world.path / "bots" / bot["id"] / "chats" / f"{chat['id']}.json").read_text(encoding="utf-8")
     assert "incomplete chunked read" not in raw
 
 

@@ -38,6 +38,35 @@ function AttachmentView({ message, botId, chatId }: { message: ChatMessage; botI
   );
 }
 
+function Receipts({ message }: { message: ChatMessage }) {
+  const [open, setOpen] = useState(false);
+  const rows = message.receipts || [];
+  if (message.role !== "assistant" || (!message.unverified && rows.length === 0)) return null;
+  return (
+    <div className="sys-line flex-col">
+      {message.unverified ? <p>Unverified</p> : null}
+      {rows.length ? (
+        <>
+          <button type="button" aria-expanded={open} onClick={() => setOpen((value) => !value)}>
+            Receipts
+          </button>
+          {open ? (
+            <ul className="mt-1 max-w-xl space-y-1 text-left text-[12.5px] text-muted">
+              {rows.map((row, index) => (
+                <li key={`${row.claim}-${index}`}>
+                  <span className="font-medium text-foreground">{row.claim}</span>
+                  {row.tool ? ` · ${row.tool}` : ""}
+                  <span className="block whitespace-pre-wrap">{row.output || "No tool result after the last change."}</span>
+                </li>
+              ))}
+            </ul>
+          ) : null}
+        </>
+      ) : null}
+    </div>
+  );
+}
+
 function Quiet({ icon, text, detail }: { icon?: ReactNode; text: string; detail?: string }) {
   const [open, setOpen] = useState(false);
   const body = (detail || "").trim();
@@ -93,6 +122,7 @@ const MessageRow = memo(function MessageRow({
       {message.role === "assistant" && !failed && (message.thinking || "").trim() ? <ThinkingBox text={message.thinking} seconds={message.thought_seconds} /> : null}
       {showBubble ? (
       <div className={cn(mine ? "bubble-user" : "bubble-bot", failed && "bg-danger/10 text-danger")}>
+        {message.routine_name ? <p className="mb-1 text-xs opacity-70">Routine · {message.routine_name}</p> : null}
         {message.speaker_name ? <p className="mb-1 text-xs opacity-70">{message.speaker_name}</p> : null}
         <div className={mine ? "whitespace-pre-wrap" : ""}>
           {mine ? (message.content || "") : <Markdown text={message.content || ""} />}
@@ -111,6 +141,7 @@ const MessageRow = memo(function MessageRow({
       {message.check === "revised" ? <Quiet text="Revised after check" /> : null}
       {message.check === "checked" ? <Quiet text="Checked" /> : null}
       {message.lesson?.startsWith("Learned:") ? <Quiet text={message.lesson} /> : null}
+      {message.role === "assistant" ? <Receipts message={message} /> : null}
       {message.id ? (
         <div className="reaction-row">
           {message.reaction ? (

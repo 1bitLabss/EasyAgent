@@ -102,7 +102,12 @@ def test_interval_waits_for_the_next_bucket_and_fires_once(tmp_path, monkeypatch
     again = asyncio_run(run_due_schedules(store, at(1020)))
     assert again == []
     assert len(store.list_jobs(bot["id"])) == 1
-    assert chat_blobs(tmp_path) == chats
+    after = chat_blobs(tmp_path)
+    assert set(after) == set(chats)
+    for key, blob in chats.items():
+        assert b"keep-me" in after[key]
+        assert b"ack" in after[key]
+        assert len(after[key]) > len(blob)
     assert room_blobs(tmp_path) == rooms
 
 
@@ -170,7 +175,12 @@ def test_provider_error_is_logged_and_chats_stay(tmp_path, monkeypatch):
     fired = asyncio_run(run_due_schedules(store, at(1020)))
     assert fired[0]["status"] == "error"
     assert "down" in fired[0]["error"]
-    assert chat_blobs(tmp_path) == chats
+    after = chat_blobs(tmp_path)
+    for key, blob in chats.items():
+        text = after[key].decode("utf-8").lower()
+        assert "keep-me" in text
+        assert "could not run" in text or "down" in text
+        assert len(after[key]) > len(blob)
     assert room_blobs(tmp_path) == rooms
     # The failed slot is consumed.
     assert asyncio_run(run_due_schedules(store, at(1020))) == []
@@ -247,7 +257,7 @@ def test_api_add_pause_delete_does_not_touch_chats(tmp_path, monkeypatch):
     assert client.get(f"/api/bots/{bot['id']}/schedules").json() == []
     assert chat_blobs(tmp_path) == before
     assert client.get(f"/api/bots/{bot['id']}").json()["name"] == "Ann"
-    listed = json.loads((tmp_path / "bots" / bot["id"] / "chats" / f"{chat['id']}.json").read_text())
+    listed = json.loads((tmp_path / "bots" / bot["id"] / "chats" / f"{chat['id']}.json").read_text(encoding="utf-8"))
     assert listed["messages"][0]["content"] == "keep-me"
 
 

@@ -3,7 +3,7 @@
   "category": "shell",
   "prompt": "Run a command that prints EA-SHELL-OK and tell me what it printed. On Windows use Write-Output. Otherwise use printf.",
   "mock": [
-    "```shell\nprintf 'EA-SHELL-OK\\n'\n```",
+    "```shell\necho EA-SHELL-OK\n```",
     "It printed EA-SHELL-OK.",
     "It printed EA-SHELL-OK."
   ],

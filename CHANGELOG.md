@@ -1,5 +1,67 @@
 # Changelog
 
+## 0.3.12
+
+- A bot can run Python from a project's `.venv`. Only the `.venv` EasyAgent itself is installed in stays guarded. Launching that Python with arguments is not treated as a read of the venv. A saved chat or another bot's file used as the command is still blocked, including when the verb is glued to the path. The store path type works on Python 3.11.
+- A chat attachment under a long data folder is saved with the Windows `\\?\` path, and the same form is used for every store file check. If a write still fails, the error says so instead of a raw traceback.
+- The passphrase file and the vault key are written as bytes. A key that Windows text mode expanded with carriage returns is repaired on the next open.
+- A claim that something is fixed, done, created, deleted, working now, or that tests pass has to match a tool result from after the last change in that turn. Otherwise the reply is marked Unverified, or one verification call runs a tool and checks again. "Should work now" and "this should fix it" are rewritten.
+- The receipt sits under the reply and names the tool output behind each claim. Settings has a switch for each check. A missing switch stays on.
+- When you say it is still broken, the next turn drops the previous explanation, blocks edits until a command, log, or test reproduces the failure, and asks for two causes including that the last change caused it. Two failed fixes block the next edit. An apology has to come with a new action.
+- A claim that an error is pre-existing or unrelated re-runs the failing command against the files from before this turn's changes, when that snapshot exists.
+- The third identical failing tool call in a turn is not run. The result says to change approach.
+- A mistake note can name a tool, a pattern, and a check. A matching call sees that lesson, not the whole mistakes file, and a failing check blocks the call.
+- If a turn makes no progress for the configured number of minutes, or a promise is still open at the end, the reply includes a short blocker instead of stopping with nothing.
+
+## 0.3.11
+
+- Each bot can add stdio and streamable-HTTP MCP connectors. A write, delete, or send asks first. Allow, Ask, and Block are per tool.
+- Connector secrets stay in `secrets.db`. They are not written into the connector JSON, the bot shell environment, or the prompt. They are passed only to that MCP server process.
+- Tool results are fenced as untrusted data. A page or a tool result cannot install a server.
+- Installing a server waits on a review card that shows the command, the package, the version, and the environment names. Package installs need a pinned version. The filesystem starter is this bot's workspace and does not follow the server's working directory.
+- When OS containment is on, the connector process uses that same container. Remove drops the connector and its secrets.
+
+## 0.3.10
+
+- Each bot has its own Chromium profile. It is never the browser you use yourself. A page read is a short numbered list of controls. Click and type by that number. A submit, purchase, send, post, or login waits on an approval card. EasyAgent does not type a password or a card number; the card hands you the window.
+- `file://` and the data folder are blocked. Downloads land in the bot's workspace, are not executable, and are not opened. Running one waits on the same download rule as any other downloaded file. Page text is fenced as untrusted data, so an instruction on a page is not a request from you.
+- Web search stays on DuckDuckGo unless you pick SearXNG, Brave, or Tavily. Those keys live in `secrets.db`. A research answer has to cite numbered sources that match the pages it fetched.
+- Chromium is not installed at startup. Settings has an Install browser (~700 MB) button. When OS containment is on, the browser is launched in that same container (bubblewrap, Landlock, or sandbox-exec), with the profile and workspace still writable and the rest of the data folder hidden. If the container cannot wrap the browser, the file guards still apply and the result says so.
+
+## 0.3.9
+
+- A routine is a saved prompt on your clock. Add one in the Routines panel, or ask in the chat and confirm the card. It posts into that bot's chat, and the unread dot lights up. Quiet mode stays in the log when the reply is nothing new.
+- The preview is in your local time. On Windows, the zone key (for example Central Standard Time) maps to an IANA name such as America/Chicago. `tzdata` is installed with EasyAgent so that map works without a system timezone database.
+- Run now does not skip the next scheduled slot. A missed slot older than 12 hours is marked and not replayed. A spring-forward hour is skipped, and a fall-back hour fires once.
+- A live chat keeps the one model slot. A routine waits and does not cut the chat off. An ask while nobody is at the keyboard becomes a card, and silence is a denial. A routine cannot create another routine.
+- Delete moves a routine to Trash. Restore puts it back. The bot, its chats, and the job log stay.
+- Each model call writes one server log line: purpose, prompt tokens, cached tokens, generated tokens, and milliseconds.
+
+## 0.3.8
+
+- Tool commands can run in an OS container after a one-time approval. On Windows that is an AppContainer (`PROC_THREAD_ATTRIBUTE_SECURITY_CAPABILITIES` is `0x00020009`). The container is granted this bot's workspace, workbench, and tmp, plus traverse on the folders that lead there. Credentials, Vault, and Protect are not changed. If the AppContainer does not start, the launch uses a restricted token and a deny entry on the data folder, and says so.
+- Linux uses bubblewrap, or Landlock when bubblewrap is missing. The data folder, `~/.easyagent`, and the keyring are not visible. macOS uses `sandbox-exec` and denies the data folder, `~/.easyagent`, Keychains, and securityd.
+- Until you approve it, containment is off and the file guards still apply. `python -m easyagent contain --undo`, or Remove containment in Settings, deletes the profile and every access entry EasyAgent added. `python -m easyagent selftest contain` prints a pass or fail table. `/sandbox` says active only after that self-test passes. Otherwise it says unavailable and the shell stays on the file guards, with that notice in the output.
+
+## 0.3.7
+
+- Saved keys live in `data/secrets.db`. Each value is sealed with AES-GCM, and the account name is bound to that ciphertext. The master key is in the OS keychain (Windows Credential Manager, macOS Keychain, or Linux Secret Service). When no keychain exists, the key is derived from a random 32-byte file outside `data/`, or from a passphrase with PBKDF2-HMAC-SHA256 of at least 600,000 rounds.
+- A master key is created only when the keychain says the entry is missing. A timeout or any other error does not create one. `secrets.db` stores a verifier and the backend name, and EasyAgent refuses to start or migrate when that verifier does not decrypt.
+- Migration moves keys out of `endpoints.json`, `bridges.json`, `connectors.json`, and `mcp.json`. It keeps a backup of the original JSON outside the data folder until the saved value round-trips, then clears the fields.
+- The server process is the only reader. A bot shell does not receive the key, the passphrase, or a keychain session. The data guard also refuses `secrets.db` and the passphrase file.
+
+## 0.3.6
+
+- `format C:`, `cipher /w`, `sdelete`, `vssadmin delete shadows`, `wbadmin delete`, `bcdedit /delete`, `reg delete HKLM`, and `takeown` or `icacls` on a drive, Windows, or a user profile are refused. `certutil -urlcache` and `-decode`, `bitsadmin /transfer`, `Start-BitsTransfer`, `curl` or `wget -o` followed by running the file, `mshta` with a URL, `rundll32` or `regsvr32` with a URL, and `msiexec /i` with a URL are refused.
+- An encoded PowerShell command (`-EncodedCommand`, `-enc`, `-ec`, `-e`, on `powershell` or `pwsh`) is decoded before the rules and the data guard. A payload that cannot be decoded waits. A read or write of `endpoints.json`, `secrets.db`, or another bot's chat is refused, including when the command is encoded.
+- On Windows the data guard parses with Windows PowerShell 5.1. It does not call PowerShell 7 for a Linux or macOS command.
+
+- A delete of a drive root, an empty variable, or a path that cannot be resolved is refused before it runs. Downloading a script and running it is refused. A `.Delete()` or a `Copy-Item -Force` waits for you. A denial stays denied in later chats, including when `-Force` or `-ErrorAction` is added.
+- Writes to `bot.json`, the audit log, the trash index, `sandbox.json`, `schedules.json`, `endpoints.json`, the program, and `.venv` are refused, including through the files tool, once the path is resolved.
+- A command that climbs into the data folder with `cd`, `${env:}`, `$HOME`, a wildcard, or `Join-Path` is refused. A path that cannot be resolved asks instead of running. Only that bot's own workspace is exempt.
+- A file with no folder goes in that bot's workspace. The prompt no longer tells the bot to write into `%LOCALAPPDATA%\EasyAgent`.
+- A chat title does not keep an email address or a password.
+
 ## 0.3.5
 
 - The reaction picker (thumbs up, thumbs down, heart, eyes) stays out of the way until you hover a message, focus it from the keyboard, or tap it. A reaction that was actually saved stays on the message as a small pill that names who placed it.

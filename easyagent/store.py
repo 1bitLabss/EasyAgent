@@ -280,9 +280,115 @@ def _replace_blocked(exc: BaseException) -> bool:
     return getattr(exc, "winerror", None) in (5, 32)
 
 
+def _extended_win(absolute: str) -> str:
+    """The \\\\?\\ form of an absolute Windows path. Past MAX_PATH when long paths are off."""
+    text = absolute.replace("/", "\\")
+    if text.startswith("\\\\?\\"):
+        return text
+    if text.startswith("\\\\"):
+        return "\\\\?\\UNC\\" + text[2:]
+    return "\\\\?\\" + text
+
+
+def _io_path(path: Path) -> Path:
+    """A path the OS can open. On Windows this is the extended-length form."""
+    text = os.fspath(path)
+    if os.name != "nt":
+        return Path(text)
+    if text.startswith("\\\\?\\"):
+        return Path(text)
+    return Path(_extended_win(os.path.abspath(text)))
+
+
+def _plain_path(path: Path) -> str:
+    text = os.fspath(path)
+    if text.startswith("\\\\?\\UNC\\"):
+        return "\\\\" + text[8:]
+    if text.startswith("\\\\?\\"):
+        return text[4:]
+    return text
+
+
+class _StorePath(type(Path())):
+    """Store paths. Every filesystem check uses the extended-length form on Windows.
+
+    The base is the concrete path class (``PosixPath`` or ``WindowsPath``).
+    ``pathlib.Path`` itself cannot be subclassed before 3.12.
+    """
+
+    def exists(self):
+        return _io_path(self).exists()
+
+    def is_file(self):
+        return _io_path(self).is_file()
+
+    def is_dir(self):
+        return _io_path(self).is_dir()
+
+    def is_symlink(self):
+        return _io_path(self).is_symlink()
+
+    def iterdir(self):
+        for child in _io_path(self).iterdir():
+            yield self / child.name
+
+    def stat(self, *, follow_symlinks=True):
+        return _io_path(self).stat(follow_symlinks=follow_symlinks)
+
+    def lstat(self):
+        return _io_path(self).lstat()
+
+    def resolve(self, strict=False):
+        return _StorePath(_plain_path(Path(_io_path(self)).resolve(strict=strict)))
+
+    def read_text(self, encoding=None, errors=None):
+        return _io_path(self).read_text(encoding=encoding, errors=errors)
+
+    def read_bytes(self):
+        return _io_path(self).read_bytes()
+
+    def write_text(self, data, encoding=None, errors=None, newline=None):
+        return _io_path(self).write_text(data, encoding=encoding, errors=errors, newline=newline)
+
+    def write_bytes(self, data):
+        return _io_path(self).write_bytes(data)
+
+    def mkdir(self, mode=0o777, parents=False, exist_ok=False):
+        return _io_path(self).mkdir(mode=mode, parents=parents, exist_ok=exist_ok)
+
+    def unlink(self, missing_ok=False):
+        return _io_path(self).unlink(missing_ok=missing_ok)
+
+    def rmdir(self):
+        return _io_path(self).rmdir()
+
+    def glob(self, pattern):
+        for found in _io_path(self).glob(pattern):
+            yield _StorePath(_plain_path(found))
+
+    def rglob(self, pattern):
+        for found in _io_path(self).rglob(pattern):
+            yield _StorePath(_plain_path(found))
+
+    def open(self, mode="r", buffering=-1, encoding=None, errors=None, newline=None):
+        return _io_path(self).open(mode, buffering, encoding, errors, newline)
+
+    def samefile(self, other_path):
+        return _io_path(self).samefile(_io_path(Path(other_path)))
+
+
+def _file_save_error(exc: OSError) -> StoreError:
+    code = getattr(exc, "winerror", None) or getattr(exc, "errno", None)
+    text = str(exc).lower()
+    if code == 206 or "too long" in text:
+        return StoreError("Could not save that file. The path is too long for Windows.", 500)
+    return StoreError(f"Could not save that file ({exc}).", 500)
+
+
 def atomic_write_text(path: Path, text: str) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    fd, tmp_name = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=path.parent)
+    target = _io_path(path)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp_name = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=target.parent)
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as handle:
             handle.write(text)
@@ -290,7 +396,7 @@ def atomic_write_text(path: Path, text: str) -> None:
             os.fsync(handle.fileno())
         for attempt in range(_REPLACE_TRIES):
             try:
-                os.replace(tmp_name, path)
+                os.replace(tmp_name, target)
                 return
             except OSError as exc:
                 if not _replace_blocked(exc) or attempt + 1 >= _REPLACE_TRIES:
@@ -312,7 +418,7 @@ def read_json(path: Path):
     """Read a JSON file. A Windows lock is retried, the same way a replace is."""
     for attempt in range(_REPLACE_TRIES):
         try:
-            return json.loads(path.read_text(encoding="utf-8"))
+            return json.loads(_io_path(path).read_text(encoding="utf-8"))
         except FileNotFoundError as exc:
             raise StoreError("Not found.", 404) from exc
         except json.JSONDecodeError as exc:
@@ -325,7 +431,7 @@ def read_json(path: Path):
 
 class Store:
     def __init__(self, root: Path):
-        self.root = Path(root).resolve()
+        self.root = _StorePath(root).resolve()
         self._lock = threading.Lock()
 
     @property
@@ -367,6 +473,11 @@ class Store:
             atomic_write_text(self.direction_path, DEFAULT_DIRECTION)
         self.rooms_dir.mkdir(parents=True, exist_ok=True)
         self.projects_dir.mkdir(parents=True, exist_ok=True)
+        from easyagent.secrets import migrate_store
+        from easyagent.workspace import migrate_workspaces
+
+        migrate_store(self)
+        migrate_workspaces(self)
 
     def _parse_id(self, value: str) -> str:
         cleaned = (value or "").strip().lower()
@@ -379,7 +490,7 @@ class Store:
         if name != Path(name).name or name in {".", ".."}:
             raise StoreError("Not found.", 404)
         path = parent / name
-        if path.is_symlink():
+        if _io_path(path).is_symlink():
             raise StoreError("Refusing to follow a symlink.", 400)
         return path
 
@@ -395,8 +506,33 @@ class Store:
         endpoint_id = self._parse_id(endpoint_id)
         for endpoint in self.list_endpoints():
             if endpoint.get("id") == endpoint_id:
-                return endpoint
+                return self._hydrate_endpoint(endpoint)
         return None
+
+    def _hydrate_endpoint(self, record: dict) -> dict:
+        """A copy whose api_key is filled from the encrypted store. The file stays empty."""
+        shown = dict(record)
+        from easyagent.secrets import endpoint_account, get_secret
+
+        saved = get_secret(endpoint_account(str(shown.get("id") or "")), self)
+        if saved:
+            shown["api_key"] = saved
+            shown["has_api_key"] = True
+        else:
+            shown["api_key"] = ""
+            shown["has_api_key"] = bool(shown.get("has_api_key"))
+        return shown
+
+    def _store_endpoint_key(self, endpoint_id: str, api_key: str | None, *, clear: bool = False) -> bool:
+        from easyagent.secrets import delete_secret, endpoint_account, put_secret
+
+        account = endpoint_account(endpoint_id)
+        key = (api_key or "").strip()
+        if clear or not key:
+            delete_secret(account, self)
+            return False
+        put_secret(account, key, self)
+        return True
 
     def add_endpoint(
         self,
@@ -412,16 +548,21 @@ class Store:
             "id": self._parse_id(endpoint_id) if endpoint_id else new_id(),
             "name": name,
             "base_url": base_url,
-            "api_key": api_key or "",
+            "api_key": "",
+            "has_api_key": False,
             "model": model,
             "max_parallel": clamp_parallel(max_parallel),
             "created_at": now_iso(),
         }
+        has_key = self._store_endpoint_key(record["id"], api_key)
+        record["has_api_key"] = has_key
         with self._lock:
             endpoints = self.list_endpoints()
             endpoints.append(record)
             atomic_write_json(self.endpoints_path, endpoints)
-        return record
+        shown = dict(record)
+        shown["api_key"] = (api_key or "").strip()
+        return shown
 
     def delete_endpoint(self, endpoint_id: str, confirm_name: str) -> None:
         """Remove one endpoint record. Bots and chats are not touched."""
@@ -435,6 +576,7 @@ class Store:
                 raise StoreError("Type the connection's name to remove it.", 400)
             kept = [item for item in endpoints if item.get("id") != endpoint_id]
             atomic_write_json(self.endpoints_path, kept)
+            self._store_endpoint_key(endpoint_id, "", clear=True)
 
     def update_endpoint(
         self,
@@ -462,15 +604,18 @@ class Store:
             if base_url is not None:
                 match["base_url"] = base_url
             if api_key_set and api_key:
-                match["api_key"] = api_key
-            elif clear_api_key:
+                match["has_api_key"] = self._store_endpoint_key(endpoint_id, api_key)
                 match["api_key"] = ""
+            elif clear_api_key:
+                self._store_endpoint_key(endpoint_id, "", clear=True)
+                match["api_key"] = ""
+                match["has_api_key"] = False
             if model_set:
                 match["model"] = model
             if max_parallel_set and max_parallel is not None:
                 match["max_parallel"] = clamp_parallel(max_parallel)
             atomic_write_json(self.endpoints_path, endpoints)
-        return match
+        return self._hydrate_endpoint(match)
 
     def endpoint_by_name(self, name: str) -> dict | None:
         """One saved connection, matched on its label. Nothing is written."""
@@ -479,7 +624,7 @@ class Store:
             return None
         for endpoint in self.list_endpoints():
             if " ".join(str(endpoint.get("name") or "").split()).casefold() == wanted:
-                return endpoint
+                return self._hydrate_endpoint(endpoint)
         return None
 
     # --- bots --------------------------------------------------------------
@@ -562,6 +707,8 @@ class Store:
         learn_manual_set: bool = False,
         check_revisions: int | None = None,
         check_revisions_set: bool = False,
+        workspace: str | None = None,
+        workspace_set: bool = False,
     ) -> dict:
         """Change settings. Chat files in this bot are not opened or rewritten."""
         bot = self.get_bot(bot_id)
@@ -611,8 +758,22 @@ class Store:
                 if number > 4:
                     number = 4
                 bot["check_revisions"] = number
+        if workspace_set and workspace is not None:
+            from easyagent.workspace import assign_workspace
+
+            return assign_workspace(self, bot, workspace)
         atomic_write_json(self._bot_dir(bot["id"]) / "bot.json", bot)
         return bot
+
+    def save_browser_settings(self, bot_id: str, *, headless: bool, allow: list[str], deny: list[str]) -> dict:
+        """This bot's browser window and the sites it may open. Chats are not rewritten."""
+        with self._lock:
+            bot = self.get_bot(bot_id)
+            bot["browser_headless"] = bool(headless)
+            bot["browser_allow"] = list(allow)
+            bot["browser_deny"] = list(deny)
+            atomic_write_json(self._bot_dir(bot["id"]) / "bot.json", bot)
+            return bot
 
     def delete_bot(self, bot_id: str, confirm_name: str) -> dict:
         """Delete exactly one bot directory after the name is confirmed.
@@ -627,7 +788,7 @@ class Store:
             raise StoreError("Refusing to delete that path.", 400)
         if not directory.is_dir() or directory.is_symlink():
             raise StoreError("Bot not found.", 404)
-        shutil.rmtree(directory)
+        shutil.rmtree(_io_path(directory))
         self._forget_bot_projects(bot["id"])
         return bot
 
@@ -662,8 +823,21 @@ class Store:
             atomic_write_json(self._schedules_path(bot_id), schedules)
         return schedule
 
+    def _routine_trash_path(self, bot_id: str) -> Path:
+        return self._bot_dir(bot_id) / "routines-trash.json"
+
+    def list_routine_trash(self, bot_id: str) -> list[dict]:
+        self.get_bot(bot_id)
+        path = self._routine_trash_path(bot_id)
+        if not path.is_file():
+            return []
+        data = read_json(path)
+        if not isinstance(data, list):
+            raise StoreError("routines-trash.json is not a list. It was not modified.", 500)
+        return data
+
     def delete_schedule(self, bot_id: str, schedule_id: str) -> dict:
-        """Remove one schedule record. The bot, its chats, and the job log stay."""
+        """Move one routine to Trash. The bot, its chats, and the job log stay."""
         schedule_id = self._parse_id(schedule_id)
         with self._lock:
             schedules = self.list_schedules(bot_id)
@@ -671,8 +845,36 @@ class Store:
             if match is None:
                 raise StoreError("Schedule not found.", 404)
             kept = [item for item in schedules if item.get("id") != schedule_id]
+            trash_path = self._routine_trash_path(bot_id)
+            trash = read_json(trash_path) if trash_path.is_file() else []
+            if not isinstance(trash, list):
+                trash = []
+            item = dict(match)
+            item["deleted_at"] = now_iso()
+            trash.append(item)
+            atomic_write_json(trash_path, trash[-100:])
             atomic_write_json(self._schedules_path(bot_id), kept)
         return match
+
+    def restore_schedule(self, bot_id: str, schedule_id: str) -> dict:
+        """Put a trashed routine back on the bot."""
+        schedule_id = self._parse_id(schedule_id)
+        with self._lock:
+            trash_path = self._routine_trash_path(bot_id)
+            trash = read_json(trash_path) if trash_path.is_file() else []
+            if not isinstance(trash, list):
+                trash = []
+            match = next((item for item in trash if item.get("id") == schedule_id), None)
+            if match is None:
+                raise StoreError("That routine is not in Trash.", 404)
+            rest = [item for item in trash if item.get("id") != schedule_id]
+            atomic_write_json(trash_path, rest)
+            schedules = self.list_schedules(bot_id)
+            item = dict(match)
+            item.pop("deleted_at", None)
+            schedules.append(item)
+            atomic_write_json(self._schedules_path(bot_id), schedules)
+        return item
 
     def list_jobs(self, bot_id: str) -> list[dict]:
         self.get_bot(bot_id)
@@ -790,11 +992,77 @@ class Store:
         if not path.is_file():
             raise StoreError("Chat not found.", 404)
         current = read_json(path)
-        # A save may append. It may not drop messages that are already on disk.
-        if len(chat.get("messages") or []) < len(current.get("messages") or []):
+        disk = list(current.get("messages") or [])
+        incoming = list(chat.get("messages") or [])
+        disk_ids = {item.get("id") for item in disk if isinstance(item, dict) and item.get("id")}
+        incoming_ids = {item.get("id") for item in incoming if isinstance(item, dict) and item.get("id")}
+        missing = [item for item in disk if isinstance(item, dict) and item.get("id") and item.get("id") not in incoming_ids]
+        added = [item for item in incoming if isinstance(item, dict) and item.get("id") and item.get("id") not in disk_ids]
+        # A live chat save can hold a stale list while a routine appends. Keep both.
+        if missing and added:
+            merged = list(disk)
+            have = set(disk_ids)
+            for item in incoming:
+                mid = item.get("id") if isinstance(item, dict) else None
+                if mid and mid not in have:
+                    merged.append(item)
+                    have.add(mid)
+            chat["messages"] = merged
+        elif len(incoming) < len(disk):
+            if missing and all(item.get("role") == "assistant" and item.get("live") for item in missing):
+                atomic_write_json(path, chat)
+                return chat
             raise StoreError("Refusing to shorten a stored transcript.", 400)
         atomic_write_json(path, chat)
         return chat
+
+    def append_routine_message(self, bot_id: str, text: str, routine_id: str = "", routine_name: str = "") -> dict:
+        """Append one finished routine reply. Re-reads the chat so a live save cannot drop it.
+
+        Does not set the chat's run. A background routine must not look like a live turn.
+        """
+        chat = self.ongoing_chat(bot_id)
+        with self._lock:
+            chat = self.get_chat(bot_id, chat["id"])
+            messages = list(chat.get("messages") or [])
+            messages.append({
+                "id": new_id(),
+                "role": "assistant",
+                "content": text,
+                "created_at": now_iso(),
+                "routine_id": routine_id,
+                "routine_name": routine_name,
+            })
+            chat["messages"] = messages
+            chat["updated_at"] = now_iso()
+            atomic_write_json(self._chat_path(chat["bot_id"], chat["id"]), chat)
+        return chat
+
+    def read_host(self) -> dict:
+        path = self.root / "host.json"
+        blank = {"background": False, "start_at_login": False, "explained": False, "paused_all": False}
+        if not path.is_file():
+            return dict(blank)
+        data = read_json(path)
+        if not isinstance(data, dict):
+            return dict(blank)
+        return {key: bool(data.get(key)) for key in blank}
+
+    def save_host(self, host: dict) -> dict:
+        current = self.read_host()
+        for key in ("background", "start_at_login", "explained", "paused_all"):
+            if key in host:
+                current[key] = bool(host[key])
+        with self._lock:
+            atomic_write_json(self.root / "host.json", current)
+        return current
+
+    def note_first_routine(self) -> dict:
+        """The first saved routine turns background running and start-at-login on."""
+        path = self.root / "host.json"
+        if path.is_file():
+            return self.read_host()
+        return self.save_host({"background": True, "start_at_login": True, "explained": False, "paused_all": False})
 
     def existing_ongoing(self, bot_id: str) -> dict | None:
         """The pinned conversation, or the newest chat. Does not create one and does not delete any."""
@@ -906,7 +1174,7 @@ class Store:
         if files.is_dir():
             if files.parent.resolve() != chats.resolve():
                 raise StoreError("Refusing to delete that path.", 400)
-            shutil.rmtree(files)
+            shutil.rmtree(_io_path(files))
         return chat
 
     # --- rooms -------------------------------------------------------------
@@ -1143,7 +1411,7 @@ class Store:
             raise StoreError("Refusing to delete that path.", 400)
         if not directory.is_dir() or directory.is_symlink():
             raise StoreError("That project is not there.", 404)
-        shutil.rmtree(directory)
+        shutil.rmtree(_io_path(directory))
 
     def _forget_bot_projects(self, bot_id: str) -> None:
         """Drop one bot's own projects, and its name from group projects. Rooms stay."""
@@ -1719,14 +1987,17 @@ class Store:
         if len(data) > 1_000_000:
             raise StoreError("That file is too large. It was not kept.", 400)
         directory = self._chat_files_dir(bot_id, chat_id)
-        directory.mkdir(parents=True, exist_ok=True)
         file_id = new_id()
         target = directory / file_id
-        target.write_bytes(data)
         meta = {"id": file_id, "name": name, "media_type": media_type, "size": len(data)}
         if source:
             meta["source"] = source
-        atomic_write_json(directory / f"{file_id}.json", meta)
+        try:
+            _io_path(directory).mkdir(parents=True, exist_ok=True)
+            _io_path(target).write_bytes(data)
+            atomic_write_json(directory / f"{file_id}.json", meta)
+        except OSError as exc:
+            raise _file_save_error(exc) from exc
         return meta
 
     def read_chat_file(self, bot_id: str, chat_id: str, file_id: str) -> tuple[dict, bytes]:
@@ -1734,7 +2005,7 @@ class Store:
         directory = self._chat_files_dir(bot_id, chat_id)
         meta_path = self._child(directory, f"{file_id}.json")
         data_path = self._child(directory, file_id)
-        if not meta_path.is_file() or not data_path.is_file():
+        if not _io_path(meta_path).is_file() or not _io_path(data_path).is_file():
             raise StoreError("That file is not in this chat.", 404)
         meta = read_json(meta_path)
         if not isinstance(meta, dict) or meta.get("id") != file_id:
@@ -1746,11 +2017,12 @@ class Store:
                 resolved = src.resolve()
                 root = self.root.resolve()
                 outside = resolved != root and root not in resolved.parents
-                if outside and src.is_file() and 0 < src.stat().st_size <= 1_000_000:
-                    return meta, src.read_bytes()
+                opened = _io_path(src)
+                if outside and opened.is_file() and 0 < opened.stat().st_size <= 1_000_000:
+                    return meta, opened.read_bytes()
             except OSError:
                 pass
-        return meta, data_path.read_bytes()
+        return meta, _io_path(data_path).read_bytes()
 
     # --- watches and proposals ---------------------------------------------
 

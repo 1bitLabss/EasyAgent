@@ -64,7 +64,7 @@ def test_phone_sees_the_answer_not_the_search_page(tmp_path, monkeypatch):
     paired = [item for item in calls[1] if item.get("role") == "assistant" and item.get("tool_calls")]
     assert paired
     assert tool_msgs[-1].get("tool_call_id") == paired[-1]["tool_calls"][0]["id"]
-    stored = (tmp_path / "bots" / bot["id"] / "chats" / f"{chat['id']}.json").read_text()
+    stored = (tmp_path / "bots" / bot["id"] / "chats" / f"{chat['id']}.json").read_text(encoding="utf-8")
     assert "SNIPPET-ONLY-ON-THE-MACHINE" not in stored
     assert "Paris is the capital of France." in stored
 

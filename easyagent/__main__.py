@@ -60,8 +60,17 @@ def serve(app, host: str, port: int) -> None:
 
 
 def main() -> None:
+    import sys
     import threading
 
+    if len(sys.argv) > 1 and sys.argv[1] == "contain":
+        from easyagent.contain import main as contain_main
+
+        raise SystemExit(contain_main(sys.argv[2:]))
+    if len(sys.argv) > 1 and sys.argv[1] == "selftest":
+        from easyagent.selftest import main as selftest_main
+
+        raise SystemExit(selftest_main(sys.argv[2:]))
     port = int(os.environ.get("EASYAGENT_PORT", "44721"))
     host = os.environ.get("EASYAGENT_HOST", "127.0.0.1")
     data = default_data_dir()

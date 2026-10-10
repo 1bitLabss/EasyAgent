@@ -41,6 +41,12 @@ export type Attachment = {
   excerpt?: string;
 };
 
+export type Receipt = {
+  claim: string;
+  tool: string;
+  output: string;
+};
+
 export type ChatMessage = {
   id?: string;
   role: string;
@@ -56,7 +62,10 @@ export type ChatMessage = {
   skills_saved?: string[];
   check?: string;
   lesson?: string;
+  receipts?: Receipt[];
+  unverified?: boolean;
   speaker_name?: string;
+  routine_name?: string;
   speaker?: string;
   created_at?: string;
 };
@@ -111,10 +120,15 @@ export type Skill = { name: string; description: string; body: string };
 export type Schedule = {
   id: string;
   prompt: string;
+  name?: string;
   kind: string;
   every_minutes?: number | null;
   cron?: string | null;
   paused?: boolean;
+  quiet?: boolean;
+  timezone?: string;
+  preview?: string;
+  label?: string;
 };
 
 export type Job = {

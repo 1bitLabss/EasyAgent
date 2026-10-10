@@ -3,7 +3,7 @@
   "category": "shell",
   "prompt": "Print the token PINE-42. On Windows use PowerShell Write-Output. Otherwise use printf. Report the output.",
   "mock": [
-    "```shell\nprintf 'PINE-42\\n'\n```",
+    "```shell\necho PINE-42\n```",
     "The command printed PINE-42.",
     "The command printed PINE-42."
   ],

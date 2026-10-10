@@ -229,7 +229,7 @@ def test_icon_bitmap_changes_with_the_count():
 
 def test_windows_tray_does_not_need_display(monkeypatch):
     """A Windows desktop has a notification area and does not set DISPLAY."""
-    monkeypatch.setattr(sys, "platform", "win32")
+    monkeypatch.setattr("easyagent.tray._on_windows", lambda: True)
     monkeypatch.delenv("DISPLAY", raising=False)
     monkeypatch.delenv("WAYLAND_DISPLAY", raising=False)
     monkeypatch.delenv("EASYAGENT_TRAY", raising=False)
@@ -237,6 +237,7 @@ def test_windows_tray_does_not_need_display(monkeypatch):
 
 
 def test_headless_session_reports_the_windows_limit(monkeypatch, capsys, tmp_path):
+    monkeypatch.setattr("easyagent.tray._on_windows", lambda: False)
     monkeypatch.delenv("DISPLAY", raising=False)
     monkeypatch.delenv("WAYLAND_DISPLAY", raising=False)
     monkeypatch.delenv("EASYAGENT_TRAY", raising=False)

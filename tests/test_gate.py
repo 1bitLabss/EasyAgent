@@ -64,17 +64,17 @@ def test_a_new_connection_allows_one_at_a_time_and_the_setting_can_change(tmp_pa
         assert created.status_code == 200, created.text
         body = created.json()
         assert body["max_parallel"] == 1
-        stored = json.loads((tmp_path / "endpoints.json").read_text())
+        stored = json.loads((tmp_path / "endpoints.json").read_text(encoding="utf-8"))
         assert stored[0]["max_parallel"] == 1
 
         changed = client.patch(f"/api/endpoints/{body['id']}", json={"max_parallel": 2})
         assert changed.status_code == 200, changed.text
         assert changed.json()["max_parallel"] == 2
-        assert json.loads((tmp_path / "endpoints.json").read_text())[0]["max_parallel"] == 2
+        assert json.loads((tmp_path / "endpoints.json").read_text(encoding="utf-8"))[0]["max_parallel"] == 2
 
         rejected = client.patch(f"/api/endpoints/{body['id']}", json={"max_parallel": 0})
         assert rejected.status_code == 400
-        assert json.loads((tmp_path / "endpoints.json").read_text())[0]["max_parallel"] == 2
+        assert json.loads((tmp_path / "endpoints.json").read_text(encoding="utf-8"))[0]["max_parallel"] == 2
 
         legacy = {
             "id": "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
@@ -85,11 +85,11 @@ def test_a_new_connection_allows_one_at_a_time_and_the_setting_can_change(tmp_pa
             "created_at": "2026-01-01T00:00:00Z",
         }
         before = json.dumps([legacy])
-        (tmp_path / "endpoints.json").write_text(before)
+        (tmp_path / "endpoints.json").write_text(before, encoding="utf-8")
         listed = client.get("/api/endpoints")
         assert listed.status_code == 200
         assert listed.json()[0]["max_parallel"] == 1
-        assert (tmp_path / "endpoints.json").read_text() == before
+        assert (tmp_path / "endpoints.json").read_text(encoding="utf-8") == before
 
         page = client.get("/classic")
         assert "app.js?v=41" in page.text

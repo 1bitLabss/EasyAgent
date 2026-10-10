@@ -62,7 +62,7 @@ function BotTile({ bot }: { bot: Bot }) {
     <>
       <button
         type="button"
-        aria-label={bot.name}
+        aria-label={count > 0 ? `${bot.name}, ${count} unread` : bot.name}
         onClick={() => selectBot(bot.id)}
         onMouseEnter={(event) => placeTip(event.currentTarget)}
         onMouseLeave={() => setTip(null)}

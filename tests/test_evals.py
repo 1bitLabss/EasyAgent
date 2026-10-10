@@ -30,6 +30,8 @@ def test_mock_run_passes_and_leaves_the_data_dir_alone(tmp_path):
     after = {path.relative_to(source).as_posix(): path.read_bytes() for path in source.rglob("*") if path.is_file()}
     assert after == before
     assert not (source / "bots").exists()
+    failed = [item["id"] for item in report["tasks"] if not item.get("passed")]
+    assert failed == [], failed
     assert report["summary"]["passed"] == report["summary"]["total"]
     assert report["summary"]["total"] >= 30
     assert report["judge_model"] == "mock"
@@ -215,4 +217,6 @@ def test_wording_checks_are_graded_and_behavior_checks_stay_strict(tmp_path):
     )
     assert old[0]["passed"] is False
     report = run_suite(mock=True, task_ids=["quick-hello", "quick-earth", "write-exact", "shell-marker"], out_dir=tmp_path / "out")
+    failed = [item["id"] for item in report["tasks"] if not item.get("passed")]
+    assert failed == [], [(item["id"], item.get("checks")) for item in report["tasks"] if not item.get("passed")]
     assert report["summary"]["passed"] == report["summary"]["total"] == 4

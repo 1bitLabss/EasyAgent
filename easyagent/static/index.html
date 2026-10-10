@@ -290,35 +290,49 @@
 
         <section id="schedules" class="settings-block" aria-labelledby="schedules-heading">
           <div class="section-head">
-            <h2 id="schedules-heading">Schedules</h2>
+            <h2 id="schedules-heading">Routines</h2>
             <button type="button" id="toggle-schedule" class="text-btn">Add</button>
           </div>
-          <p class="form-note">A schedule runs a saved prompt on a timer. It writes the job log, not a chat.</p>
+          <p class="form-note">A routine runs a saved prompt on your clock and posts into this bot's chat. The unread dot lights up. Quiet mode stays in the log when the reply is nothing new.</p>
           <form id="schedule-form" class="stack-form" hidden>
+            <label>Name
+              <input id="schedule-name" maxlength="80" placeholder="Morning briefing" />
+            </label>
             <label>Prompt
               <textarea id="schedule-prompt" rows="2" maxlength="4000" required placeholder="What should this bot do on its own?"></textarea>
             </label>
             <label>When
               <select id="schedule-kind">
+                <option value="weekdays">Weekdays</option>
+                <option value="daily">Every day</option>
                 <option value="interval">Every N minutes</option>
-                <option value="cron">Cron, local time</option>
+                <option value="cron">Cron</option>
               </select>
             </label>
-            <label id="schedule-every-label">Minutes
-              <input id="schedule-every" type="number" min="1" max="1440" value="1" />
+            <label id="schedule-time-label">Time
+              <input id="schedule-time" value="8:00 AM" placeholder="8:00 AM" />
+            </label>
+            <label id="schedule-every-label" hidden>Minutes
+              <input id="schedule-every" type="number" min="5" max="10080" value="60" />
             </label>
             <label id="schedule-cron-label" hidden>Cron
-              <input id="schedule-cron" maxlength="80" placeholder="*/15 * * * *" spellcheck="false" />
+              <input id="schedule-cron" maxlength="80" placeholder="0 8 * * 1-5" spellcheck="false" />
             </label>
-            <p class="form-note">Five fields are minute, hour, day, month, weekday, in local time. A stopped app runs a due slot once when it starts again, and does not run that slot twice.</p>
+            <label>Timezone
+              <input id="schedule-zone" placeholder="Local time, or America/Chicago" />
+            </label>
+            <label class="check-line"><input id="schedule-quiet" type="checkbox" /> Quiet. Nothing new does not post.</label>
+            <p class="form-note">The saved line is the next run in your local time. A gap under 5 minutes is refused. You can also ask in the chat; that waits for a confirm card.</p>
             <div class="form-actions">
-              <button type="submit">Save schedule</button>
+              <button type="submit">Save routine</button>
               <button type="button" id="cancel-schedule" class="ghost">Cancel</button>
             </div>
             <p id="schedule-error" class="form-error" role="alert" hidden></p>
           </form>
           <ul id="schedule-list" class="schedule-list"></ul>
-          <p id="schedule-empty" class="empty-inline">No schedules. Add one to run a prompt on a timer. Chats are not part of the job.</p>
+          <p id="schedule-empty" class="empty-inline">No routines yet. Add one, or ask in the chat and confirm the card.</p>
+          <h3 class="job-heading">Trash</h3>
+          <ul id="schedule-trash" class="schedule-list"></ul>
           <h3 id="job-log-heading" class="job-heading">Job log</h3>
           <ul id="job-log" class="job-log"></ul>
           <p id="job-empty" class="empty-inline">Nothing has fired yet.</p>

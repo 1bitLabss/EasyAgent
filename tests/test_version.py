@@ -31,7 +31,7 @@ def _lock_package_version(name: str) -> str:
 
 def test_version_strings_agree():
     version = easyagent.__version__
-    assert version == "0.3.5"
+    assert version == "0.3.12"
     assert _cargo_package_version(ROOT / "pyproject.toml") == version
     assert _json_version(ROOT / "desktop" / "src-tauri" / "tauri.conf.json") == version
     for rel in ("web/package.json", "desktop/package.json"):

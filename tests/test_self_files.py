@@ -66,9 +66,10 @@ def test_the_prompt_names_real_paths_and_the_memory_file_is_created(world):
     chat_file = world.path / "bots" / world.bot["id"] / "chats" / f"{world.chat['id']}.json"
     assert display_path(chat_file.resolve()) in system
     assert display_path((world.path / "skills").resolve()) in system
-    assert "%LOCALAPPDATA%\\EasyAgent" in system
-    assert "Application Support/EasyAgent" in system
-    assert ".local/share/EasyAgent" in system
+    assert "This bot's workspace, where a file goes when no folder is named:" in system
+    assert "%LOCALAPPDATA%\\EasyAgent" not in system
+    workspace = world.path / "bots" / world.bot["id"] / "workspace"
+    assert display_path(workspace.resolve()) in system
     assert "never ask the person where your chats or memory are" in system
     assert "```history" in system
 
@@ -160,7 +161,7 @@ def test_each_request_uses_the_connection_saved_now(world):
     # The old error line is still on disk, but the old address is not replayed to the model.
     sent = json.dumps(world.rec.calls[-1]["messages"][1:])
     assert "localhost:8080" not in sent
-    stored = (world.path / "bots" / world.bot["id"] / "chats" / f"{world.chat['id']}.json").read_text()
+    stored = (world.path / "bots" / world.bot["id"] / "chats" / f"{world.chat['id']}.json").read_text(encoding="utf-8")
     assert "localhost:8080" in stored
 
 

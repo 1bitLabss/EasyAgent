@@ -34,6 +34,7 @@ class Slot:
         self.cwd = str(Path.home())
         self.env: dict[str, str] | None = None
         self.worker: asyncio.Task | None = None
+        self.store = None
 
 
 _GUARD = threading.Lock()
@@ -157,6 +158,7 @@ def bind(store, chat_id: str, bot_id: str = "") -> Slot:
     slot.run_id = str(uuid.uuid4())
     slot.bot_id = bot_id or slot.bot_id
     slot.chat_id = chat_id
+    slot.store = store
     slot.cwd = str(Path.home())
     slot.env = os.environ.copy()
     slot.worker = asyncio.current_task()

@@ -2821,27 +2821,33 @@ async function approveCandidate(botId, candidateId) {
 async function refreshSchedules(botId) {
   if (state.view !== "bot" || state.botId !== botId) return;
   try {
-    const [schedules, jobs] = await Promise.all([
+    const [schedules, jobs, trash] = await Promise.all([
       api(`/api/bots/${botId}/schedules`),
       api(`/api/bots/${botId}/jobs`),
+      api(`/api/bots/${botId}/schedules/trash`),
     ]);
     if (state.view !== "bot" || state.botId !== botId) return;
-    renderSchedules(schedules, jobs);
+    renderSchedules(schedules, jobs, trash || []);
   } catch (error) {
     if (state.view === "bot" && state.botId === botId) formError("schedule-error", error.message);
   }
 }
 
-function renderSchedules(schedules, jobs) {
+function renderSchedules(schedules, jobs, trash) {
   const list = $("schedule-list");
   list.replaceChildren();
   show($("schedule-empty"), schedules.length === 0);
   for (const schedule of schedules) {
-    const status = schedule.paused ? "Paused" : "Running";
+    const status = schedule.paused ? "Paused" : "On";
     list.append(el("li", { class: "schedule-row" }, [
       el("header", {}, [
-        el("strong", {}, [schedule.label || schedule.kind]),
+        el("strong", {}, [schedule.name || schedule.label || schedule.kind]),
         el("span", { class: "schedule-actions" }, [
+          el("button", {
+            type: "button",
+            class: "text-btn",
+            onclick: () => runSchedule(schedule),
+          }, ["Run now"]),
           el("button", {
             type: "button",
             class: "text-btn",
@@ -2854,9 +2860,25 @@ function renderSchedules(schedules, jobs) {
           }, ["Delete"]),
         ]),
       ]),
-      el("p", {}, [schedule.prompt]),
-      el("small", {}, [`${status}.${schedule.last_slot ? ` Last slot ${schedule.last_slot}.` : " Has not fired."}`]),
+      el("p", {}, [schedule.preview || schedule.prompt]),
+      el("small", {}, [`${status}.${schedule.quiet ? " Quiet." : ""}`]),
     ]));
+  }
+  const bin = $("schedule-trash");
+  if (bin) {
+    bin.replaceChildren();
+    for (const item of trash || []) {
+      bin.append(el("li", { class: "schedule-row" }, [
+        el("header", {}, [
+          el("strong", {}, [item.name || item.prompt || "Routine"]),
+          el("button", {
+            type: "button",
+            class: "text-btn",
+            onclick: () => restoreSchedule(item),
+          }, ["Restore"]),
+        ]),
+      ]));
+    }
   }
   const log = $("job-log");
   log.replaceChildren();
@@ -2883,6 +2905,30 @@ async function setSchedulePaused(schedule, paused) {
       method: "POST",
       body: JSON.stringify({ paused }),
     });
+    await refreshSchedules(botId);
+  } catch (error) {
+    formError("schedule-error", error.message);
+  }
+}
+
+async function runSchedule(schedule) {
+  if (!state.botId) return;
+  const botId = state.botId;
+  formError("schedule-error", "");
+  try {
+    await api(`/api/bots/${botId}/schedules/${schedule.id}/run`, { method: "POST" });
+    await refreshSchedules(botId);
+  } catch (error) {
+    formError("schedule-error", error.message);
+  }
+}
+
+async function restoreSchedule(schedule) {
+  if (!state.botId) return;
+  const botId = state.botId;
+  formError("schedule-error", "");
+  try {
+    await api(`/api/bots/${botId}/schedules/${schedule.id}/restore`, { method: "POST" });
     await refreshSchedules(botId);
   } catch (error) {
     formError("schedule-error", error.message);
@@ -3057,9 +3103,10 @@ function wire() {
   });
   $("cancel-schedule").addEventListener("click", () => show($("schedule-form"), false));
   $("schedule-kind").addEventListener("change", () => {
-    const cron = $("schedule-kind").value === "cron";
-    show($("schedule-cron-label"), cron);
-    show($("schedule-every-label"), !cron);
+    const kind = $("schedule-kind").value;
+    show($("schedule-time-label"), kind === "weekdays" || kind === "daily");
+    show($("schedule-cron-label"), kind === "cron");
+    show($("schedule-every-label"), kind === "interval");
   });
   $("schedule-form").addEventListener("submit", async (event) => {
     event.preventDefault();
@@ -3067,9 +3114,22 @@ function wire() {
     const botId = state.botId;
     formError("schedule-error", "");
     const kind = $("schedule-kind").value;
-    const body = { prompt: $("schedule-prompt").value, kind };
-    if (kind === "cron") body.cron = $("schedule-cron").value;
-    else body.every_minutes = Number($("schedule-every").value);
+    const body = {
+      name: $("schedule-name").value,
+      prompt: $("schedule-prompt").value,
+      quiet: $("schedule-quiet").checked,
+    };
+    const zone = $("schedule-zone").value.trim();
+    if (zone) body.timezone = zone;
+    if (kind === "weekdays") body.weekdays = $("schedule-time").value;
+    else if (kind === "daily") body.daily = $("schedule-time").value;
+    else if (kind === "cron") {
+      body.kind = "cron";
+      body.cron = $("schedule-cron").value;
+    } else {
+      body.kind = "interval";
+      body.every_minutes = Number($("schedule-every").value);
+    }
     try {
       await api(`/api/bots/${botId}/schedules`, { method: "POST", body: JSON.stringify(body) });
       $("schedule-prompt").value = "";

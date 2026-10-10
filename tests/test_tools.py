@@ -24,8 +24,12 @@ class Recorder:
 
 
 def _written_page() -> str:
+    """The page path the last turn actually used. A bot turn writes its own workspace."""
     from easyagent.paths import deliverable_file
+    from easyagent.tools import _LAST_DEFAULT_FOLDER, _join_stored
 
+    if _LAST_DEFAULT_FOLDER:
+        return _join_stored(_LAST_DEFAULT_FOLDER, "landing.html")
     return deliverable_file("landing.html")
 
 
@@ -50,6 +54,10 @@ def _redirect_writes(folder: Path):
         if norm.lower() == root or norm.lower().startswith(root + "/"):
             name = norm.split("/")[-1]
             return folder if norm.lower() == root else folder / name
+        lowered = norm.lower()
+        if "/bots/" in lowered and "/workspace" in lowered:
+            name = norm.split("/")[-1]
+            return folder if name.lower() == "workspace" else folder / name
         return Path(text)
 
     return placed
@@ -107,7 +115,7 @@ def test_printed_function_call_lists_the_folder(tmp_path, monkeypatch):
     assert f"Listed {folder}\nnotes.txt" not in answer
     assert "function_calls" not in answer
     assert "<invoke" not in answer
-    raw = (tmp_path / "bots" / bot["id"] / "chats" / f"{chat['id']}.json").read_text()
+    raw = (tmp_path / "bots" / bot["id"] / "chats" / f"{chat['id']}.json").read_text(encoding="utf-8")
     assert "function_calls" not in raw
     prompt = "\n".join(item.get("content") or "" for item in recorder.seen[-1])
     assert "notes.txt" in prompt
@@ -221,7 +229,7 @@ def test_saved_computers_do_not_change_chats_and_commands_return_output(tmp_path
     assert _chat_bytes(tmp_path, bot["id"]) == before
     shown = client.get(f"/api/bots/{bot['id']}/chats/{chat['id']}").json()
     assert shown["messages"][0]["content"] == "keep-this-line"
-    raw_secret = (tmp_path / "computers.json").read_text()
+    raw_secret = (tmp_path / "computers.json").read_text(encoding="utf-8")
     assert "secret-pass" not in raw_secret
     assert "win-pass" not in raw_secret
     assert '"user"' not in raw_secret
@@ -825,6 +833,17 @@ def test_an_empty_reply_with_no_tool_names_what_is_undone(tmp_path, monkeypatch)
     assert "Endpoint returned an empty message" not in answer
     assert answer != "Endpoint returned an empty message."
     assert len(recorder.seen) == before + 2
+
+
+def test_a_claimed_save_without_a_file_is_the_write_error():
+    from easyagent.tools import _prefer_write_failure
+
+    fails = [{"kind": "files", "action": "write", "result": "Write failed: denied. Path: made.txt."}]
+    assert _prefer_write_failure("Saved it.", [], fails) == fails[0]["result"]
+    assert _prefer_write_failure("Done.", [], fails) == "Done."
+    assert _prefer_write_failure("Saved it.", ["Wrote made.txt."], fails) == "Saved it."
+    assert "not written" in _prefer_write_failure("Saved it.", [], []).lower()
+    assert _prefer_write_failure("The file is in place.", [], []) == "The file is in place."
 
 
 def test_an_inferred_write_that_fails_names_the_tool(tmp_path, monkeypatch):
@@ -1663,9 +1682,10 @@ def test_a_failed_grep_comes_back_and_the_written_page_is_named(tmp_path, monkey
         _page_closer("The Azure Bay Hotel & Spa")
     )
     assert "Where the sea meets your stay" not in answer
-    assert "not recognized" not in answer.lower()
-    assert "operable program" not in answer.lower()
-    assert "grep" not in answer.lower()
+    spoken = answer.replace(_written_page(), "")
+    assert "not recognized" not in spoken.lower()
+    assert "operable program" not in spoken.lower()
+    assert "grep" not in spoken.lower()
     assert "Ran a command" not in answer
     assert "I'll build a simple landing page for a hotel." not in answer
     text = (folder / "landing.html").read_text(encoding="utf-8")
@@ -2047,7 +2067,7 @@ def test_pwd_on_windows_still_writes_the_hotel_page(tmp_path, monkeypatch):
     assert "The Lantern Hotel" in answer
     assert _written_page() in answer
     assert "you can open it" in answer.lower()
-    assert "pwd" not in answer.lower()
+    assert "pwd" not in answer.replace(_written_page(), "").lower()
     assert "not recognized" not in answer.lower()
     assert "operable program" not in answer.lower()
     assert "batch file" not in answer.lower()
@@ -4394,7 +4414,7 @@ def test_a_gradient_only_page_stays_open(tmp_path, monkeypatch):
         _page_closer("Hearth Lane Bakery")
     )
     assert "The file is index.html" not in answer
-    assert "/tmp" not in answer
+    assert "/tmp" not in answer.replace(_written_page(), "")
     assert "Morning Bread" not in answer.split("The page is Hearth Lane Bakery.")[-1]
 
 

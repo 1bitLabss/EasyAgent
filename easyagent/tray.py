@@ -102,12 +102,17 @@ def load_pystray():
             raise first
 
 
+def _on_windows() -> bool:
+    """A Windows desktop has a notification area. Tests patch this, not sys.platform."""
+    return sys.platform == "win32"
+
+
 def _session_block() -> str | None:
     if os.environ.get("EASYAGENT_TRAY", "1").strip() == "0":
         return "EASYAGENT_TRAY=0"
     # A Windows desktop has a notification area and does not set DISPLAY.
     # Linux still needs a display. A headless Linux session, including pytest, skips the tray.
-    if sys.platform == "win32":
+    if _on_windows():
         return None
     if os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY"):
         return None

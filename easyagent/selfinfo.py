@@ -30,6 +30,12 @@ def _show(path: Path) -> str:
     return display_path(path)
 
 
+def _workspace(store: Store, bot_id: str) -> Path:
+    from easyagent.workspace import bot_workspace
+
+    return bot_workspace(store, bot_id)
+
+
 def app_folder_note() -> str:
     """The per-account app folder on each operating system, and this one."""
     here = _show(default_deliverable_dir())
@@ -103,7 +109,7 @@ def own_files_prompt(store: Store, bot_id: str, chat_id: str | None = None) -> s
         f"- Your memory topics: {_show(paths['memory_index'])} names the topic files in {_show(paths['memory_dir'])}",
         f"- Skills (shared by every bot): {_show(paths['skills'])} (one .md file per skill)",
         f"- Direction: {_show(paths['direction'])}",
-        f"- App folder for files you write when no folder is named: {app_folder_note()}",
+        f"- This bot's workspace, where a file goes when no folder is named: {_show(_workspace(store, bot_id))}",
     ]
     return "\n".join(rows)
 

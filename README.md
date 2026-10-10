@@ -8,7 +8,7 @@ The pixel drawing is traced from [mascot-original.jpg](assets/mascot-original.jp
 
 EasyAgent is a free local agent harness for any OpenAI-compatible model. You run it on your own computer. It gives you multiple bots, real tools, markdown memory, and a goal, plan, build, and check loop. It does not include a model, an account, or a cloud copy of your chats.
 
-Version 0.3.5. [MIT license](LICENSE). Copyright Nathan / 1bitLabs.
+Version 0.3.12. [MIT license](LICENSE). Copyright Nathan / 1bitLabs.
 
 I built this for myself, and I'm sharing it free. It is the harness I wanted on my own machine: a few bots, the model I already run, and the files on that computer.
 
@@ -56,6 +56,14 @@ That opens a dev server on http://127.0.0.1:44731 and proxies `/api`, `/static`,
 - Bind address: `127.0.0.1`. Phone access in Settings also listens on this computer's LAN address. It is off until you turn it on. An address outside the home network is refused.
 
 `pip install -r requirements.txt` installs the server. On Windows it also installs the tray dependencies. The tray is optional. `EASYAGENT_TRAY=0` skips it.
+
+## Release check
+
+```bash
+python -m easyagent selftest all --data COPY --port PORT
+```
+
+Point `--data` at a copy of the data folder, never the live one, and pick a spare `--port`. The gate starts a server there, talks only to bots it creates (names start with `selftest-`), and prints a PASS/FAIL table with per-check timings. A JSON report is written to `selftest-all.json` in the current directory, or to `--report`. Any FAIL exits nonzero. The server, those bots, and the temp files are removed when it finishes. The long-chat probe uses headless Edge or Chromium when one is installed. Containment is a report. `--consent` does not apply ACL or profile changes.
 
 ## Connect a model
 
@@ -313,7 +321,8 @@ That listens on port `44731`. Point `EASYAGENT_RELAY_URL` at `http://127.0.0.1:4
 
 | Path | Contents |
 | --- | --- |
-| `data/endpoints.json` | Connection names, base URLs, optional keys, optional model ids, and the at-once limit |
+| `data/endpoints.json` | Connection names, base URLs, optional model ids, and the at-once limit. API keys are not stored in this file |
+| `data/secrets.db` | Encrypted API keys. The master key is in the OS keychain, or derived from a passphrase file outside this folder |
 | `data/phone.json` | Phone access on or off, the current pairing code, and a hash for each paired phone |
 | `data/bots/<id>/bot.json` | Bot name, connection, optional model, token budget |
 | `data/bots/<id>/chats/<id>.json` | Full transcript, summary, and how far the summary covers |

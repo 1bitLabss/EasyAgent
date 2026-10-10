@@ -235,7 +235,13 @@ def saved_secrets(store: Store) -> list[str]:
     found: list[str] = []
     try:
         for endpoint in store.list_endpoints():
-            key = endpoint.get("api_key") or ""
+            hydrated = store.get_endpoint(str(endpoint.get("id") or "")) or endpoint
+            key = hydrated.get("api_key") or ""
+            if isinstance(key, str) and len(key) >= 6:
+                found.append(key)
+        from easyagent.secrets import secret_values
+
+        for key in secret_values(store):
             if isinstance(key, str) and len(key) >= 6:
                 found.append(key)
     except Exception:

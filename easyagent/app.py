@@ -41,7 +41,18 @@ from easyagent.context import (
 )
 from easyagent.prompt import build_system
 from easyagent.turnctx import model_turn, visible_prepare
-from easyagent.schedule import ScheduleError, describe, parse_cron, schedule_loop
+from easyagent.schedule import (
+    ScheduleError,
+    active_routines,
+    compile_routine,
+    describe,
+    parse_cron,
+    pause_all,
+    preview,
+    run_routine_now,
+    schedule_loop,
+    template_records,
+)
 from easyagent.search import SearchError
 from easyagent.handoff import take_file
 from easyagent.night import run_night
@@ -129,7 +140,7 @@ def public_endpoint(endpoint: dict) -> dict:
         "id": endpoint["id"],
         "name": endpoint["name"],
         "base_url": endpoint["base_url"],
-        "has_api_key": bool(endpoint.get("api_key")),
+        "has_api_key": bool(endpoint.get("has_api_key")) or bool(endpoint.get("api_key")),
         "model": endpoint.get("model") or None,
         "max_parallel": gate.clamp_parallel(endpoint.get("max_parallel")),
         "created_at": endpoint.get("created_at"),
@@ -161,6 +172,9 @@ def public_bot(store: Store, bot: dict) -> dict:
         "learn_manual": bot.get("learn_manual") is True,
         "safety_mode": bot.get("safety_mode") or "careful",
         "safety_unlocks": list(bot.get("safety_unlocks") or []),
+        "browser_headless": bool(bot.get("browser_headless")),
+        "browser_allow": list(bot.get("browser_allow") or []),
+        "browser_deny": list(bot.get("browser_deny") or []),
     }
 
 
@@ -175,11 +189,30 @@ def _stored_face_color(bot: dict) -> str:
         return ""
 
 
-def make_title(content: str) -> str:
+def _workspace_text(store: Store, bot_id: str) -> str:
+    from easyagent.paths import display_path
+    from easyagent.workspace import bot_workspace
+
+    return display_path(bot_workspace(store, bot_id))
+
+
+def make_title(content: str, store: Store | None = None) -> str:
     text = " ".join(content.split())
+    if store is not None:
+        from easyagent.journal import scrub_text
+
+        text = " ".join(scrub_text(store, text).split())
+    text = _redact_title(text)
     if len(text) <= 72:
         return text or "New chat"
     return text[:71] + "…"
+
+
+def _redact_title(text: str) -> str:
+    """A chat title does not keep an email address or a password."""
+    cleaned = re.sub(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}", "[redacted]", text or "")
+    cleaned = re.sub(r"(?i)\b(password|passwd|pwd)\s*[:=]\s*\S+", r"\1 [redacted]", cleaned)
+    return cleaned
 
 
 def clean_name(value: str, label: str) -> str:
@@ -299,9 +332,66 @@ class SafetyIn(BaseModel):
     unlocks: list[str] | None = None
 
 
+class HonestyIn(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+    receipts: bool | None = None
+    pushback: bool | None = None
+    excuse: bool | None = None
+    loop: bool | None = None
+    tripwires: bool | None = None
+    stall: bool | None = None
+    stall_minutes: int | None = None
+
+
 class ApprovalIn(BaseModel):
     model_config = ConfigDict(extra="ignore")
     decision: str = "deny"
+
+
+class BrowserIn(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+    headless: bool = False
+    allow: list[str] = Field(default_factory=list)
+    deny: list[str] = Field(default_factory=list)
+
+
+class ConnectorIn(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+    name: str = ""
+    transport: str = "stdio"
+    command: list[str] = Field(default_factory=list)
+    url: str = ""
+    secrets: dict[str, str] = Field(default_factory=dict)
+    package: str = ""
+    version: str = ""
+
+
+class ConnectorPatch(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+    enabled: bool | None = None
+    tools: dict[str, str] = Field(default_factory=dict)
+
+
+class StarterIn(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+    starter: str = ""
+    name: str = ""
+    path: str = ""
+
+
+class SearchSetupIn(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+    provider: str = "duckduckgo"
+    searxng_url: str = ""
+    brave_key: str | None = None
+    tavily_key: str | None = None
+    clear_brave: bool = False
+    clear_tavily: bool = False
+
+
+class SandboxIn(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+    action: str = ""
 
 
 class RetentionIn(BaseModel):
@@ -389,10 +479,22 @@ class FirewallIn(BaseModel):
 
 class ScheduleIn(BaseModel):
     model_config = ConfigDict(extra="ignore")
-    prompt: str
-    kind: str
+    prompt: str = ""
+    kind: str | None = None
     every_minutes: int | None = None
+    every_hours: int | None = None
     cron: str | None = None
+    name: str | None = None
+    timezone: str | None = None
+    quiet: bool | None = None
+    paused: bool | None = None
+    weekdays: str | None = None
+    daily: str | None = None
+    weekly: str | None = None
+    weekly_day: str | None = None
+    weekly_time: str | None = None
+    once: str | None = None
+    preset: str | None = None
 
 
 class SchedulePauseIn(BaseModel):
@@ -410,6 +512,9 @@ class ReadIn(BaseModel):
 @asynccontextmanager
 async def _lifespan(app: FastAPI):
     app.state.loop = asyncio.get_running_loop()
+    from easyagent.sandbox import warm_probe
+
+    warm_probe()
     stop = asyncio.Event()
     task = asyncio.create_task(schedule_loop(app.state.store, stop))
     learn_task = asyncio.create_task(learn_loop(app.state.store, stop))
@@ -521,6 +626,12 @@ def create_app(data_dir: str | Path | None = None) -> FastAPI:
     @app.get("/api/health")
     def health():
         return {"ok": True, "data_dir": str(store.root), "version": __version__}
+
+    @app.get("/api/sandbox")
+    def sandbox_status():
+        from easyagent.sandbox import public_status
+
+        return public_status(store)
 
     def _phone_port() -> int:
         server = getattr(app.state, "uvicorn_server", None)
@@ -686,6 +797,30 @@ def create_app(data_dir: str | Path | None = None) -> FastAPI:
             raise HTTPException(500, "Saving bot settings changed chat files.")
         return public_bot(store, bot)
 
+    @app.get("/api/bots/{bot_id}/sandbox")
+    def get_sandbox(bot_id: str):
+        store.get_bot(bot_id)
+        from easyagent.sandbox import public_status
+
+        return public_status(store, bot_id)
+
+    @app.post("/api/bots/{bot_id}/sandbox")
+    async def post_sandbox(bot_id: str, body: SandboxIn):
+        store.get_bot(bot_id)
+        from easyagent import contain
+        from easyagent.sandbox import public_status
+
+        action = (body.action or "").strip().lower()
+        if action == "undo":
+            contain.undo(store, bot_id)
+            return public_status(store, bot_id)
+        if action == "setup":
+            if not contain.consented():
+                asyncio.create_task(contain.ensure_consent(store, bot_id))
+                await asyncio.sleep(0)
+            return public_status(store, bot_id)
+        raise HTTPException(400, "Say setup or undo.")
+
     @app.get("/api/bots/{bot_id}/approvals")
     def get_approvals(bot_id: str):
         store.get_bot(bot_id)
@@ -698,10 +833,181 @@ def create_app(data_dir: str | Path | None = None) -> FastAPI:
         store.get_bot(bot_id)
         from easyagent.safety import resolve_card
 
+        if body.decision == "takeover":
+            from easyagent.browser import focus
+            from easyagent.safety import note_takeover
+
+            card = note_takeover(card_id)
+            if card is None or card.bot_id != bot_id:
+                raise HTTPException(404, "That approval card is not waiting.")
+            focus(store, bot_id)
+            return {"ok": True, "decision": "takeover"}
         card = resolve_card(card_id, body.decision)
         if card is None or card.bot_id != bot_id:
             raise HTTPException(404, "That approval card is not waiting.")
         return {"ok": True, "decision": card.decision}
+
+    @app.get("/api/bots/{bot_id}/connectors")
+    def get_connectors(bot_id: str):
+        store.get_bot(bot_id)
+        from easyagent.connectors import list_records, public_record
+
+        return [public_record(row) for row in list_records(store, bot_id)]
+
+    @app.get("/api/bots/{bot_id}/connector-starters")
+    def get_connector_starters(bot_id: str):
+        store.get_bot(bot_id)
+        from easyagent.connectors import starters
+
+        return starters()
+
+    @app.post("/api/bots/{bot_id}/connectors")
+    def post_connector(bot_id: str, body: ConnectorIn):
+        store.get_bot(bot_id)
+        from easyagent.connectors import queue_install
+        from easyagent.store import StoreError
+
+        try:
+            card = queue_install(
+                store,
+                bot_id,
+                name=body.name,
+                transport=body.transport,
+                command=body.command,
+                url=body.url,
+                secrets=body.secrets,
+                package=body.package,
+                version=body.version,
+            )
+        except StoreError as exc:
+            raise HTTPException(exc.status, exc.message) from exc
+        return {"status": "review", "card": card}
+
+    @app.post("/api/bots/{bot_id}/connectors/starter")
+    def post_connector_starter(bot_id: str, body: StarterIn):
+        store.get_bot(bot_id)
+        from easyagent.connectors import queue_starter
+        from easyagent.store import StoreError
+
+        try:
+            card = queue_starter(store, bot_id, body.starter, body.name, body.path)
+        except StoreError as exc:
+            raise HTTPException(exc.status, exc.message) from exc
+        return {"status": "review", "card": card}
+
+    @app.post("/api/bots/{bot_id}/connectors/{connector_id}")
+    def post_connector_update(bot_id: str, connector_id: str, body: ConnectorPatch):
+        store.get_bot(bot_id)
+        from easyagent.connectors import public_record, update_connector
+        from easyagent.store import StoreError
+
+        try:
+            row = update_connector(store, bot_id, connector_id, enabled=body.enabled, tools=body.tools or None)
+        except StoreError as exc:
+            raise HTTPException(exc.status, exc.message) from exc
+        return public_record(row)
+
+    @app.post("/api/bots/{bot_id}/connectors/{connector_id}/refresh")
+    def post_connector_refresh(bot_id: str, connector_id: str):
+        store.get_bot(bot_id)
+        from easyagent.connectors import public_record, refresh
+        from easyagent.store import StoreError
+
+        try:
+            row = refresh(store, bot_id, connector_id)
+        except StoreError as exc:
+            raise HTTPException(exc.status, exc.message) from exc
+        return public_record(row)
+
+    @app.delete("/api/bots/{bot_id}/connectors/{connector_id}")
+    def delete_connector_route(bot_id: str, connector_id: str):
+        store.get_bot(bot_id)
+        from easyagent.connectors import delete_connector
+        from easyagent.store import StoreError
+
+        try:
+            delete_connector(store, bot_id, connector_id)
+        except StoreError as exc:
+            raise HTTPException(exc.status, exc.message) from exc
+        return {"ok": True}
+
+    @app.get("/api/browser/install")
+    def get_browser_install():
+        from easyagent.browser import install_status
+
+        return install_status()
+
+    @app.post("/api/browser/install")
+    def post_browser_install():
+        from easyagent.browser import install_browser
+
+        try:
+            return install_browser()
+        except Exception as exc:
+            raise HTTPException(400, str(exc) or "The browser could not be installed.") from exc
+
+    @app.get("/api/search-setup")
+    def get_search_setup():
+        from easyagent.search import public_settings
+
+        return public_settings(store)
+
+    @app.put("/api/search-setup")
+    def put_search_setup(body: SearchSetupIn):
+        from easyagent.search import SearchError, save_settings
+
+        try:
+            return save_settings(
+                store,
+                provider=body.provider,
+                searxng_url=body.searxng_url,
+                brave_key=body.brave_key,
+                tavily_key=body.tavily_key,
+                clear_brave=body.clear_brave,
+                clear_tavily=body.clear_tavily,
+            )
+        except SearchError as exc:
+            raise HTTPException(400, str(exc)) from exc
+
+    @app.get("/api/bots/{bot_id}/browser")
+    def get_browser(bot_id: str):
+        store.get_bot(bot_id)
+        from easyagent.browser import snapshot
+
+        return snapshot(store, bot_id)
+
+    @app.get("/api/bots/{bot_id}/browser/shot")
+    def get_browser_shot(bot_id: str):
+        store.get_bot(bot_id)
+        from easyagent.browser import shot_path
+
+        path = shot_path(store, bot_id)
+        if not path.is_file():
+            raise HTTPException(404, "No browser page is open.")
+        return FileResponse(path, media_type="image/png")
+
+    @app.post("/api/bots/{bot_id}/browser/stop")
+    def post_browser_stop(bot_id: str):
+        store.get_bot(bot_id)
+        from easyagent.browser import cancel as cancel_browser
+        from easyagent.browser import snapshot
+
+        cancel_browser(store, bot_id)
+        return snapshot(store, bot_id)
+
+    @app.post("/api/bots/{bot_id}/browser")
+    def post_browser(bot_id: str, body: BrowserIn):
+        from easyagent.browser import cancel as cancel_browser
+        from easyagent.browser import clean_hosts
+
+        bot = store.save_browser_settings(
+            bot_id,
+            headless=body.headless,
+            allow=clean_hosts(body.allow),
+            deny=clean_hosts(body.deny),
+        )
+        cancel_browser(store, bot_id)
+        return public_bot(store, bot)
 
     @app.get("/api/bots/{bot_id}/audit")
     def get_audit(bot_id: str):
@@ -720,6 +1026,22 @@ def create_app(data_dir: str | Path | None = None) -> FastAPI:
         except StoreError as exc:
             raise HTTPException(exc.status, exc.message) from exc
         return public_bot(store, bot)
+
+    @app.get("/api/bots/{bot_id}/honesty")
+    def get_honesty(bot_id: str):
+        store.get_bot(bot_id)
+        from easyagent.honesty import load_settings
+
+        return load_settings(store, bot_id)
+
+    @app.post("/api/bots/{bot_id}/honesty")
+    def post_honesty(bot_id: str, body: HonestyIn):
+        from easyagent.honesty import save_settings
+
+        try:
+            return save_settings(store, bot_id, body.model_dump(exclude_unset=True))
+        except StoreError as exc:
+            raise HTTPException(exc.status, exc.message) from exc
 
     @app.get("/api/bots/{bot_id}/trash")
     def get_trash(bot_id: str):
@@ -766,9 +1088,41 @@ def create_app(data_dir: str | Path | None = None) -> FastAPI:
         chats_before = _snapshot_chats(store, bot_id)
         rooms_before = _snapshot_rooms(store)
         schedule = store.add_schedule(bot_id, _schedule_record(body))
+        if not _legacy_schedule(body):
+            store.note_first_routine()
         if _snapshot_chats(store, bot_id) != chats_before or _snapshot_rooms(store) != rooms_before:
             raise HTTPException(500, "Saving a schedule changed chats or rooms.")
         return _public_schedule(schedule)
+
+    @app.get("/api/bots/{bot_id}/schedules/trash")
+    def list_schedule_trash(bot_id: str):
+        return [_public_schedule(item) for item in store.list_routine_trash(bot_id)]
+
+    @app.post("/api/bots/{bot_id}/schedules/{schedule_id}/restore")
+    def restore_schedule(bot_id: str, schedule_id: str):
+        restored = store.restore_schedule(bot_id, schedule_id)
+        return _public_schedule(restored)
+
+    @app.post("/api/bots/{bot_id}/schedules/{schedule_id}/run")
+    async def run_schedule(bot_id: str, schedule_id: str):
+        bot = store.get_bot(bot_id)
+        match = next((item for item in store.list_schedules(bot_id) if item.get("id") == _safe_id(schedule_id)), None)
+        if match is None:
+            raise HTTPException(404, "Schedule not found.")
+        return await run_routine_now(store, bot, match)
+
+    @app.get("/api/bots/{bot_id}/routines/active")
+    def routines_active(bot_id: str):
+        store.get_bot(bot_id)
+        return {"running": active_routines(bot_id)}
+
+    @app.get("/api/routine-templates")
+    def routine_templates():
+        return template_records()
+
+    @app.post("/api/routines/pause-all")
+    def pause_all_routines():
+        return {"paused": pause_all(store)}
 
     @app.post("/api/bots/{bot_id}/schedules/{schedule_id}/pause")
     def pause_schedule(bot_id: str, schedule_id: str, body: SchedulePauseIn):
@@ -1676,11 +2030,39 @@ def _snapshot_rooms(store: Store) -> dict[str, bytes]:
     }
 
 
+def _legacy_schedule(body: ScheduleIn) -> bool:
+    """The older timer form. It still allows a one-minute interval."""
+    rich = any([
+        body.name,
+        body.timezone,
+        body.weekdays,
+        body.daily,
+        body.weekly,
+        body.weekly_day,
+        body.once,
+        body.preset,
+        body.every_hours,
+        body.quiet is True,
+    ])
+    return (body.kind or "") in {"interval", "cron"} and not rich
+
+
 def _public_schedule(schedule: dict) -> dict:
-    return {**schedule, "label": describe(schedule)}
+    item = dict(schedule)
+    item["label"] = describe(item)
+    try:
+        item["preview"] = preview(item)
+    except Exception:
+        item["preview"] = item["label"]
+    return item
 
 
 def _schedule_record(body: ScheduleIn) -> dict:
+    if not _legacy_schedule(body):
+        try:
+            return compile_routine(body.model_dump())
+        except ScheduleError as exc:
+            raise StoreError(str(exc), 400) from exc
     prompt = (body.prompt or "").strip()
     if not prompt:
         raise StoreError("Write a prompt for the schedule.", 400)
@@ -1856,7 +2238,7 @@ def _save_user_turn(store: Store, bot_id: str, chat_id: str, content: str, attac
         message["attachment"] = _public_attachment(attachment)
     chat["messages"].append(message)
     if chat.get("title") in {None, "", "New chat"}:
-        chat["title"] = make_title(content)
+        chat["title"] = make_title(content, store)
     _persist_context(store, chat)
     chat["updated_at"] = now_iso()
     store.save_chat(chat)
@@ -2062,6 +2444,8 @@ def _turn_messages(store: Store, bot_id: str, chat: dict) -> tuple[dict, list[di
         context_note=context_note(view.stats),
         own_files=own_files_prompt(store, bot_id, chat.get("id")),
         earlier=view.earlier,
+        workspace=_workspace_text(store, bot_id),
+        connectors=_connectors_prompt(store, bot_id),
     )
     source = list(chat.get("messages") or [])[view.summarized_through :]
     if len(source) >= len(view.tail):
@@ -2074,6 +2458,12 @@ def _turn_messages(store: Store, bot_id: str, chat: dict) -> tuple[dict, list[di
     else:
         tail = view.tail
     return endpoint, [{"role": "system", "content": system}, *tail]
+
+
+def _connectors_prompt(store: Store, bot_id: str) -> str:
+    from easyagent.connectors import prompt_block
+
+    return prompt_block(store, bot_id)
 
 
 def _projects_prompt(store: Store, bot_id: str) -> str:
@@ -2314,6 +2704,8 @@ async def _complete_for_room_bot(store: Store, room: dict, bot_id: str) -> tuple
         message_ids=message_index(room.get("messages") or [], self_id=bot["id"]),
         context_note=context_note(prepared.stats),
         own_files=own_files_prompt(store, bot["id"]),
+        workspace=_workspace_text(store, bot["id"]),
+        connectors=_connectors_prompt(store, bot["id"]),
     )
     _, _, clip_limit = context_window(budget)
     tail = [
@@ -2444,6 +2836,7 @@ async def _ack_room_reaction(store: Store, room_id: str, message: dict) -> None:
         ),
         memory=_memory_prompt(store, bot["id"]),
         message_ids=message_index(room.get("messages") or [], self_id=bot["id"]),
+        connectors=_connectors_prompt(store, bot["id"]),
     )
     _, _, clip_limit = context_window(budget)
     tail = [
@@ -2866,7 +3259,7 @@ async def _run_child(store: Store, parent_id: str, parent_chat_id: str, child: d
     """Write the task on the child's own chat, then append a short result to the parent."""
     parent_count = len(store.get_chat(parent_id, parent_chat_id).get("messages") or [])
     child_chat = store.create_chat(child["id"])
-    child_chat["title"] = make_title(task)
+    child_chat["title"] = make_title(task, store)
     child_chat["messages"].append(
         {"id": new_id(), "role": "user", "content": task, "created_at": now_iso()}
     )
@@ -3126,6 +3519,25 @@ def _finish_reply(
         message["lesson"] = lesson
     elif "lesson" in message:
         message.pop("lesson", None)
+    from easyagent.honesty import take_outcome
+
+    outcome = take_outcome()
+    if outcome is not None and outcome.receipts:
+        message["receipts"] = [
+            {
+                "claim": redact(store, str(item.get("claim") or ""))[:80],
+                "tool": redact(store, str(item.get("tool") or ""))[:180],
+                "output": redact(store, str(item.get("output") or ""))[:240],
+            }
+            for item in outcome.receipts
+            if isinstance(item, dict)
+        ]
+    elif "receipts" in message:
+        message.pop("receipts", None)
+    if outcome is not None and outcome.unverified:
+        message["unverified"] = True
+    elif "unverified" in message:
+        message.pop("unverified", None)
     if len(kept) >= 2:
         message["choices"] = kept
     elif "choices" in message:
@@ -3287,6 +3699,17 @@ async def _stream_reply(store: Store, bot_id: str, chat_id: str):
                 reacted = True
             else:
                 yield _sse({"type": kind, "text": text})
+        from easyagent.tools import finish_honesty
+
+        final = await finish_honesty(
+            final or "",
+            base_url=endpoint["base_url"],
+            api_key=endpoint.get("api_key") or None,
+            model=chosen_model(bot, endpoint),
+            messages=messages,
+            store=store,
+            bot_id=bot_id,
+        )
         visible, skills = extract_skills(final or "")
         saved: list[str] = []
         for skill in skills:

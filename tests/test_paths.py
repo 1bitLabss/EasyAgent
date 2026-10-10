@@ -3,6 +3,8 @@
 import sys
 from pathlib import Path
 
+import pytest
+
 from easyagent.paths import default_deliverable_dir, deliverable_file
 from easyagent.prompt import build_system
 from easyagent.store import EXAMPLE_MEMORY, Store
@@ -18,6 +20,7 @@ def _prompt(**kwargs) -> str:
     )
 
 
+@pytest.mark.skipif(sys.platform != "linux", reason="XDG data home is a Linux path")
 def test_linux_uses_xdg_data_home(monkeypatch):
     monkeypatch.setattr(sys, "platform", "linux")
     monkeypatch.setenv("XDG_DATA_HOME", "/tmp/ea-xdg-home")
@@ -35,6 +38,17 @@ def test_a_hidden_data_directory_is_a_folder(monkeypatch):
     assert _file_parent_in(r"C:\work\summary.txt\note-10.txt") == r"C:\work\summary.txt"
 
 
+def test_an_existing_dotted_directory_is_a_folder(tmp_path):
+    """pytest-of-First.Last is a directory. A missing summary.txt parent is still a file."""
+    from easyagent.tools import _file_parent_in
+
+    folder = tmp_path / "pytest-of-ada.smith"
+    folder.mkdir()
+    assert _file_parent_in(str(folder / "made.txt")) == ""
+    assert _file_parent_in(r"C:\work\summary.txt\note-10.txt") == r"C:\work\summary.txt"
+
+
+@pytest.mark.skipif(sys.platform != "linux", reason="XDG data home is a Linux path")
 def test_linux_uses_local_share_when_xdg_is_unset(monkeypatch):
     monkeypatch.setattr(sys, "platform", "linux")
     monkeypatch.delenv("XDG_DATA_HOME", raising=False)
@@ -65,23 +79,27 @@ def test_macos_uses_application_support(monkeypatch):
 def test_prompt_follows_the_running_system(monkeypatch):
     monkeypatch.setattr(sys, "platform", "linux")
     monkeypatch.setenv("XDG_DATA_HOME", "/tmp/ea-xdg-prompt")
-    linux = _prompt()
-    assert "/tmp/ea-xdg-prompt/EasyAgent" in linux
+    linux = _prompt(workspace="/tmp/ea-work")
+    assert "this bot's workspace, /tmp/ea-work," in linux
+    assert "/tmp/ea-xdg-prompt/EasyAgent" not in linux
+    assert "LOCALAPPDATA" not in linux
     assert "On Linux, ls and pwd are normal commands." in linux
     assert "ls and pwd are not commands" not in linux
     assert "C:\\work" not in linux
 
     monkeypatch.setattr(sys, "platform", "darwin")
     monkeypatch.setattr(Path, "home", staticmethod(lambda: Path("/Users/ada")))
-    mac = _prompt()
-    assert "/Users/ada/Library/Application Support/EasyAgent" in mac
+    mac = _prompt(workspace="/Users/ada/work")
+    assert "this bot's workspace, /Users/ada/work," in mac
+    assert "Application Support/EasyAgent" not in mac
     assert "On macOS, ls and pwd are normal commands." in mac
     assert "ls and pwd are not commands" not in mac
 
     monkeypatch.setattr(sys, "platform", "win32")
     monkeypatch.setenv("LOCALAPPDATA", r"C:\Users\ada\AppData\Local")
-    windows = _prompt()
-    assert r"C:\Users\ada\AppData\Local\EasyAgent" in windows
+    windows = _prompt(workspace=r"D:\work\ada")
+    assert r"this bot's workspace, D:\work\ada," in windows
+    assert "LOCALAPPDATA" not in windows
     assert "On Windows, ls and pwd are not commands." in windows
     assert "Invoke-RestMethod" in windows
     assert "ConvertTo-Json" in windows

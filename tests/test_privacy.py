@@ -4,6 +4,8 @@ import re
 import subprocess
 from pathlib import Path
 
+import pytest
+
 ROOT = Path(__file__).resolve().parents[1]
 
 # Built from pieces so this file does not itself contain the private tokens.
@@ -69,8 +71,12 @@ def _tracked_files() -> list[Path]:
 
 
 def test_tracked_files_do_not_carry_private_lab_details():
+    try:
+        tracked = _tracked_files()
+    except (subprocess.CalledProcessError, FileNotFoundError, OSError):
+        pytest.skip("not a git checkout")
     leaks: list[str] = []
-    for path in _tracked_files():
+    for path in tracked:
         try:
             text = path.read_text(encoding="utf-8")
         except (UnicodeDecodeError, OSError):

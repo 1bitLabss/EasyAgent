@@ -162,7 +162,7 @@ def test_phone_reads_the_home_chat_and_a_stopped_home_is_offline(tmp_path, monke
 
     try:
         asyncio.run(session())
-        on_disk = (tmp_path / "bots" / bot["id"] / "chats" / f"{chat['id']}.json").read_text()
+        on_disk = (tmp_path / "bots" / bot["id"] / "chats" / f"{chat['id']}.json").read_text(encoding="utf-8")
         assert MARKER in on_disk
     finally:
         server.should_exit = True

@@ -1,0 +1,14 @@
+<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><title>Checkout</title></head>
+<body>
+  <h1>Checkout</h1>
+  <form action="/paid" method="post">
+    <label for="name">Name</label>
+    <input id="name" name="name" aria-label="Name" value="Ada">
+    <label for="card">Card number</label>
+    <input id="card" name="card" aria-label="Card number" autocomplete="cc-number">
+    <button type="submit">Place order</button>
+  </form>
+</body>
+</html>

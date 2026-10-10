@@ -25,25 +25,55 @@ def vault_key_path() -> Path:
     return Path.home() / ".easyagent" / "vault.key"
 
 
+def _repair_newline_key(raw: bytes) -> bytes | None:
+    """Windows text mode turns each 0x0A into \\r\\n, so a 32-byte key comes back longer."""
+    if len(raw) < 33 or b"\r\n" not in raw:
+        return None
+    repaired = raw.replace(b"\r\n", b"\n")
+    if len(repaired) != 32:
+        return None
+    return repaired
+
+
+def _write_key_file(path: Path, key: bytes) -> None:
+    flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC | getattr(os, "O_BINARY", 0)
+    fd = os.open(path, flags, 0o600)
+    try:
+        os.write(fd, key)
+    finally:
+        os.close(fd)
+    try:
+        os.chmod(path, 0o600)
+    except OSError:
+        pass
+
+
+def _key_from_file(path: Path) -> bytes:
+    raw = path.read_bytes()
+    if len(raw) == 32:
+        return raw
+    repaired = _repair_newline_key(raw)
+    if repaired is None:
+        raise VaultError("The vault key could not be read.")
+    _write_key_file(path, repaired)
+    return repaired
+
+
 def _load_key() -> bytes:
     path = vault_key_path()
     if path.is_file() and not path.is_symlink():
-        raw = path.read_bytes()
-        if len(raw) == 32:
-            return raw
-        raise VaultError("The vault key could not be read.")
+        return _key_from_file(path)
     if path.exists():
         raise VaultError("The vault key could not be read.")
     path.parent.mkdir(parents=True, exist_ok=True)
     key = AESGCM.generate_key(bit_length=256)
-    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_BINARY", 0)
     try:
         fd = os.open(path, flags, 0o600)
     except FileExistsError:
-        raw = path.read_bytes()
-        if len(raw) != 32:
+        if path.is_symlink():
             raise VaultError("The vault key could not be read.") from None
-        return raw
+        return _key_from_file(path)
     try:
         os.write(fd, key)
     finally:

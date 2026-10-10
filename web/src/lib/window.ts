@@ -47,6 +47,8 @@ export function sameMessage(left: ChatMessage, right: ChatMessage): boolean {
     left.thought_seconds === right.thought_seconds &&
     left.check === right.check &&
     left.lesson === right.lesson &&
+    left.unverified === right.unverified &&
+    JSON.stringify(left.receipts || []) === JSON.stringify(right.receipts || []) &&
     left.speaker_name === right.speaker_name &&
     sameList(left.choices, right.choices) &&
     sameList(left.skills_saved, right.skills_saved) &&

@@ -113,6 +113,16 @@ export function unreadRefetchInterval(): number | false {
   return UNREAD_POLL_MS;
 }
 
+/** A windowed poll (?window=80) must not drop history the reader already loaded above it. */
+export function keepLoadedHistory(prev: unknown, incoming: unknown): unknown {
+  if (!prev || !incoming || typeof prev !== "object" || typeof incoming !== "object") return incoming;
+  const older = prev as Chat;
+  const next = incoming as Chat;
+  if (!older.messages?.length || !Array.isArray(next.messages) || older.id !== next.id) return incoming;
+  if ((older.window_start ?? 0) >= (next.window_start ?? 0)) return incoming;
+  return mergeChat(older, next);
+}
+
 export function mergeChat(prev: Chat | undefined, incoming: Chat): Chat {
   const incomingMessages = incoming.messages || [];
   const total = incoming.message_count ?? incomingMessages.length;

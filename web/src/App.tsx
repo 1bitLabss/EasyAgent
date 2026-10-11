@@ -8,7 +8,7 @@ import { Sidebar } from "@/components/Sidebar";
 import { Switcher } from "@/components/Switcher";
 import { desktopOs } from "@/lib/desktop";
 import { pickOpenBot } from "@/lib/open";
-import { unreadRefetchInterval } from "@/lib/window";
+import { useUnreadWatch } from "@/lib/livechat";
 import { installVisualViewport } from "@/lib/viewport";
 import {
   AboutScreen,
@@ -32,13 +32,7 @@ export function App() {
   const botId = useApp((state) => state.botId);
   const selectBot = useApp((state) => state.selectBot);
   const bots = useQuery({ queryKey: ["bots"], queryFn: () => api<Bot[]>("/api/bots") });
-  const unread = useQuery({
-    queryKey: ["unread"],
-    queryFn: () => api("/api/unread"),
-    refetchInterval: unreadRefetchInterval,
-    notifyOnChangeProps: [],
-  });
-  void unread;
+  useUnreadWatch();
 
   useLayoutEffect(() => {
     const ids = (bots.data || []).map((bot) => bot.id);

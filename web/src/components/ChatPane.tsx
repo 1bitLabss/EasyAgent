@@ -11,7 +11,7 @@ import { moodForReaction, pokeFace } from "@/lib/mood";
 import { describeRun, faceStateFor, runTone } from "@/lib/run";
 import { hideWhileSending, messageHasBubble, reactionWho } from "@/lib/transcript";
 import { cn } from "@/lib/utils";
-import { mergeChat, sameMessage, shareChat, type MessagePage } from "@/lib/window";
+import { keepLoadedHistory, mergeChat, sameMessage, shareChat, type MessagePage } from "@/lib/window";
 import { useApp } from "@/store";
 import { canResume, chatStillPolling, flightFor, retryMessage, sendMessage, settleIncoming, stopMessage } from "@/stream";
 import type { Bot, Chat, ChatMessage } from "@/types";
@@ -136,6 +136,48 @@ const MessageRow = memo(function MessageRow({
             ))}
           </div>
         ) : null}
+        {message.kind === "safety-upgrade" && botId ? (
+          <div className="mt-3">
+            <button
+              type="button"
+              className="rounded-full bg-white px-3 py-1 text-sm text-foreground"
+              data-testid="switch-balanced"
+              onClick={() => void api(`/api/bots/${botId}/safety`, { method: "POST", json: { mode: "balanced" } }).then(() => {
+                void queryClient.invalidateQueries({ queryKey: ["bots"] });
+              })}
+            >
+              Switch back to Balanced
+            </button>
+          </div>
+        ) : null}
+        {message.kind === "safety-git-note" && botId && message.git_repo ? (
+          <div className="mt-3">
+            <button
+              type="button"
+              className="rounded-full bg-white px-3 py-1 text-sm text-foreground"
+              data-testid="allow-repo"
+              onClick={() => void api(`/api/bots/${botId}/safety`, { method: "POST", json: { git_allow: message.git_repo } }).then(() => {
+                void queryClient.invalidateQueries({ queryKey: ["bots"] });
+              })}
+            >
+              Always allow this repo
+            </button>
+          </div>
+        ) : null}
+        {message.kind === "safety-offer" && botId ? (
+          <div className="mt-3">
+            <button
+              type="button"
+              className="rounded-full bg-white px-3 py-1 text-sm text-foreground"
+              data-testid="switch-strict"
+              onClick={() => void api(`/api/bots/${botId}/safety`, { method: "POST", json: { mode: "strict" } }).then(() => {
+                void queryClient.invalidateQueries({ queryKey: ["bots"] });
+              })}
+            >
+              Switch to Strict
+            </button>
+          </div>
+        ) : null}
       </div>
       ) : null}
       {message.check === "revised" ? <Quiet text="Revised after check" /> : null}
@@ -219,7 +261,7 @@ export function ChatPane() {
     refetchInterval: (query) => chatStillPolling(botId || "", chatId || "", query.state.data?.run?.status, query.state.data?.run?.id),
     structuralSharing: (prev, incoming) => {
       if (!incoming || typeof incoming !== "object") return incoming;
-      return shareChat(prev, settleIncoming(botId || "", chatId || "", incoming as Chat));
+      return shareChat(prev, keepLoadedHistory(prev, settleIncoming(botId || "", chatId || "", incoming as Chat)));
     },
   });
   const [now, setNow] = useState(() => Date.now());
@@ -288,11 +330,11 @@ export function ChatPane() {
     if (start <= 0) return;
     loadingOlder.current = true;
     stick.current = false;
-    const el = scroller.current;
-    if (el) anchor.current = { height: el.scrollHeight, top: el.scrollTop };
     try {
       const page = await api<MessagePage>(`/api/bots/${botId}/chats/${chatId}/messages?before=${start}&limit=80`);
       if (!page.messages.length || page.start >= start) return;
+      const el = scroller.current;
+      if (el) anchor.current = { height: el.scrollHeight, top: el.scrollTop };
       queryClient.setQueryData<Chat>(["chat", botId, chatId], (current) => {
         if (!current) return current;
         return {

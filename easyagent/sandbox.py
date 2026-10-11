@@ -36,8 +36,27 @@ def work_folders(store, bot_id: str | None) -> list[Path]:
     return [path for path, rights in grant_targets(store, bot_id) if rights == "(OI)(CI)M"]
 
 
+def fallback_refuse_reason(report: dict) -> str:
+    """Why a broken restricted-token fallback must not run the command unsandboxed.
+
+    SKIP on a service session is not this case. A FAIL on an interactive logon is.
+    """
+    for name, status, detail in report.get("rows") or []:
+        if status != "FAIL":
+            continue
+        if name not in {"restricted-whoami", "restricted-token"}:
+            continue
+        extra = f" ({detail})" if detail else ""
+        return f"The restricted-token fallback did not start{extra}. The command was not run."
+    return ""
+
+
 def shell_mode(store) -> dict:
-    """How the next shell runs. Off until consent. Unavailable keeps the file guards."""
+    """How the next shell runs. Off until consent. Unavailable keeps the file guards.
+
+    A restricted token that failed to start on an interactive session refuses the
+    command instead. That failure is not hidden behind the file guards.
+    """
     from easyagent.contain import consented
 
     if not consented():
@@ -54,6 +73,17 @@ def shell_mode(store) -> dict:
             "notice": "",
             "reason": report.get("reason") or "",
             "mechanism": mechanism,
+        }
+    blocked = fallback_refuse_reason(report)
+    if blocked:
+        return {
+            "contained": False,
+            "status": "unavailable",
+            "label": f"unavailable: {blocked}",
+            "notice": "",
+            "reason": blocked,
+            "mechanism": "none",
+            "refuse": True,
         }
     reason = report.get("reason") or "the self-test did not pass"
     notice = f"OS containment is unavailable: {reason}. This command used the file guards."
@@ -101,8 +131,9 @@ def popen_contained(store, bot_id: str | None, command: str, env: dict, cwd: str
     work = _contained_cwd(store, bot_id, cwd)
     if os.name == "nt":
         from easyagent.contain import popen_contained as win_popen
+        from easyagent.tools import _windows_powershell_argv
 
-        argv = ["powershell.exe", "-NoProfile", "-NonInteractive", "-Command", command]
+        argv = _windows_powershell_argv(command)
         return win_popen(
             argv,
             env=env,

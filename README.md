@@ -8,7 +8,7 @@ The pixel drawing is traced from [mascot-original.jpg](assets/mascot-original.jp
 
 EasyAgent is a free local agent harness for any OpenAI-compatible model. You run it on your own computer. It gives you multiple bots, real tools, markdown memory, and a goal, plan, build, and check loop. It does not include a model, an account, or a cloud copy of your chats.
 
-Version 0.3.12. [MIT license](LICENSE). Copyright Nathan / 1bitLabs.
+Version 0.3.14-dev. [MIT license](LICENSE). Copyright Nathan / 1bitLabs.
 
 I built this for myself, and I'm sharing it free. It is the harness I wanted on my own machine: a few bots, the model I already run, and the files on that computer.
 
@@ -210,7 +210,9 @@ The card names the bot, shows the exact command or path, names the tier and the 
 
 An approved delete on this computer goes to EasyAgent Trash. Settings can restore it. Before an approved overwrite, EasyAgent keeps a snapshot and Settings can restore that too. A delete on a remote computer is not moved to Trash.
 
-Careful is the default. Normal also allows replacing a file inside the workspace, and it still keeps a snapshot. Advanced asks you to type the bot's name.
+Strict is the default for a new bot and for a bot saved before this version, including a saved Careful that was never changed. A command runs on its own only when every program is on the safe list and any write stays in the workspace or temp. A bot-written dotfile or tool config waits the first time, and so does a hook or a command key in a git repo under the workspace, including after `cd`, `cd /d`, `env -C`, `make -C`, or `git -C`. A test or build command also waits when the bot changed a file under that directory. That card can allow it once, for this session, or always for that one tool in that workspace. Settings lists the always-allowed rules and can remove one. The older bot gets one note in its chat, with a button back to Balanced. A mode you picked stays, and the chat offers Strict once. Balanced keeps the previous rules. Normal also allows replacing a file inside the workspace, and it still keeps a snapshot. Advanced asks you to type the bot's name. Off-limits paths stay blocked in every mode.
+
+The classifier lowers risk. OS containment is what limits the damage if a command runs, and containment stays off until you turn it on.
 
 Text from a web page, a file, or a tool is marked untrusted. The bot is told that instructions inside those markers are data. A tool call that copies a command out of that text waits for you.
 

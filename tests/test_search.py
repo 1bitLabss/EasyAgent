@@ -123,6 +123,99 @@ def test_an_empty_news_search_fetches_the_cnn_story(monkeypatch):
     assert "https://www.cnn.com/2026/10/04/world/bridge-kyiv" in findings
 
 
+def test_a_202_challenge_falls_through_to_the_next_provider(monkeypatch):
+    import asyncio
+
+    import httpx
+
+    from easyagent.search import web_search
+
+    html = (
+        '<a class="result__a" href="https://example.com/harbor">Harbor lighthouse notes</a>'
+        '<a class="result__snippet">The harbor light still burns.</a>'
+    )
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.host == "api.duckduckgo.com":
+            return httpx.Response(202, text="bot challenge")
+        if request.url.host == "html.duckduckgo.com":
+            return httpx.Response(200, text=html)
+        return httpx.Response(500, text=request.url.host)
+
+    class Client(httpx.AsyncClient):
+        def __init__(self, *args, **kwargs):
+            kwargs["transport"] = httpx.MockTransport(handler)
+            super().__init__(*args, **kwargs)
+
+    monkeypatch.setattr("easyagent.search.httpx.AsyncClient", Client)
+    findings = asyncio.run(web_search("harbor lighthouse"))
+    assert "Harbor lighthouse notes" in findings
+
+
+def test_a_challenge_page_is_a_search_error(monkeypatch):
+    import asyncio
+
+    import httpx
+
+    from easyagent.search import _get_text, web_search
+
+    def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, text="Unfortunately, bots use DuckDuckGo too much.")
+
+    class Client(httpx.AsyncClient):
+        def __init__(self, *args, **kwargs):
+            kwargs["transport"] = httpx.MockTransport(handler)
+            super().__init__(*args, **kwargs)
+
+    monkeypatch.setattr("easyagent.search.httpx.AsyncClient", Client)
+    try:
+        asyncio.run(_get_text("https://api.duckduckgo.com/", {"q": "harbor"}))
+    except SearchError as exc:
+        assert str(exc) == "the search provider blocked this request; try again or configure a provider"
+    else:
+        raise AssertionError("a challenge page counted as a result")
+    try:
+        asyncio.run(web_search("harbor lighthouse"))
+    except SearchError as exc:
+        assert str(exc) == (
+            "DuckDuckGo and DuckDuckGo HTML: "
+            "the search provider blocked this request; try again or configure a provider"
+        )
+    else:
+        raise AssertionError("a blocked chain returned results")
+
+
+def test_empty_instant_answers_and_an_html_challenge_are_a_block(monkeypatch):
+    import asyncio
+
+    import httpx
+
+    from easyagent.search import web_search
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.host == "api.duckduckgo.com":
+            return httpx.Response(200, text='{"AbstractText":"","RelatedTopics":[]}')
+        if request.url.host == "html.duckduckgo.com":
+            return httpx.Response(202, text="bot challenge")
+        return httpx.Response(500, text=request.url.host)
+
+    class Client(httpx.AsyncClient):
+        def __init__(self, *args, **kwargs):
+            kwargs["transport"] = httpx.MockTransport(handler)
+            super().__init__(*args, **kwargs)
+
+    monkeypatch.setattr("easyagent.search.httpx.AsyncClient", Client)
+    try:
+        asyncio.run(web_search("harbor lighthouse"))
+    except SearchError as exc:
+        assert str(exc) == (
+            "DuckDuckGo HTML: "
+            "the search provider blocked this request; try again or configure a provider"
+        )
+    else:
+        raise AssertionError("an empty instant answer hid the html block")
+
+
 def test_news_with_no_story_says_the_search_found_nothing(monkeypatch):
     import asyncio
 

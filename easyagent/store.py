@@ -429,6 +429,19 @@ def read_json(path: Path):
             time.sleep(_REPLACE_DELAY)
 
 
+def untouched_default_mode(bot: dict) -> bool:
+    """True when the bot has no mode, or still has the old default Careful and nobody changed it."""
+    if "safety_mode" not in bot:
+        return True
+    if str(bot.get("safety_mode") or "") != "careful":
+        return False
+    if str(bot.get("safety_mode_origin") or "") == "user":
+        return False
+    if bot.get("safety_mode_changed_at"):
+        return False
+    return True
+
+
 class Store:
     def __init__(self, root: Path):
         self.root = _StorePath(root).resolve()
@@ -641,7 +654,14 @@ class Store:
             meta = path / "bot.json"
             if not meta.is_file():
                 continue
-            bots.append(read_json(meta))
+            bot = read_json(meta)
+            if untouched_default_mode(bot):
+                self._upgrade_to_strict(bot)
+                bot = read_json(meta)
+            elif self._should_offer_strict(bot):
+                self._offer_strict(bot)
+                bot = read_json(meta)
+            bots.append(bot)
         bots.sort(key=lambda bot: bot.get("created_at") or "")
         return bots
 
@@ -656,7 +676,111 @@ class Store:
         bot = read_json(path)
         if bot.get("id") != self._parse_id(bot_id):
             raise StoreError("Bot not found.", 404)
+        if untouched_default_mode(bot):
+            self._upgrade_to_strict(bot)
+            bot = read_json(path)
+        elif self._should_offer_strict(bot):
+            self._offer_strict(bot)
+            bot = read_json(path)
         return bot
+
+    def _upgrade_to_strict(self, bot: dict) -> None:
+        """An existing bot still on the old default moves to Strict, and the chat says so once."""
+        bot_id = str(bot.get("id") or "")
+        if not bot_id:
+            return
+        with self._lock:
+            path = self._bot_dir(bot_id) / "bot.json"
+            if not path.is_file():
+                return
+            current = read_json(path)
+            if not untouched_default_mode(current):
+                return
+            current["safety_mode"] = "strict"
+            current["safety_mode_origin"] = "default"
+            current["safety_upgrade_noted"] = True
+            atomic_write_json(path, current)
+        self._post_strict_notice(bot_id)
+
+    def _should_offer_strict(self, bot: dict) -> bool:
+        if bot.get("safety_strict_offer_noted") or bot.get("safety_upgrade_noted"):
+            return False
+        if untouched_default_mode(bot):
+            return False
+        mode = str(bot.get("safety_mode") or "")
+        return mode in {"careful", "balanced", "normal", "advanced"}
+
+    def _offer_strict(self, bot: dict) -> None:
+        """A mode the user picked stays. The chat offers Strict once."""
+        bot_id = str(bot.get("id") or "")
+        if not bot_id:
+            return
+        with self._lock:
+            path = self._bot_dir(bot_id) / "bot.json"
+            if not path.is_file():
+                return
+            current = read_json(path)
+            if not self._should_offer_strict(current):
+                return
+            current["safety_strict_offer_noted"] = True
+            atomic_write_json(path, current)
+            mode = str(current.get("safety_mode") or "")
+        self._post_strict_offer(bot_id, mode)
+
+    def _post_strict_notice(self, bot_id: str) -> None:
+        notice = (
+            "Safety for this bot is now Strict. A command runs on its own only when every program is on the safe list, "
+            "and a write stays in this workspace or temp. A process substitution, an environment prefix that is not a known inert name, "
+            "and a flag that can launch a program now wait. A script, a dotfile, or a tool config this bot changed waits the first time, and the card shows the diff. "
+            "Home login files, system folders, and drive roots stay blocked. Balanced is the previous behavior, where an ordinary command could still run. "
+            "This notice is shown once."
+        )
+        try:
+            chat = self.ongoing_chat(bot_id)
+        except Exception:
+            return
+        with self._lock:
+            chat = self.get_chat(bot_id, chat["id"])
+            messages = list(chat.get("messages") or [])
+            if any(isinstance(item, dict) and item.get("kind") == "safety-upgrade" for item in messages):
+                return
+            messages.append({
+                "id": new_id(),
+                "role": "assistant",
+                "kind": "safety-upgrade",
+                "content": notice,
+                "created_at": now_iso(),
+            })
+            chat["messages"] = messages
+            chat["updated_at"] = now_iso()
+            atomic_write_json(self._chat_path(chat["bot_id"], chat["id"]), chat)
+
+    def _post_strict_offer(self, bot_id: str, mode: str) -> None:
+        label = {"careful": "Balanced", "balanced": "Balanced", "normal": "Normal", "advanced": "Advanced"}.get(mode, mode)
+        notice = (
+            f"This bot is still on {label}, which was chosen for it. Strict is now the default. "
+            "A command runs on its own only when every program is on the safe list, and a script, a dotfile, or a tool config this bot changed waits the first time. "
+            "The mode you picked stays. This notice is shown once."
+        )
+        try:
+            chat = self.ongoing_chat(bot_id)
+        except Exception:
+            return
+        with self._lock:
+            chat = self.get_chat(bot_id, chat["id"])
+            messages = list(chat.get("messages") or [])
+            if any(isinstance(item, dict) and item.get("kind") == "safety-offer" for item in messages):
+                return
+            messages.append({
+                "id": new_id(),
+                "role": "assistant",
+                "kind": "safety-offer",
+                "content": notice,
+                "created_at": now_iso(),
+            })
+            chat["messages"] = messages
+            chat["updated_at"] = now_iso()
+            atomic_write_json(self._chat_path(chat["bot_id"], chat["id"]), chat)
 
     def add_bot(
         self,
@@ -676,6 +800,7 @@ class Store:
             "endpoint_id": endpoint_id,
             "model": model,
             "created_at": now_iso(),
+            "safety_mode": "strict",
         }
         if context_tokens is not None:
             record["context_tokens"] = context_tokens

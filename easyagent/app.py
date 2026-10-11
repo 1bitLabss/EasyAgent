@@ -147,6 +147,25 @@ def public_endpoint(endpoint: dict) -> dict:
     }
 
 
+def _public_exec_always(bot: dict) -> list[dict]:
+    """Saved Always-allow rules. The bot cannot add one; Settings can remove one."""
+    rows = []
+    for item in bot.get("safety_exec_always") or []:
+        if not isinstance(item, dict):
+            continue
+        grant_id = str(item.get("id") or "")
+        label = str(item.get("label") or "")
+        if not grant_id or not label:
+            continue
+        rows.append({
+            "id": grant_id,
+            "tool": str(item.get("tool") or ""),
+            "root": str(item.get("root") or ""),
+            "label": label,
+        })
+    return rows
+
+
 def public_bot(store: Store, bot: dict) -> dict:
     endpoint = None
     try:
@@ -170,8 +189,9 @@ def public_bot(store: Store, bot: dict) -> dict:
         "check_enabled": bot.get("check_enabled") is not False,
         "learn_paused": bot.get("learn_paused") is True,
         "learn_manual": bot.get("learn_manual") is True,
-        "safety_mode": bot.get("safety_mode") or "careful",
+        "safety_mode": bot.get("safety_mode") or "strict",
         "safety_unlocks": list(bot.get("safety_unlocks") or []),
+        "safety_exec_always": _public_exec_always(bot),
         "browser_headless": bool(bot.get("browser_headless")),
         "browser_allow": list(bot.get("browser_allow") or []),
         "browser_deny": list(bot.get("browser_deny") or []),
@@ -330,6 +350,8 @@ class SafetyIn(BaseModel):
     mode: str = "careful"
     confirm_name: str = ""
     unlocks: list[str] | None = None
+    git_allow: str = ""
+    exec_remove: str = ""
 
 
 class HonestyIn(BaseModel):
@@ -1020,7 +1042,16 @@ def create_app(data_dir: str | Path | None = None) -> FastAPI:
     def post_safety(bot_id: str, body: SafetyIn):
         from easyagent.safety import set_mode
         from easyagent.store import StoreError
+        from easyagent.strictshell import allow_git_repo
 
+        if (body.git_allow or "").strip():
+            bot = allow_git_repo(store, bot_id, body.git_allow)
+            return public_bot(store, bot)
+        if (body.exec_remove or "").strip():
+            from easyagent.strictshell import remove_exec_always
+
+            bot = remove_exec_always(store, bot_id, body.exec_remove)
+            return public_bot(store, bot)
         try:
             bot = set_mode(store, bot_id, body.mode, body.confirm_name, body.unlocks)
         except StoreError as exc:

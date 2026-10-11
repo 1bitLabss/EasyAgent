@@ -1834,7 +1834,12 @@ def test_strict_asks_for_bot_written_dotfiles_and_tool_configs(tmp_path, monkeyp
         assert place_class(Path.home() / ".bashrc", [workspace]) == "dotfile"
         hook = workspace / ".git" / "hooks" / "pre-commit"
         _track(store, bot, hook, "#!/bin/sh\nrm -rf ~\n")
-        for command in ("git commit", "git pull", "git status", "ls", "echo hi"):
+        for command in ("git commit", "git pull", "git status"):
+            verdict = classify(store, ToolRequest(kind="shell", command=command), bot["id"])
+            assert verdict.tier == "ask", (command, verdict.tier, verdict.rule)
+            assert verdict.rule in {"bot-changed", "git-hooks"}, (command, verdict.rule)
+            assert "rm -rf ~" in verdict.detail
+        for command in ("ls", "echo hi"):
             verdict = classify(store, ToolRequest(kind="shell", command=command), bot["id"])
             assert verdict.tier == "ask" and verdict.rule == "bot-changed", (command, verdict.tier, verdict.rule)
             assert "rm -rf ~" in verdict.detail
@@ -1842,13 +1847,14 @@ def test_strict_asks_for_bot_written_dotfiles_and_tool_configs(tmp_path, monkeyp
         assert classify(store, ToolRequest(kind="shell", command="git commit"), bot["id"]).tier == "allow"
         _track(store, bot, hook, "#!/bin/sh\nrm -rf ~\necho again\n")
         again = classify(store, ToolRequest(kind="shell", command="git commit"), bot["id"])
-        assert again.tier == "ask" and again.rule == "bot-changed"
+        assert again.tier == "ask" and again.rule in {"bot-changed", "git-hooks"}
 
         config = workspace / ".git" / "config"
         _track(store, bot, config, "[core]\n\tfsmonitor = ./watch.sh\n\thooksPath = .githooks\n")
         for command in ("git status", "git log", "git diff"):
             verdict = classify(store, ToolRequest(kind="shell", command=command), bot["id"])
-            assert verdict.tier == "ask" and verdict.rule == "bot-changed", (command, verdict.tier, verdict.rule)
+            assert verdict.tier == "ask", (command, verdict.tier, verdict.rule)
+            assert verdict.rule in {"bot-changed", "git-hooks"}, (command, verdict.rule)
             assert "fsmonitor" in verdict.detail
             assert "hooksPath" in verdict.detail
 
@@ -2051,7 +2057,8 @@ def test_strict_follows_cd_and_nested_git(tmp_path):
             "GIT_DIR=sub/.git git commit",
         ):
             verdict = classify(store, ToolRequest(kind="shell", command=command), bot["id"])
-            assert verdict.tier == "ask" and verdict.rule == "bot-changed", (command, verdict.tier, verdict.rule)
+            assert verdict.tier == "ask", (command, verdict.tier, verdict.rule)
+            assert verdict.rule in {"bot-changed", "git-hooks"}, (command, verdict.rule)
             assert "files-tool" in verdict.detail
 
         owned = workspace / "owned"
@@ -2074,7 +2081,7 @@ def test_strict_follows_cd_and_nested_git(tmp_path):
         _track(store, bot, owned / ".git" / "hooks" / "pre-commit", "#!/bin/sh\necho changed-by-bot\n")
         os.utime(owned / ".git", (1_600_000_000, 1_600_000_000))
         touched = classify(store, ToolRequest(kind="shell", command="git -C owned commit"), bot["id"])
-        assert touched.tier == "ask" and touched.rule == "bot-changed"
+        assert touched.tier == "ask" and touched.rule in {"bot-changed", "git-hooks"}
         assert "changed-by-bot" in touched.detail
         source = (package_dir().parent / "web" / "src" / "components" / "ChatPane.tsx").read_text(encoding="utf-8")
         assert "Always allow this repo" in source
@@ -2309,6 +2316,12 @@ def test_strict_exec_always_is_one_tool_and_one_workspace(tmp_path):
 
         proposal = getattr(turn_mod.current_slot(), "safety_script_proposal", None)
         assert proposal and proposal.get("session") is True and proposal.get("exec_always") is True
+        hint = proposal.get("hint") or ""
+        assert hint == (
+            f"Always allow: pytest will run in {workspace.name} for this bot without asking again, "
+            "even after the bot changes files there. Drive wipes and protected folders stay blocked. "
+            "You can remove this in Settings."
+        )
         assert not store.get_bot(bot["id"]).get("safety_exec_always")
 
         other = tmp_path / "elsewhere"
@@ -2422,11 +2435,91 @@ def test_strict_exec_always_is_one_tool_and_one_workspace(tmp_path):
         card = (package_dir().parent / "web" / "src" / "components" / "ApprovalCard.tsx").read_text(encoding="utf-8")
         settings = (package_dir().parent / "web" / "src" / "screens" / "Settings.tsx").read_text(encoding="utf-8")
         assert "Allow once" in card and "Allow for this session" in card and 'decide("exec-always")' in card
+        assert 'data-testid={card.proposal.exec_always ? "exec-always-hint"' in card
+        assert "card.proposal?.hint" in card
         assert 'data-testid="exec-always"' in settings
         assert 'data-testid="remove-exec-always"' in settings
         assert "exec_remove" in settings
     finally:
         clear_exec_session()
+        from easyagent import turn as turn_mod
+
+        turn_mod._slot.set(None)
+
+
+def test_strict_exec_asks_when_a_path_cannot_be_resolved(tmp_path, monkeypatch):
+    """An exec tool waits when a recorded path cannot be resolved. A reader does not."""
+    import easyagent.strictshell as strictshell
+
+    store, bot = _bot(tmp_path, mode="strict")
+    workspace = _bind_workspace(store, bot)
+    try:
+        foo = workspace / "src" / "foo.py"
+        _track(store, bot, foo, "print('bot-foo')\n")
+        assert classify(store, ToolRequest(kind="shell", command="pytest"), bot["id"]).tier == "ask"
+        real = strictshell._canonical_key
+
+        def fail_foo(path):
+            text = os.fspath(path).replace("\\", "/")
+            if text.endswith("foo.py"):
+                return None
+            return real(path)
+
+        monkeypatch.setattr(strictshell, "_canonical_key", fail_foo)
+        missed = classify(store, ToolRequest(kind="shell", command="pytest"), bot["id"])
+        assert missed.tier == "ask" and missed.rule == "bot-changed"
+        reader = classify(store, ToolRequest(kind="shell", command="ls"), bot["id"])
+        assert reader.tier == "allow", (reader.tier, reader.rule)
+    finally:
+        from easyagent import turn as turn_mod
+
+        turn_mod._slot.set(None)
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows path spellings")
+def test_strict_exec_asks_for_windows_path_spellings(tmp_path):
+    """Mixed case, a \\\\?\\ prefix, and either slash still name the same bot-written file."""
+    from easyagent.store import atomic_write_json
+    from easyagent.strictshell import _canonical_key
+
+    store, bot = _bot(tmp_path, mode="strict")
+    workspace = _bind_workspace(store, bot)
+    try:
+        path = workspace / "sub" / "conftest.py"
+        _track(store, bot, path, "# BOT-WIN\n")
+        saved = store.get_bot(bot["id"])
+        rec = next(iter(saved["safety_scripts"].values()))
+        resolved = str(path.resolve())
+        variants = [
+            resolved.swapcase(),
+            "\\\\?\\" + resolved.replace("/", "\\"),
+            resolved.replace("\\", "/"),
+            resolved.replace("/", "\\"),
+        ]
+        folded = {_canonical_key(variant) for variant in variants}
+        assert None not in folded
+        assert len(folded) == 1
+        for variant in variants:
+            current = store.get_bot(bot["id"])
+            current["safety_scripts"] = {variant: dict(rec)}
+            atomic_write_json(store._bot_dir(bot["id"]) / "bot.json", current)
+            verdict = classify(store, ToolRequest(kind="shell", command="pytest"), bot["id"])
+            assert verdict.tier == "ask" and verdict.rule == "bot-changed", (variant, verdict.tier, verdict.rule)
+            assert "BOT-WIN" in verdict.detail
+        make_path = workspace / "zone" / "Makefile"
+        _track(store, bot, make_path, "BOT-MAKE\n")
+        make_rec = None
+        for key, item in store.get_bot(bot["id"])["safety_scripts"].items():
+            if str(key).replace("\\", "/").lower().endswith("zone/makefile"):
+                make_rec = item
+        assert make_rec
+        current = store.get_bot(bot["id"])
+        current["safety_scripts"] = {str(make_path.resolve()).replace("\\", "/"): dict(make_rec)}
+        atomic_write_json(store._bot_dir(bot["id"]) / "bot.json", current)
+        made = classify(store, ToolRequest(kind="shell", command="make -C zone"), bot["id"])
+        assert made.tier == "ask" and made.rule == "bot-changed", (made.tier, made.rule)
+        assert "BOT-MAKE" in made.detail
+    finally:
         from easyagent import turn as turn_mod
 
         turn_mod._slot.set(None)

@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import difflib
 import hashlib
+import os
 import re
 import tempfile
 from pathlib import Path
@@ -1211,16 +1212,106 @@ def _records(store, bot_id: str) -> tuple[dict, dict]:
     return bot, raw if isinstance(raw, dict) else {}
 
 
+def _strip_extended(text: str) -> str:
+    """Drop a Windows \\\\?\\ prefix so the same file does not have two spellings."""
+    if text.startswith("\\\\?\\UNC\\"):
+        return "\\\\" + text[8:]
+    if text.startswith("\\\\?\\"):
+        return text[4:]
+    if text.startswith("//?/UNC/"):
+        return "//" + text[8:]
+    if text.startswith("//?/"):
+        return text[4:]
+    return text
+
+
+def _fold_text(text: str) -> str:
+    """Case, slashes, and the \\\\?\\ prefix, without resolving. Used only when resolve fails."""
+    folded = os.path.normcase(_strip_extended(text)).replace("\\", "/")
+    if folded != "/" and not (len(folded) == 3 and folded[1:3] == ":/"):
+        folded = folded.rstrip("/")
+    return folded
+
+
+def _canonical_key(path: Path | str) -> str | None:
+    """One key: resolved, case-normalized, no \\\\?\\ prefix, forward slashes.
+
+    None means the path could not be resolved. An exec tool then asks.
+    """
+    try:
+        stripped = _strip_extended(os.fspath(path))
+        resolved = Path(stripped).resolve()
+        folded = _fold_text(os.fspath(resolved))
+    except (OSError, ValueError, RuntimeError):
+        return None
+    return folded or None
+
+
+def _key_under(path_key: str, root_key: str) -> bool:
+    if not path_key or not root_key:
+        return False
+    if path_key == root_key:
+        return True
+    return path_key.startswith(root_key.rstrip("/") + "/")
+
+
+def _index_records(records: dict) -> tuple[dict[str, dict], bool]:
+    """Map each record onto its canonical key. The flag is set when one key cannot be resolved."""
+    index: dict[str, dict] = {}
+    failed = False
+    for key, rec in records.items():
+        if not isinstance(rec, dict):
+            continue
+        canon = _canonical_key(key)
+        if canon is None or rec.get("unresolved"):
+            failed = True
+            canon = canon or _fold_text(str(key))
+        if not canon:
+            continue
+        existing = index.get(canon)
+        if existing is None:
+            index[canon] = rec
+            continue
+        existing_open = str(existing.get("approved") or "") != str(existing.get("bot_sha") or "")
+        this_open = str(rec.get("approved") or "") != str(rec.get("bot_sha") or "")
+        if this_open and not existing_open:
+            index[canon] = rec
+    return index, failed
+
+
+def _rekey_record(records: dict, path: Path, rec: dict) -> None:
+    """Store the record under the canonical key and drop other spellings of that file."""
+    canon = _canonical_key(path)
+    stored = dict(rec)
+    if canon is None:
+        stored["unresolved"] = True
+        key = _fold_text(os.fspath(path))
+    else:
+        stored.pop("unresolved", None)
+        key = canon
+    for old in list(records):
+        if old == key:
+            continue
+        other = _canonical_key(old) or _fold_text(str(old))
+        if other == key:
+            records.pop(old, None)
+    records[key] = stored
+
+
 def note_bot_write(store, bot_id: str, path: Path, body: str) -> None:
     """Remember a file this bot is about to write, and the bytes from before that write."""
     from easyagent.store import atomic_write_json
 
     bot, records = _records(store, bot_id)
-    try:
-        key = str(path.resolve())
-    except OSError:
-        key = str(path)
-    prev = records.get(key) if isinstance(records.get(key), dict) else {}
+    key = _canonical_key(path) or _fold_text(os.fspath(path))
+    prev: dict = {}
+    for old, rec in list(records.items()):
+        if not isinstance(rec, dict):
+            continue
+        other = _canonical_key(old) or _fold_text(str(old))
+        if other == key:
+            prev = rec
+            break
     before = prev.get("before") if prev else None
     if before is None:
         try:
@@ -1228,11 +1319,11 @@ def note_bot_write(store, bot_id: str, path: Path, body: str) -> None:
         except OSError:
             before = ""
     payload = body if isinstance(body, str) else ""
-    records[key] = {
+    _rekey_record(records, path, {
         "bot_sha": hashlib.sha256(payload.encode("utf-8", errors="replace")).hexdigest(),
         "approved": str(prev.get("approved") or ""),
         "before": before if isinstance(before, str) else "",
-    }
+    })
     bot["safety_scripts"] = records
     atomic_write_json(store._bot_dir(bot["id"]) / "bot.json", bot)
 
@@ -1290,19 +1381,31 @@ def _home() -> Path:
     return Path.home()
 
 
+def _plain_resolved(path: Path) -> Path | None:
+    """The path in canonical form, or None when it cannot be resolved."""
+    key = _canonical_key(path)
+    if key is None:
+        return None
+    return Path(key)
+
+
 def _scope_dirs(cwd: Path, roots: list[Path]) -> list[Path]:
     """Directories from the command's cwd up through the outermost workspace root that contains it."""
     safety = _safety()
-    try:
-        current = cwd.resolve()
-    except OSError:
-        current = cwd
+    current = _plain_resolved(cwd)
+    if current is None:
+        try:
+            current = cwd.resolve()
+        except OSError:
+            current = cwd
     containing: list[Path] = []
     for root in roots:
-        try:
-            resolved = root.resolve()
-        except OSError:
-            resolved = root
+        resolved = _plain_resolved(root)
+        if resolved is None:
+            try:
+                resolved = root.resolve()
+            except OSError:
+                resolved = root
         if current == resolved or resolved in current.parents or safety._inside(current, [resolved]):
             containing.append(resolved)
     stop = min(containing, key=lambda path: len(path.parts)) if containing else current
@@ -1316,34 +1419,42 @@ def _scope_dirs(cwd: Path, roots: list[Path]) -> list[Path]:
     return chain
 
 
+def _relative_key(path_key: str, root_key: str) -> str | None:
+    """The path under root, or None when it is not under that directory."""
+    if not path_key or not root_key or not _key_under(path_key, root_key):
+        return None
+    if path_key == root_key:
+        return ""
+    return path_key[len(root_key.rstrip("/")) + 1 :]
+
+
 def _in_config_scope(path: Path, chain: list[Path], home: Path) -> bool:
     """A bot-written dotfile, a file inside a dot-directory, or a known tool config on the way up, or in $HOME."""
-    try:
-        resolved = path.resolve()
-    except OSError:
-        resolved = path
-    name = resolved.name
-    sensitive = _dot_piece(name) or _known_config(name) or any(_dot_piece(part) for part in resolved.parts)
+    raw = Path(_strip_extended(os.fspath(path)))
+    sensitive = _dot_piece(raw.name) or _known_config(raw.name) or any(_dot_piece(part) for part in raw.parts)
     if not sensitive:
         return False
-    try:
-        home_resolved = home.resolve()
-    except OSError:
-        home_resolved = home
-    if home_resolved in resolved.parents:
-        relative = resolved.relative_to(home_resolved)
-        if relative.parts and (_dot_piece(relative.parts[0]) or (len(relative.parts) == 1 and _known_config(relative.parts[0]))):
-            return True
+    canon = _canonical_key(path)
+    if canon is None:
+        return False
+    home_key = _canonical_key(home)
+    if home_key:
+        relative = _relative_key(canon, home_key)
+        if relative:
+            first = relative.split("/", 1)[0]
+            if _dot_piece(first) or ("/" not in relative and _known_config(first)):
+                return True
     for directory in chain:
-        try:
-            relative = resolved.relative_to(directory)
-        except ValueError:
+        dir_key = _canonical_key(directory)
+        if not dir_key:
             continue
-        if not relative.parts:
+        relative = _relative_key(canon, dir_key)
+        if not relative:
             continue
-        if len(relative.parts) == 1 and (_dot_piece(relative.parts[0]) or _known_config(relative.parts[0])):
+        first = relative.split("/", 1)[0]
+        if "/" not in relative and (_dot_piece(first) or _known_config(first)):
             return True
-        if _dot_piece(relative.parts[0]):
+        if _dot_piece(first):
             return True
     return False
 
@@ -1593,18 +1704,12 @@ _EXEC_SESSION: dict[str, list[dict]] = {}
 
 
 def _under(path: Path, root: Path) -> bool:
-    try:
-        path_r = path.resolve()
-        root_r = root.resolve()
-    except OSError:
-        path_r, root_r = path, root
-    if path_r == root_r:
-        return True
-    try:
-        path_r.relative_to(root_r)
-        return True
-    except ValueError:
+    """True only when both paths resolve and one is inside the other. A miss is not a cover."""
+    path_key = _canonical_key(path)
+    root_key = _canonical_key(root)
+    if path_key is None or root_key is None:
         return False
+    return _key_under(path_key, root_key)
 
 
 def _always_covers(bot: dict, command: str, cwd: Path, path: Path) -> bool:
@@ -1721,24 +1826,58 @@ def remove_exec_always(store, bot_id: str, grant_id: str) -> dict:
     return bot
 
 
+def _exec_command(sites: list[dict]) -> bool:
+    return any(_exec_id(site.get("text") or "") for site in sites)
+
+
+def _always_hint(tool: str, folder: str) -> str:
+    return (
+        f"Always allow: {tool} will run in {folder} for this bot without asking again, "
+        "even after the bot changes files there. Drive wipes and protected folders stay blocked. "
+        "You can remove this in Settings."
+    )
+
+
+def _grant_folder(sites: list[dict], tool: str, cwd: Path) -> str:
+    names: list[str] = []
+    for site in sites:
+        if _grant_tool(site.get("text") or "") != tool:
+            continue
+        directory = site.get("cwd") or cwd
+        name = Path(directory).name or str(directory)
+        if name not in names:
+            names.append(name)
+    if names:
+        return " and ".join(names)
+    return Path(cwd).name or str(cwd)
+
+
 def script_review(store, bot_id: str, command: str, cwd: Path, roots: list[Path]):
     """Ask when a script, dotfile, tool config, or file an exec tool can discover is still unapproved."""
     from easyagent import turn as turn_mod
 
-    for site in _sites(command, cwd):
+    sites = _sites(command, cwd)
+    exec_here = _exec_command(sites)
+    for site in sites:
         if site.get("dir_unknown"):
+            return _ask_rule(command, "bot-changed", "That command's directory could not be read. It waits for you.")
+        if exec_here and _exec_id(site.get("text") or "") and _canonical_key(site.get("cwd") or cwd) is None:
             return _ask_rule(command, "bot-changed", "That command's directory could not be read. It waits for you.")
     _bot, records = _records(store, bot_id)
     if not records:
         return None
+    index, failed = _index_records(records)
+    if failed and exec_here:
+        return _ask_rule(command, "bot-changed", "That command's directory could not be read. It waits for you.")
     pending: list[tuple[Path, str, str]] = []
     paths: list[str] = []
     for path in _review_paths(command, cwd, roots, records):
-        try:
-            key = str(path.resolve())
-        except OSError:
-            key = str(path)
-        rec = records.get(key)
+        key = _canonical_key(path)
+        if key is None:
+            if exec_here:
+                return _ask_rule(command, "bot-changed", "That command's directory could not be read. It waits for you.")
+            continue
+        rec = index.get(key)
         if not isinstance(rec, dict):
             continue
         current = _file_sha(path)
@@ -1758,22 +1897,24 @@ def script_review(store, bot_id: str, command: str, cwd: Path, roots: list[Path]
         return None
     diff = _change_summary(pending, cwd)
     detail = (command or "").strip() + "\n\nThis bot changed a file this command can run since the last approval.\n\n" + diff
-    sites = _sites(command, cwd)
     grant_tools: list[str] = []
     for site in sites:
         tool = _grant_tool(site.get("text") or "")
         if tool and tool not in grant_tools:
             grant_tools.append(tool)
-    session = any(_exec_id(site.get("text") or "") for site in sites)
+    session = exec_here
+    proposal = {
+        "kind": "script-diff",
+        "diff": diff,
+        "paths": paths,
+        "session": session,
+        "exec_always": len(grant_tools) == 1,
+    }
+    if len(grant_tools) == 1:
+        proposal["hint"] = _always_hint(grant_tools[0], _grant_folder(sites, grant_tools[0], cwd))
     slot = turn_mod.current_slot()
     if slot is not None:
-        slot.safety_script_proposal = {
-            "kind": "script-diff",
-            "diff": diff,
-            "paths": paths,
-            "session": session,
-            "exec_always": len(grant_tools) == 1,
-        }
+        slot.safety_script_proposal = proposal
     return _ask_rule(detail, "bot-changed", "This bot changed a file this command can run since you last approved it. It waits for you.")
 
 
@@ -2385,19 +2526,20 @@ def _reached_dirs(command: str, cwd: Path) -> list[Path]:
 
 
 def _records_under(records: dict, root: Path) -> list[Path]:
-    try:
-        anchor = root.resolve()
-    except OSError:
-        anchor = root
+    """Records whose canonical path is inside root. An unresolvable key is omitted here.
+
+    script_review asks for an exec tool when any record key cannot be resolved, so a
+    miss does not become an allow.
+    """
+    anchor = _canonical_key(root)
+    if anchor is None:
+        return []
     found: list[Path] = []
     for key in records:
-        path = Path(str(key))
-        try:
-            resolved = path.resolve()
-        except OSError:
-            resolved = path
-        if anchor == resolved or anchor in resolved.parents:
-            found.append(path)
+        canon = _canonical_key(key)
+        if canon is None or not _key_under(canon, anchor):
+            continue
+        found.append(Path(_strip_extended(str(key))))
     return found
 
 
@@ -2418,10 +2560,10 @@ def _inside_roots(path: Path, roots: list[Path]) -> bool:
 
 
 def _path_key_of(path: Path) -> str:
-    try:
-        return str(path.resolve())
-    except OSError:
-        return str(path)
+    key = _canonical_key(path)
+    if key:
+        return key
+    return _fold_text(os.fspath(path))
 
 
 def _repo_predates(git_dir: Path, bot: dict) -> bool:
@@ -2447,12 +2589,10 @@ def _repo_predates(git_dir: Path, bot: dict) -> bool:
 
 def _unapproved_git(records: dict, git_dir: Path) -> list[tuple[Path, dict]]:
     found: list[tuple[Path, dict]] = []
+    index, _failed = _index_records(records)
     for path in _records_under(records, git_dir):
-        try:
-            key = str(path.resolve())
-        except OSError:
-            key = str(path)
-        rec = records.get(key)
+        key = _canonical_key(path)
+        rec = index.get(key or "")
         if not isinstance(rec, dict):
             continue
         current = _file_sha(path)
@@ -2607,12 +2747,10 @@ def stamp_scripts(store, bot_id: str, command: str, cwd: Path, roots: list[Path]
     bot, records = _records(store, bot_id)
     changed = False
     if records:
+        index, _failed = _index_records(records)
         for path in _review_paths(command, cwd, roots, records):
-            try:
-                key = str(path.resolve())
-            except OSError:
-                key = str(path)
-            rec = records.get(key)
+            key = _canonical_key(path)
+            rec = index.get(key or "")
             if not isinstance(rec, dict) or not path.is_file():
                 continue
             current = _file_sha(path)
@@ -2623,7 +2761,7 @@ def stamp_scripts(store, bot_id: str, command: str, cwd: Path, roots: list[Path]
             rec["approved"] = current
             rec["bot_sha"] = current
             rec["before"] = text
-            records[key] = rec
+            _rekey_record(records, path, rec)
             changed = True
         if changed:
             bot["safety_scripts"] = records

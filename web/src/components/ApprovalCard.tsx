@@ -89,7 +89,7 @@ export function ApprovalCard({ botId, botName, active }: { botId: string; botNam
       <p className="text-xs font-medium uppercase tracking-wide text-muted">{botName}</p>
       <h2 className="mt-1 text-base font-semibold">{heading}</h2>
       <p className="mt-2 text-sm">{card.why}</p>
-      {card.proposal?.hint ? <p className="mt-2 text-sm">{card.proposal.hint}</p> : null}
+      {card.proposal?.hint ? <p className="mt-2 text-sm" data-testid={card.proposal.exec_always ? "exec-always-hint" : "approval-hint"}>{card.proposal.hint}</p> : null}
       {install ? (
         <dl className="mt-2 space-y-1 text-sm" data-testid="connector-review">
           <div><dt className="inline text-muted">Command </dt><dd className="inline">{command || "—"}</dd></div>

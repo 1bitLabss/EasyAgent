@@ -1,6 +1,7 @@
 """0.3.6 safety hardening. Each case is one the laptop already proved."""
 
 import asyncio
+import os
 from pathlib import Path
 
 import pytest
@@ -784,10 +785,11 @@ def test_relative_file_and_shell_paths_stay_in_the_bot_workspace(tmp_path, monke
         assert (workspace / "note.txt").is_file()
         assert not (decoy / "note.txt").exists()
         assert Path(turn_mod.tool_cwd()).resolve() == workspace.resolve()
-        heard = _run_shell(store, "pwd")
-        assert str(workspace.resolve()) in heard
         py = sys.executable
-        _run_shell(store, f"{py} -c \"import os; os.remove('note.txt')\"")
+        heard = _run_shell(store, f"\"{py}\" -c \"import os; print(os.getcwd())\"")
+        printed = Path(heard.strip().splitlines()[-1].strip().strip('"'))
+        assert os.path.normcase(str(printed.resolve())) == os.path.normcase(str(workspace.resolve()))
+        _run_shell(store, f"\"{py}\" -c \"import os; os.remove('note.txt')\"")
         assert not (workspace / "note.txt").exists()
         assert (decoy / "x").read_text(encoding="utf-8") == "outside"
         guarded = _file_request_path(store, ".", Path.cwd(), bot["id"])

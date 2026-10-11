@@ -2,8 +2,8 @@
 
 ## 0.3.13
 
-- A relative file path, including `.` and a path with a slash, and the shell working directory stay in this bot's workspace. They do not follow the process directory or the user profile.
-- On a Windows service session with no interactive desktop, the restricted-token rows of `selftest contain` are skipped. An interactive logon still runs that probe, and exit 0xC0000142 there is a failure. When that fallback cannot start, the command is not run outside the sandbox. The Windows CI job runs Python 3.11 and 3.12 without cancelling the other when one fails.
+- A relative file path, including `.` and a path with a slash, and the shell working directory stay in this bot's workspace. They do not follow the process directory or the user profile. 0.3.5 resolves even a bare name against the launch folder, and 0.3.12 still does that for `.` and for a path with a slash. Upgrade so those paths stay in the workspace.
+- On a Windows service session with no interactive desktop, the restricted-token rows of `selftest contain` are skipped. A GitHub-hosted runner reports an interactive window station, but a restricted token cannot open that desktop and the child exits STATUS_DLL_INIT_FAILED (0xC0000142), so those rows are inconclusive there too. A real interactive logon still runs that probe, and exit 0xC0000142 there is a failure. When that fallback cannot start, the command is not run outside the sandbox. The Windows CI job runs Python 3.11 and 3.12 without cancelling the other when one fails.
 - Covering, minimizing, or restoring the desktop window leaves a long chat where it was. Earlier messages you already loaded stay on screen, and a new reply still appears at the end.
 - Focusing the window refetches the open chat again. A turn sent from another tab or the phone shows up on the next unread check, and messages you already loaded stay on screen.
 - A DuckDuckGo HTTP 202 or bot-challenge page is a search error. The next provider in the chain is tried, and the message says the search provider blocked the request.

@@ -346,8 +346,35 @@ def _skip_restricted(rows, reason: str) -> None:
     rows.append(("restricted-mechanism", "SKIP", reason))
 
 
-def _desktop_is_interactive(*, session_id: int, session_name: str, station_name: str, visible: bool | None) -> bool:
-    """False only for a positive service-session signal. An unknown fact does not skip."""
+def _github_hosted_windows() -> bool:
+    """A GitHub-hosted Windows job. A self-hosted runner is not this case.
+
+    The hosted image reports WinSta0 as visible, so the session looks interactive.
+    A restricted token still cannot open that desktop, and the child exits
+    STATUS_DLL_INIT_FAILED (0xC0000142) before it runs.
+    """
+    if os.environ.get("GITHUB_ACTIONS") != "true":
+        return False
+    if (os.environ.get("RUNNER_ENVIRONMENT") or "").strip().casefold() == "self-hosted":
+        return False
+    system = (os.environ.get("RUNNER_OS") or "").strip().casefold()
+    return system in {"", "windows"}
+
+
+def _desktop_is_interactive(
+    *,
+    session_id: int,
+    session_name: str,
+    station_name: str,
+    visible: bool | None,
+    input_desktop: bool | None = None,
+    hosted_runner: bool = False,
+) -> bool:
+    """False only for a positive non-interactive signal. An unknown fact does not skip."""
+    if hosted_runner:
+        return False
+    if input_desktop is False:
+        return False
     if int(session_id) == 0:
         return False
     if (session_name or "").strip().casefold() == "services":
@@ -361,7 +388,13 @@ def _desktop_is_interactive(*, session_id: int, session_name: str, station_name:
 
 
 def _interactive_desktop() -> bool:
-    """True on an interactive logon. A service session has no desktop a restricted token can open."""
+    """True on an interactive logon. A service session has no desktop a restricted token can open.
+
+    A GitHub-hosted runner is not an interactive logon for this probe: the
+    restricted child dies in DLL init (0xC0000142). A laptop still runs it.
+    """
+    if _github_hosted_windows():
+        return False
     if os.name != "nt":
         return True
     try:
@@ -389,7 +422,32 @@ def _windows_desktop_facts() -> dict:
         "session_name": os.environ.get("SESSIONNAME") or "",
         "station_name": station_name,
         "visible": visible,
+        "input_desktop": _input_desktop_open(user32),
+        "hosted_runner": _github_hosted_windows(),
     }
+
+
+def _input_desktop_open(user32) -> bool | None:
+    """Whether this process can open the input desktop. None when the check itself failed.
+
+    A null handle is a positive signal: there is no desktop a restricted token can
+    open, and user32 then exits STATUS_DLL_INIT_FAILED (0xC0000142).
+    """
+    from ctypes import wintypes
+
+    try:
+        user32.OpenInputDesktop.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+        user32.OpenInputDesktop.restype = wintypes.HANDLE
+        user32.CloseDesktop.argtypes = [wintypes.HANDLE]
+        user32.CloseDesktop.restype = wintypes.BOOL
+        # DESKTOP_READOBJECTS. Opening the input desktop is the check, not a grant.
+        handle = user32.OpenInputDesktop(0, False, 0x0001)
+    except (AttributeError, OSError):
+        return None
+    if not handle:
+        return False
+    user32.CloseDesktop(handle)
+    return True
 
 
 def _window_station_facts(user32) -> tuple[str, bool | None]:
@@ -431,12 +489,21 @@ def _window_station_facts(user32) -> tuple[str, bool | None]:
 def _record_restricted(rows, data: Path, work: Path, token: str, secret_token: str, aces: list[dict]) -> None:
     """The fallback launch, run even when the AppContainer succeeded. Its ACEs are removed after.
 
-    A service session has no interactive desktop the restricted SIDs can open,
-    so those rows are SKIP. An interactive logon runs the probe. Exit
-    0xC0000142 there is a failure: the fallback sandbox is broken.
+    A service session, a closed input desktop, and a GitHub-hosted runner have
+    no desktop the restricted SIDs can open, so those rows are SKIP. The hosted
+    runner looks interactive, but the child exits STATUS_DLL_INIT_FAILED
+    (0xC0000142) before it runs. An interactive logon still runs the probe.
+    Exit 0xC0000142 there is a failure: the fallback sandbox is broken.
     """
     if not _interactive_desktop():
-        _skip_restricted(rows, "this session has no interactive desktop a restricted token can open")
+        if _github_hosted_windows():
+            reason = (
+                "this hosted runner has no interactive desktop a restricted token can open "
+                "(STATUS_DLL_INIT_FAILED, 0xC0000142). The restricted-token probe is inconclusive."
+            )
+        else:
+            reason = "this session has no interactive desktop a restricted token can open"
+        _skip_restricted(rows, reason)
         return
     from easyagent.contain import _create_restricted, _deny_sid, _deny_sid_on, _dll, _grant_sid, _protect_folder, _sid_text
 

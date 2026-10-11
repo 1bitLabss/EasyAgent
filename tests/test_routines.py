@@ -3,6 +3,8 @@
 import asyncio
 import json
 import threading
+
+import pytest
 from datetime import datetime, timezone, tzinfo
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -336,6 +338,11 @@ def test_windows_zone_maps_to_chicago_when_the_clock_has_no_iana_key(monkeypatch
 
 
 def test_linux_and_mac_use_tz_or_localtime(monkeypatch):
+    import sys
+
+    if sys.platform == "win32":
+        pytest.skip("Windows reads TimeZoneKeyName, not TZ. Central Standard Time maps to America/Chicago in the Windows test.")
+
     class Bare(tzinfo):
         def tzname(self, _dt):
             return "UTC"

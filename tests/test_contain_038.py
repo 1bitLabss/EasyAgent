@@ -1187,6 +1187,41 @@ def test_a_service_session_skips_the_restricted_rows(monkeypatch, tmp_path):
     assert selftest._desktop_is_interactive(**dict(good, station_name="Service-0x0-3e7$")) is False
     assert selftest._desktop_is_interactive(**dict(good, visible=False)) is False
     assert selftest._desktop_is_interactive(**dict(good, station_name="", visible=None)) is True
+    assert selftest._desktop_is_interactive(**dict(good, input_desktop=False)) is False
+    assert selftest._desktop_is_interactive(**dict(good, input_desktop=None)) is True
+    assert selftest._desktop_is_interactive(**dict(good, hosted_runner=True)) is False
+
+
+def test_a_hosted_runner_skips_the_restricted_rows_without_launching(monkeypatch, tmp_path):
+    """The hosted image looks interactive. The restricted child cannot open that desktop."""
+    from easyagent import contain, selftest
+
+    monkeypatch.delenv("GITHUB_ACTIONS", raising=False)
+    monkeypatch.delenv("RUNNER_ENVIRONMENT", raising=False)
+    monkeypatch.delenv("RUNNER_OS", raising=False)
+    assert selftest._github_hosted_windows() is False
+    monkeypatch.setenv("GITHUB_ACTIONS", "true")
+    monkeypatch.setenv("RUNNER_ENVIRONMENT", "self-hosted")
+    monkeypatch.setenv("RUNNER_OS", "Windows")
+    assert selftest._github_hosted_windows() is False
+    monkeypatch.setenv("RUNNER_ENVIRONMENT", "github-hosted")
+    assert selftest._github_hosted_windows() is True
+    called = []
+    monkeypatch.setattr(contain, "_deny_sid", lambda: called.append("deny"))
+    monkeypatch.setattr(contain, "_create_restricted", lambda *_args, **_kwargs: called.append("launch"))
+    rows = []
+    selftest._record_restricted(rows, tmp_path, tmp_path, "CANARY", "SECRET", [])
+    assert called == []
+    found = {name: (status, detail) for name, status, detail in rows}
+    for name in selftest._RESTRICTED_ROWS:
+        assert found[name][0] == "SKIP"
+        assert "interactive desktop" in found[name][1]
+        assert "0xC0000142" in found[name][1]
+        assert "inconclusive" in found[name][1]
+    assert selftest._windows_passed(
+        [(name, "PASS", "") for name in selftest._APP_ROWS] + rows + [("cleanup", "PASS", "")],
+        False,
+    )
 
 
 def test_an_interactive_dll_init_failure_fails_the_restricted_rows(monkeypatch, tmp_path):

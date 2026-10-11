@@ -207,14 +207,16 @@ def launch_stdio(command: list[str], env: dict, cwd: str, store=None, bot_id: st
         from easyagent.sandbox import shell_mode
 
         mode = shell_mode(store)
+    if mode.get("refuse"):
+        raise OSError(mode.get("reason") or "The restricted-token fallback did not start. The command was not run.")
     if mode.get("contained"):
         try:
             proc = _popen_contained(store, bot_id, command, env, cwd)
             return proc, notice
         except OSError as exc:
-            from easyagent.contain import AclError
+            from easyagent.contain import AclError, FallbackError
 
-            if isinstance(exc, AclError):
+            if isinstance(exc, (AclError, FallbackError)):
                 raise
             notice = f"OS containment is unavailable: {exc}. This connector used the file guards."
     proc = subprocess.Popen(

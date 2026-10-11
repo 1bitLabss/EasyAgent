@@ -461,18 +461,13 @@ def _fp(*parts: str) -> str:
 
 
 def _file_request_path(store: Store, raw: str, cwd: Path, bot_id: str | None) -> Path:
-    """A file named with no folder is this bot's workspace, not the install folder."""
-    text = (raw or ".").strip().strip('"')
-    if (
-        bot_id
-        and text not in {"", "."}
-        and "/" not in text
-        and "\\" not in text
-        and not text.startswith("~")
-    ):
+    """A relative file path is this bot's workspace, not the process working directory."""
+    text = (raw or ".").strip().strip('"') or "."
+    expanded = Path(_expand(text)).expanduser()
+    if bot_id and not expanded.is_absolute():
         from easyagent.workspace import bot_workspace
 
-        return bot_workspace(store, bot_id) / Path(text).name
+        return bot_workspace(store, bot_id) / expanded
     return _resolve(text, cwd)
 
 

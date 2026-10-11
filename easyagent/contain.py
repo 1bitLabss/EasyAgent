@@ -96,6 +96,10 @@ class AclError(OSError):
     """An ACE was not applied or could not be read back. Do not start a weaker process."""
 
 
+class FallbackError(OSError):
+    """The restricted-token fallback did not start. Do not run the command unsandboxed."""
+
+
 def _hresult_code(hr: int) -> int:
     return int(hr) & 0xFFFFFFFF
 
@@ -410,8 +414,15 @@ def _spawn_windows(argv, env, cwd, data_root: Path, allow: list[Path], name: str
     if name == "appcontainer":
         sid = _container_sid(PROFILE_NAME, create=False)
         return _create_appcontainer(kernel32, argv, env, cwd, sid, web, stdio)
-    sid = _deny_sid()
-    return _create_restricted(kernel32, argv, env, cwd, sid, stdio)
+    try:
+        sid = _deny_sid()
+        return _create_restricted(kernel32, argv, env, cwd, sid, stdio)
+    except FallbackError:
+        raise
+    except OSError as exc:
+        raise FallbackError(
+            f"The restricted-token fallback did not start ({exc}). The command was not run."
+        ) from exc
 
 
 def _container_sid(name: str = PROFILE_NAME, *, create: bool = False):

@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.3.13
+
+- A relative file path, including `.` and a path with a slash, and the shell working directory stay in this bot's workspace. They do not follow the process directory or the user profile.
+- On a Windows service session with no interactive desktop, the restricted-token rows of `selftest contain` are skipped. An interactive logon still runs that probe, and exit 0xC0000142 there is a failure. When that fallback cannot start, the command is not run outside the sandbox. The Windows CI job runs Python 3.11 and 3.12 without cancelling the other when one fails.
+- Covering, minimizing, or restoring the desktop window leaves a long chat where it was. Earlier messages you already loaded stay on screen, and a new reply still appears at the end.
+- Focusing the window refetches the open chat again. A turn sent from another tab or the phone shows up on the next unread check, and messages you already loaded stay on screen.
+- A DuckDuckGo HTTP 202 or bot-challenge page is a search error. The next provider in the chain is tried, and the message says the search provider blocked the request.
+- An empty Instant Answer does not hide a block or error from the next provider. The reply names the providers that blocked the request.
+- A routine preview on Linux and macOS uses the TZ environment variable or /etc/localtime, so the clock is not stuck on UTC.
+
 ## 0.3.12
 
 - A bot can run Python from a project's `.venv`. Only the `.venv` EasyAgent itself is installed in stays guarded. Launching that Python with arguments is not treated as a read of the venv. A saved chat or another bot's file used as the command is still blocked, including when the verb is glued to the path. The store path type works on Python 3.11.

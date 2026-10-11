@@ -426,7 +426,35 @@ def _local_tzinfo():
     return datetime.now().astimezone().tzinfo
 
 
+def _posix_zone_name() -> str:
+    """Linux and macOS: TZ, then the /etc/localtime zoneinfo link."""
+    raw = (os.environ.get("TZ") or "").strip()
+    if raw.startswith(":"):
+        raw = raw[1:].strip()
+    if raw and _zone_ok(raw):
+        return iana_zone(raw)
+    linked = _localtime_zone()
+    if linked and _zone_ok(linked):
+        return iana_zone(linked)
+    return ""
+
+
+def _localtime_zone() -> str:
+    try:
+        target = os.path.realpath("/etc/localtime")
+    except OSError:
+        return ""
+    marker = f"{os.sep}zoneinfo{os.sep}"
+    if marker not in target:
+        return ""
+    return target.split(marker, 1)[1].strip()
+
+
 def local_zone_name() -> str:
+    if sys.platform != "win32":
+        named = _posix_zone_name()
+        if named:
+            return named
     tz = _local_tzinfo()
     key = getattr(tz, "key", None) if tz is not None else None
     if isinstance(key, str) and key and _zone_ok(key):

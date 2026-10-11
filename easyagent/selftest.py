@@ -300,36 +300,144 @@ def _windows_probe(rows: list[tuple[str, str, str]]) -> list[tuple[str, str, str
         else:
             rows.append(("cleanup", "PASS", "profile removed"))
     passed = _windows_passed(rows, web)
-    rows.append((
-        "RESULT",
-        "PASS" if passed else "FAIL",
-        "AppContainer and the restricted token held" if passed else "the container did not hold",
-    ))
+    rows.append(("RESULT", "PASS" if passed else "FAIL", _windows_detail(passed, rows)))
     return rows
+
+
+_APP_ROWS = (
+    "whoami",
+    "control",
+    "data-read",
+    "secrets",
+    "workspace-write",
+)
+_RESTRICTED_ROWS = (
+    "restricted-whoami",
+    "restricted-control",
+    "restricted-data-read",
+    "restricted-secrets",
+    "restricted-workspace-write",
+)
+def _windows_detail(passed: bool, rows: list[tuple[str, str, str]]) -> str:
+    if not passed:
+        return "the container did not hold"
+    core = {name: status for name, status, _detail in rows}
+    if all(core.get(name) == "SKIP" for name in _RESTRICTED_ROWS):
+        return "AppContainer held; the restricted token was skipped because this session has no interactive desktop"
+    return "AppContainer and the restricted token held"
 
 
 def _windows_passed(rows: list[tuple[str, str, str]], web: bool) -> bool:
     core = {name: status for name, status, _detail in rows}
-    needed = [
-        "whoami",
-        "control",
-        "data-read",
-        "secrets",
-        "workspace-write",
-        "restricted-whoami",
-        "restricted-control",
-        "restricted-data-read",
-        "restricted-secrets",
-        "restricted-workspace-write",
-    ]
     del web
     if core.get("cleanup") == "FAIL":
         return False
-    return all(core.get(name) == "PASS" for name in needed)
+    if any(core.get(name) != "PASS" for name in _APP_ROWS):
+        return False
+    restricted = [core.get(name) for name in _RESTRICTED_ROWS]
+    if all(status == "PASS" for status in restricted):
+        return True
+    return all(status == "SKIP" for status in restricted)
+
+
+def _skip_restricted(rows, reason: str) -> None:
+    for name in _RESTRICTED_ROWS:
+        rows.append((name, "SKIP", reason))
+    rows.append(("restricted-mechanism", "SKIP", reason))
+
+
+def _desktop_is_interactive(*, session_id: int, session_name: str, station_name: str, visible: bool | None) -> bool:
+    """False only for a positive service-session signal. An unknown fact does not skip."""
+    if int(session_id) == 0:
+        return False
+    if (session_name or "").strip().casefold() == "services":
+        return False
+    name = (station_name or "").strip().casefold()
+    if name and name != "winsta0":
+        return False
+    if visible is False:
+        return False
+    return True
+
+
+def _interactive_desktop() -> bool:
+    """True on an interactive logon. A service session has no desktop a restricted token can open."""
+    if os.name != "nt":
+        return True
+    try:
+        return _desktop_is_interactive(**_windows_desktop_facts())
+    except OSError:
+        return True
+
+
+def _windows_desktop_facts() -> dict:
+    import ctypes
+    from ctypes import wintypes
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    user32 = ctypes.WinDLL("user32", use_last_error=True)
+    kernel32.GetCurrentProcessId.restype = wintypes.DWORD
+    kernel32.ProcessIdToSessionId.argtypes = [wintypes.DWORD, ctypes.POINTER(wintypes.DWORD)]
+    kernel32.ProcessIdToSessionId.restype = wintypes.BOOL
+    session = wintypes.DWORD()
+    session_id = -1
+    if kernel32.ProcessIdToSessionId(kernel32.GetCurrentProcessId(), ctypes.byref(session)):
+        session_id = int(session.value)
+    station_name, visible = _window_station_facts(user32)
+    return {
+        "session_id": session_id,
+        "session_name": os.environ.get("SESSIONNAME") or "",
+        "station_name": station_name,
+        "visible": visible,
+    }
+
+
+def _window_station_facts(user32) -> tuple[str, bool | None]:
+    import ctypes
+    from ctypes import wintypes
+
+    user32.GetProcessWindowStation.restype = wintypes.HANDLE
+    user32.GetUserObjectInformationW.argtypes = [
+        wintypes.HANDLE,
+        ctypes.c_int,
+        ctypes.c_void_p,
+        wintypes.DWORD,
+        ctypes.POINTER(wintypes.DWORD),
+    ]
+    user32.GetUserObjectInformationW.restype = wintypes.BOOL
+    station = user32.GetProcessWindowStation()
+    if not station:
+        return "", None
+
+    class _Flags(ctypes.Structure):
+        _fields_ = [
+            ("fInherit", wintypes.BOOL),
+            ("fReserved", wintypes.BOOL),
+            ("dwFlags", wintypes.DWORD),
+        ]
+
+    flags = _Flags()
+    visible = None
+    if user32.GetUserObjectInformationW(station, 1, ctypes.byref(flags), ctypes.sizeof(flags), None):
+        visible = bool(int(flags.dwFlags) & 0x1)
+    name = ""
+    buf = ctypes.create_unicode_buffer(128)
+    needed = wintypes.DWORD()
+    if user32.GetUserObjectInformationW(station, 2, buf, ctypes.sizeof(buf), ctypes.byref(needed)):
+        name = buf.value
+    return name, visible
 
 
 def _record_restricted(rows, data: Path, work: Path, token: str, secret_token: str, aces: list[dict]) -> None:
-    """The fallback launch, run even when the AppContainer succeeded. Its ACEs are removed after."""
+    """The fallback launch, run even when the AppContainer succeeded. Its ACEs are removed after.
+
+    A service session has no interactive desktop the restricted SIDs can open,
+    so those rows are SKIP. An interactive logon runs the probe. Exit
+    0xC0000142 there is a failure: the fallback sandbox is broken.
+    """
+    if not _interactive_desktop():
+        _skip_restricted(rows, "this session has no interactive desktop a restricted token can open")
+        return
     from easyagent.contain import _create_restricted, _deny_sid, _deny_sid_on, _dll, _grant_sid, _protect_folder, _sid_text
 
     sid = _deny_sid()

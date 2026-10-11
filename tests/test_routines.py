@@ -328,8 +328,35 @@ def test_windows_zone_maps_to_chicago_when_the_clock_has_no_iana_key(monkeypatch
         def tzname(self, _dt):
             return "Central Standard Time"
 
+    monkeypatch.delenv("TZ", raising=False)
+    monkeypatch.setattr("easyagent.schedule._localtime_zone", lambda: "")
     monkeypatch.setattr("easyagent.schedule._local_tzinfo", lambda: Bare())
     monkeypatch.setattr("easyagent.schedule.windows_zone_name", lambda: "Central Standard Time")
+    assert local_zone_name() == "America/Chicago"
+
+
+def test_linux_and_mac_use_tz_or_localtime(monkeypatch):
+    class Bare(tzinfo):
+        def tzname(self, _dt):
+            return "UTC"
+
+    monkeypatch.setattr("easyagent.schedule._local_tzinfo", lambda: Bare())
+    monkeypatch.setattr("easyagent.schedule.windows_zone_name", lambda: "")
+    monkeypatch.setenv("TZ", "America/Chicago")
+    assert local_zone_name() == "America/Chicago"
+    record = compile_routine({
+        "name": "Night check",
+        "prompt": "Check in.",
+        "daily": "2:06 AM",
+        "created_at": "2026-10-01T00:00:00+00:00",
+    })
+    assert record["timezone"] == "America/Chicago"
+    text = preview(record, datetime(2026, 10, 10, 1, 0, tzinfo=ZoneInfo("America/Chicago")))
+    assert "2:06 AM" in text
+    assert "CT" in text
+    assert "UTC" not in text
+    monkeypatch.delenv("TZ", raising=False)
+    monkeypatch.setattr("easyagent.schedule._localtime_zone", lambda: "America/Chicago")
     assert local_zone_name() == "America/Chicago"
 
 

@@ -143,7 +143,8 @@ export type Job = {
 
 export type Unread = {
   total: number;
-  chats: { bot_id: string; chat_id: string; unread: number }[];
+  chats: { bot_id: string; chat_id: string; unread: number; message_count?: number; updated_at?: string }[];
+  revisions?: { bot_id: string; chat_id: string; message_count: number; updated_at: string }[];
   rooms: { room_id: string; unread: number }[];
   busy?: string[];
 };

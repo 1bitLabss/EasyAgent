@@ -1105,10 +1105,10 @@ def _user_path(store: Store, raw: str) -> Path:
     caller = _caller_bot()
     path = _placed_file(text)
     if not path.is_absolute():
-        if caller and _bare_filename(text):
+        if caller:
             from easyagent.workspace import bot_workspace
 
-            path = bot_workspace(store, caller, create=True) / path.name
+            path = bot_workspace(store, caller, create=True) / path
         else:
             path = Path.cwd() / path
     try:
@@ -1464,6 +1464,8 @@ def _run_shell(store: Store, command: str) -> str:
     from easyagent.sandbox import popen_contained, shell_mode
 
     mode = shell_mode(store)
+    if mode.get("refuse"):
+        raise ToolError(mode.get("reason") or "The restricted-token fallback did not start. The command was not run.")
     notice = mode.get("notice") or ""
     env = scrub_env(store, turn_mod.tool_env())
     proc = None
@@ -1471,9 +1473,9 @@ def _run_shell(store: Store, command: str) -> str:
         try:
             proc = popen_contained(store, bot_id or None, text, env, turn_mod.tool_cwd())
         except OSError as exc:
-            from easyagent.contain import AclError
+            from easyagent.contain import AclError, FallbackError
 
-            if isinstance(exc, AclError):
+            if isinstance(exc, (AclError, FallbackError)):
                 raise ToolError(str(exc)) from exc
             notice = f"OS containment is unavailable: {exc}. This command used the file guards."
             proc = None

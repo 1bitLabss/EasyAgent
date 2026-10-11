@@ -749,3 +749,54 @@ def test_workspace_is_never_the_install_and_a_bare_file_lands_there(tmp_path, mo
         assert blocked.tier == "block"
     finally:
         turn_mod._slot.set(None)
+
+
+def test_relative_file_and_shell_paths_stay_in_the_bot_workspace(tmp_path, monkeypatch):
+    import sys
+
+    from easyagent import turn as turn_mod
+    from easyagent.safety import _file_request_path
+    from easyagent.tools import _run_files, _run_shell
+    from easyagent.workspace import assign_workspace, bot_workspace
+
+    store, bot = _bot(tmp_path)
+    workspace = bot_workspace(store, bot["id"], create=True)
+    (workspace / "x").write_text("inside", encoding="utf-8")
+    (workspace / "marker-inside").write_text("yes", encoding="utf-8")
+    task = tmp_path / "easyagent-task"
+    task.mkdir()
+    (task / "task.txt").write_text("task", encoding="utf-8")
+    decoy = tmp_path / "decoy"
+    decoy.mkdir()
+    (decoy / "x").write_text("outside", encoding="utf-8")
+    (decoy / ".openrouter-api-key").write_text("nope", encoding="utf-8")
+    monkeypatch.chdir(decoy)
+
+    async def run():
+        turn_mod.bind(store, "chat-cwd", bot["id"])
+        listing = _run_files(store, ToolRequest(kind="files", action="list", path="."))
+        assert "marker-inside" in listing
+        assert ".openrouter-api-key" not in listing
+        read = _run_files(store, ToolRequest(kind="files", action="read", path="x"))
+        assert read.strip() == "inside"
+        wrote = _run_files(store, ToolRequest(kind="files", action="write", path="note.txt", body="hello"))
+        assert "Wrote" in wrote
+        assert (workspace / "note.txt").is_file()
+        assert not (decoy / "note.txt").exists()
+        assert Path(turn_mod.tool_cwd()).resolve() == workspace.resolve()
+        heard = _run_shell(store, "pwd")
+        assert str(workspace.resolve()) in heard
+        py = sys.executable
+        _run_shell(store, f"{py} -c \"import os; os.remove('note.txt')\"")
+        assert not (workspace / "note.txt").exists()
+        assert (decoy / "x").read_text(encoding="utf-8") == "outside"
+        guarded = _file_request_path(store, ".", Path.cwd(), bot["id"])
+        assert guarded.resolve() == workspace.resolve()
+        assign_workspace(store, bot, str(task))
+        turn_mod.bind(store, "chat-cwd", bot["id"])
+        task_list = _run_files(store, ToolRequest(kind="files", action="list", path="."))
+        assert "task.txt" in task_list
+        assert ".openrouter-api-key" not in task_list
+        assert Path(turn_mod.tool_cwd()).resolve() == task.resolve()
+
+    asyncio.run(run())

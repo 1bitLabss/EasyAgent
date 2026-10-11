@@ -160,6 +160,13 @@ def bind(store, chat_id: str, bot_id: str = "") -> Slot:
     slot.chat_id = chat_id
     slot.store = store
     slot.cwd = str(Path.home())
+    if bot_id:
+        try:
+            from easyagent.workspace import bot_workspace
+
+            slot.cwd = str(bot_workspace(store, bot_id, create=True))
+        except Exception:
+            pass
     slot.env = os.environ.copy()
     slot.worker = asyncio.current_task()
     if stopped:

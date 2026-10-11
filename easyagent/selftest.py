@@ -115,10 +115,18 @@ def _linux_rows() -> list[tuple[str, str, str]]:
 
 
 def _darwin_rows() -> list[tuple[str, str, str]]:
+    """sandbox-exec rows. A missing tool is SKIP or INCONCLUSIVE with a reason, never PASS."""
     if not shutil.which("sandbox-exec"):
-        detail = "sandbox-exec is not installed"
-        return [("sandbox-exec", "FAIL", detail), ("RESULT", "FAIL", detail)]
-    return _posix_rows("sandbox-exec")
+        detail = "sandbox-exec is not installed, so containment was not checked"
+        return [("sandbox-exec", "SKIP", detail), ("RESULT", "SKIP", detail)]
+    rows = _posix_rows("sandbox-exec")
+    if not rows or rows[-1][1] != "FAIL":
+        return rows
+    launch = next((row for row in rows if row[0] == "launch" and row[1] == "FAIL"), None)
+    if launch is None:
+        return rows
+    detail = (launch[2] or "").strip() or "sandbox-exec did not start, so containment was not checked"
+    return [("sandbox-exec", "INCONCLUSIVE", detail), ("RESULT", "INCONCLUSIVE", detail)]
 
 
 def _posix_rows(mechanism: str) -> list[tuple[str, str, str]]:

@@ -82,6 +82,9 @@ _PIPE_SH = re.compile(
 _FORK = re.compile(r":\(\)\s*\{\s*:\s*\|\s*:\s*&\s*\}\s*;\s*:|while\s+true\s*;\s*do\s*:\s*;\s*done")
 _DISK = re.compile(
     r"(?i)\b(?:mkfs(?:\.[a-z0-9]+)?|diskpart|wipefs|sgdisk|parted|fdisk|blkdiscard)\b|"
+    r"\bdiskutil\b[^\n]*\b(?:erase\w*|partitiondisk|secureerase|zerodisk|reformat|resetfusion)\b|"
+    r"\bsrm\b|"
+    r"\btmutil\b[^\n]*\b(?:delete|deleteinprogress|deletelocalsnapshots|disable|removedestination|thinlocalsnapshots)\b|"
     r"\bdd\b[^\n]*\bof=/dev/|"
     r"\bformat(?:\.com)?(?:\s+/[A-Za-z0-9:]+)*\s+[a-z]:|"
     r"\b[a-z]+-(?:disk|partition|volume)\b|"

@@ -12,6 +12,7 @@ import difflib
 import hashlib
 import os
 import re
+import sys
 import tempfile
 from pathlib import Path
 
@@ -1226,8 +1227,13 @@ def _strip_extended(text: str) -> str:
 
 
 def _fold_text(text: str) -> str:
-    """Case, slashes, and the \\\\?\\ prefix, without resolving. Used only when resolve fails."""
+    """Case, slashes, and the \\\\?\\ prefix, without resolving. Used only when resolve fails.
+
+    Windows normcase folds case. APFS is case-insensitive too, and normcase does not fold it.
+    """
     folded = os.path.normcase(_strip_extended(text)).replace("\\", "/")
+    if sys.platform == "darwin":
+        folded = folded.casefold()
     if folded != "/" and not (len(folded) == 3 and folded[1:3] == ":/"):
         folded = folded.rstrip("/")
     return folded
@@ -1320,7 +1326,7 @@ def note_bot_write(store, bot_id: str, path: Path, body: str) -> None:
             before = ""
     payload = body if isinstance(body, str) else ""
     _rekey_record(records, path, {
-        "bot_sha": hashlib.sha256(payload.encode("utf-8", errors="replace")).hexdigest(),
+        "bot_sha": _logical_sha(payload.encode("utf-8", errors="replace")),
         "approved": str(prev.get("approved") or ""),
         "before": before if isinstance(before, str) else "",
     })
@@ -1328,9 +1334,14 @@ def note_bot_write(store, bot_id: str, path: Path, body: str) -> None:
     atomic_write_json(store._bot_dir(bot["id"]) / "bot.json", bot)
 
 
+def _logical_sha(data: bytes) -> str:
+    """Hash text the way the bot wrote it. A Windows text write uses \\r\\n for the same \\n."""
+    return hashlib.sha256(data.replace(b"\r\n", b"\n").replace(b"\r", b"\n")).hexdigest()
+
+
 def _file_sha(path: Path) -> str:
     try:
-        return hashlib.sha256(path.read_bytes()).hexdigest()
+        return _logical_sha(path.read_bytes())
     except OSError:
         return ""
 
@@ -1549,7 +1560,7 @@ def _exec_id(command: str) -> str | None:
     program, args, dynamic, uncertain, _unwrapped = safety._parse_invocation(line)
     if not program:
         return "unknown" if (dynamic or uncertain) else None
-    base = safety._base_name(program)
+    base = _program_id(program)
     if re.fullmatch(r"python\d+(?:\.\d+)?", base):
         base = "python"
     if base in _READ_ONLY or base in {"find", "fd"}:
@@ -1610,6 +1621,30 @@ _GRANT_PLAIN = _INTERPRETERS | {
     "pytest", "unittest", "make",
     "cmake", "ninja", "meson", "tox", "nox", "poetry", "gradle", "mvn", "just", "task",
 }
+
+
+def _known_tool(stem: str) -> bool:
+    """A program we name. A reader stem is not enough: ls.ps1 is a script, not ls."""
+    if not stem or stem in _READ_ONLY:
+        return False
+    if re.fullmatch(r"python\d+(?:\.\d+)?", stem):
+        return True
+    return stem in _INTERPRETERS | _SHELLS | _WRAPPERS | _GRANT_SCRIPTED | _GRANT_PLAIN | {
+        "git", "pytest", "py.test", "make", "gmake", "pip", "pip3",
+    }
+
+
+def _program_id(program: str) -> str:
+    """Tool name. Case, a full path, and .exe are already folded. .cmd, .bat, and .ps1 fold when the stem is that tool."""
+    base = _safety()._base_name(program)
+    for ext in (".cmd", ".bat", ".ps1"):
+        if not base.endswith(ext):
+            continue
+        stem = base[: -len(ext)]
+        if _known_tool(stem):
+            return stem
+        return base
+    return base
 
 
 def _grant_tool(command: str) -> str | None:
@@ -1852,12 +1887,37 @@ def _grant_folder(sites: list[dict], tool: str, cwd: Path) -> str:
     return Path(cwd).name or str(cwd)
 
 
+# How many times an exec command actually consulted bot-write records. Tests spy on this.
+_RECORDS_CHECK_COUNT = 0
+
+
+def records_check_count() -> int:
+    return _RECORDS_CHECK_COUNT
+
+
+def reset_records_checks() -> None:
+    global _RECORDS_CHECK_COUNT
+    _RECORDS_CHECK_COUNT = 0
+
+
+def _bump_records_check() -> None:
+    global _RECORDS_CHECK_COUNT
+    _RECORDS_CHECK_COUNT += 1
+
+
+def _unchecked(command: str):
+    """An exec tool whose records check could not run. It waits."""
+    return _ask_rule(command, "bot-changed", "That command's files could not be checked. It waits for you.")
+
+
 def script_review(store, bot_id: str, command: str, cwd: Path, roots: list[Path]):
     """Ask when a script, dotfile, tool config, or file an exec tool can discover is still unapproved."""
     from easyagent import turn as turn_mod
 
     sites = _sites(command, cwd)
     exec_here = _exec_command(sites)
+    if exec_here:
+        _bump_records_check()
     for site in sites:
         if site.get("dir_unknown"):
             return _ask_rule(command, "bot-changed", "That command's directory could not be read. It waits for you.")
@@ -1883,7 +1943,11 @@ def script_review(store, bot_id: str, command: str, cwd: Path, roots: list[Path]
         current = _file_sha(path)
         bot_sha = str(rec.get("bot_sha") or "")
         approved = str(rec.get("approved") or "")
-        if not current or current != bot_sha or current == approved:
+        if not current:
+            if exec_here and path.exists():
+                return _ask_rule(command, "bot-changed", "That command's files could not be checked. It waits for you.")
+            continue
+        if current != bot_sha or current == approved:
             continue
         if _session_covers(bot_id, command, cwd, path) or _always_covers(_bot, command, cwd, path):
             continue
@@ -2380,7 +2444,7 @@ def _piece_program(piece: str) -> tuple[str, str, bool]:
     program, args, dynamic, uncertain, _unwrapped = safety._parse_invocation(line)
     if not program:
         return "", args or "", True
-    return safety._base_name(program), args or "", bool(dynamic or uncertain)
+    return _program_id(program), args or "", bool(dynamic or uncertain)
 
 
 def _cd_targets(base: str, args: str, cwd: Path) -> tuple[list[Path], bool]:
@@ -2771,7 +2835,20 @@ def stamp_scripts(store, bot_id: str, command: str, cwd: Path, roots: list[Path]
         atomic_write_json(store._bot_dir(bot["id"]) / "bot.json", bot)
 
 
-def _with_script(verdict, command: str, cwd, roots):
+def _needs_records(command: str, cwd: Path) -> bool:
+    """A named exec tool. An arbitrary program such as rm is not one."""
+    try:
+        sites = _sites(command, cwd)
+    except OSError:
+        return True
+    for site in sites:
+        tool = _exec_id(site.get("text") or "")
+        if tool and tool != "unknown" and (tool in _GRANT_SCRIPTED or tool in _GRANT_PLAIN):
+            return True
+    return False
+
+
+def _with_script(verdict, command: str, cwd, roots, *, required: bool = False):
     if verdict.tier != _safety().ALLOW:
         return verdict
     from easyagent import turn as turn_mod
@@ -2779,12 +2856,26 @@ def _with_script(verdict, command: str, cwd, roots):
     slot = turn_mod.current_slot()
     store = getattr(slot, "store", None) if slot is not None else None
     bot_id = getattr(slot, "bot_id", None) if slot is not None else None
+    directory = Path(cwd)
     if store is None or not bot_id:
+        if required and _needs_records(command, directory):
+            _bump_records_check()
+            return _unchecked(command)
         return verdict
-    hit = script_review(store, bot_id, command, cwd, roots)
+    try:
+        hit = script_review(store, bot_id, command, directory, roots)
+    except OSError:
+        if required:
+            return _unchecked(command)
+        return verdict
     if hit is not None:
         return hit
-    hit = git_repo_review(store, bot_id, command, cwd, roots)
+    try:
+        hit = git_repo_review(store, bot_id, command, directory, roots)
+    except OSError:
+        if required and _needs_records(command, directory):
+            return _unchecked(command)
+        return verdict
     return hit if hit is not None else verdict
 
 
@@ -2836,7 +2927,7 @@ def apply(command: str, verdict, *, cwd: Path, roots: list[Path], created: set[s
             return reviewed
         return _ask(line)
     view = safety._command_view(line)
-    base = safety._base_name(program)
+    base = _program_id(program)
     if re.fullmatch(r"python\d+(?:\.\d+)?", base):
         base = "python"
     if view.inner and not view.dynamic and base in _WRAPPERS:
@@ -2844,7 +2935,7 @@ def apply(command: str, verdict, *, cwd: Path, roots: list[Path], created: set[s
         if dir_unknown:
             return _ask_rule(line, "bot-changed", "That command's directory could not be read. It waits for you.")
         for target in targets or [cwd]:
-            reviewed = _with_script(verdict, view.inner, target, roots)
+            reviewed = _with_script(verdict, view.inner, target, roots, required=True)
             if reviewed.tier != safety.ALLOW:
                 return reviewed
         return verdict
@@ -2857,7 +2948,7 @@ def apply(command: str, verdict, *, cwd: Path, roots: list[Path], created: set[s
     if decided is None:
         if flagged is not None:
             return flagged
-        return _with_script(verdict, line, cwd, roots)
+        return _with_script(verdict, line, cwd, roots, required=True)
     if decided.tier != safety.BLOCK and flagged is not None and flagged.tier == safety.BLOCK:
         return flagged
     if decided.tier == safety.ASK:

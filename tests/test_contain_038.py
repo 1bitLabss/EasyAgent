@@ -1691,3 +1691,31 @@ def test_rebuilding_the_dacl_drops_a_deny_and_the_label_comes_off(tmp_path, monk
     assert api.label == b"" or int.from_bytes(api.label[4:6], "little") == 0
     assert not contain._ace_in_blob(api.dacl, other_sid, contain.ACCESS_ALLOWED_ACE_TYPE, contain.FILE_GENERIC_READ, 0)
     contain._remove_low_label(folder)
+
+
+def test_missing_sandbox_exec_is_skip_with_a_reason(monkeypatch):
+    """A runner without sandbox-exec does not pass containment, and it says why."""
+    import shutil
+
+    from easyagent import selftest
+    from easyagent.selftest_all import check_containment
+
+    real = shutil.which
+
+    def hidden(name):
+        if name == "sandbox-exec":
+            return None
+        return real(name)
+
+    monkeypatch.setattr(selftest.shutil, "which", hidden)
+    rows = selftest._darwin_rows()
+    assert rows[-1][0] == "RESULT"
+    assert rows[-1][1] in {"SKIP", "INCONCLUSIVE"}
+    assert rows[-1][1] != "PASS"
+    assert rows[-1][2].strip()
+    assert all(status != "PASS" for _name, status, _detail in rows)
+    monkeypatch.setattr(selftest, "_platform_rows", lambda: rows)
+    status, detail = check_containment(False)
+    assert status in {"SKIP", "INCONCLUSIVE"}
+    assert status != "PASS"
+    assert detail.strip()

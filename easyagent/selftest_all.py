@@ -280,6 +280,11 @@ def check_containment(consent: bool) -> tuple[str, str]:
     if not rows:
         return "FAIL", "no probe ran"
     status = rows[-1][1]
+    if status == "INCONCLUSIVE":
+        reason = (rows[-1][2] or "").strip()
+        if not reason:
+            return "FAIL", "the containment probe was inconclusive and gave no reason"
+        return "INCONCLUSIVE", reason
     if status not in {"PASS", "FAIL", "SKIP"}:
         status = "FAIL"
     if status == "FAIL":

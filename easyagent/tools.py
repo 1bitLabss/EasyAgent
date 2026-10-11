@@ -1355,7 +1355,7 @@ def _write_path(path: Path, body: str) -> str:
         raise ToolError(f"The file was not written. {path} is too long to write.")
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(body, encoding="utf-8")
+        path.write_text(body, encoding="utf-8", newline="\n")
     except OSError as exc:
         raise ToolError(f"The file was not written. {path}: {exc}") from exc
     if not _file_is_present(path):

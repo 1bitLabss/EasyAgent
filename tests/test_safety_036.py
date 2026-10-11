@@ -2525,6 +2525,175 @@ def test_strict_exec_asks_for_windows_path_spellings(tmp_path):
         turn_mod._slot.set(None)
 
 
+def test_strict_exec_asks_when_windows_newlines_are_the_only_difference(tmp_path):
+    """A Windows text write stores \\r\\n. That is still the bot's file, so the exec tool waits."""
+    from easyagent.strictshell import note_bot_write
+
+    store, bot = _bot(tmp_path, mode="strict")
+    workspace = _bind_workspace(store, bot)
+    try:
+        foo = workspace / "src" / "foo.py"
+        body = "print('bot-foo')\n"
+        foo.parent.mkdir(parents=True, exist_ok=True)
+        note_bot_write(store, bot["id"], foo, body)
+        foo.write_bytes(body.replace("\n", "\r\n").encode("utf-8"))
+        verdict = classify(store, ToolRequest(kind="shell", command="pytest"), bot["id"])
+        assert verdict.tier == "ask" and verdict.rule == "bot-changed", (verdict.tier, verdict.rule)
+        assert "bot-foo" in verdict.detail
+    finally:
+        from easyagent import turn as turn_mod
+
+        turn_mod._slot.set(None)
+
+
+def test_strict_exec_records_check_runs_for_every_spelling(tmp_path):
+    """Every spelling of an exec tool consults bot-write records. A miss is an ask."""
+    from easyagent import turn as turn_mod
+    from easyagent.strictshell import records_check_count, reset_records_checks
+
+    store, bot = _bot(tmp_path, mode="strict")
+    workspace = _bind_workspace(store, bot)
+    try:
+        _track(store, bot, workspace / "sub" / "conftest.py", "# BOT-SPELL\n")
+        spellings = (
+            "pytest",
+            "Pytest",
+            "pytest.exe",
+            "Pytest.EXE",
+            "pytest.cmd",
+            "pytest.bat",
+            "pytest.ps1",
+            "& pytest",
+            ". pytest",
+            r"C:\Tools\pytest.exe",
+            r"& 'C:\Tools\pytest.exe'",
+            "python -m pytest",
+            "python.exe -m pytest",
+            "powershell -Command pytest",
+            "powershell.exe -Command pytest",
+            "cmd /c pytest",
+            "cmd.exe /c pytest",
+            "make",
+            "make.exe",
+            "make.cmd",
+            "MAKE.BAT",
+        )
+        reset_records_checks()
+        for command in spellings:
+            before = records_check_count()
+            verdict = classify(store, ToolRequest(kind="shell", command=command), bot["id"])
+            assert verdict.tier == "ask" and verdict.rule == "bot-changed", (command, verdict.tier, verdict.rule)
+            assert "BOT-SPELL" in verdict.detail, command
+            assert records_check_count() > before, (command, before, records_check_count())
+        turn_mod._slot.set(None)
+        missed = classify(store, ToolRequest(kind="shell", command="pytest"), bot["id"])
+        assert missed.tier == "ask" and missed.rule == "bot-changed", (missed.tier, missed.rule)
+        assert "could not be checked" in missed.why
+        reader = classify(store, ToolRequest(kind="shell", command="ls"), bot["id"])
+        assert reader.tier == "allow", (reader.tier, reader.rule)
+    finally:
+        reset_records_checks()
+        from easyagent import turn as turn_mod
+
+        turn_mod._slot.set(None)
+
+
+def test_private_tmp_record_matches_a_tmp_lookup(tmp_path):
+    """A /private/tmp record and a /tmp symlink are one canonical key, and so are /private/var and /var."""
+    from easyagent.store import atomic_write_json
+    from easyagent.strictshell import _canonical_key
+
+    volume = tmp_path / "vol"
+    private_tmp = volume / "private" / "tmp"
+    private_var = volume / "private" / "var"
+    private_tmp.mkdir(parents=True)
+    private_var.mkdir(parents=True)
+    (volume / "tmp").symlink_to(private_tmp, target_is_directory=True)
+    (volume / "var").symlink_to(private_var, target_is_directory=True)
+    assert _canonical_key(volume / "tmp" / "sub" / "conftest.py") == _canonical_key(private_tmp / "sub" / "conftest.py")
+    assert _canonical_key(volume / "var" / "folders" / "x") == _canonical_key(private_var / "folders" / "x")
+
+    store, bot = _bot(tmp_path / "data-root", mode="strict")
+    workspace = _bind_workspace(store, bot)
+    try:
+        path = private_tmp / "sub" / "conftest.py"
+        _track(store, bot, path, "# BOT-TMP\n")
+        saved = store.get_bot(bot["id"])
+        rec = next(iter(saved["safety_scripts"].values()))
+        private_key = str(path)
+        link_key = str(volume / "tmp" / "sub" / "conftest.py")
+        assert _canonical_key(private_key) == _canonical_key(link_key)
+        from easyagent import turn as turn_mod
+
+        turn_mod.current_slot().cwd = str(volume / "tmp")
+        for spelling in (private_key, link_key):
+            current = store.get_bot(bot["id"])
+            current["safety_scripts"] = {spelling: dict(rec)}
+            atomic_write_json(store._bot_dir(bot["id"]) / "bot.json", current)
+            verdict = classify(store, ToolRequest(kind="shell", command="pytest"), bot["id"])
+            assert verdict.tier == "ask" and verdict.rule == "bot-changed", (spelling, verdict.tier, verdict.rule)
+            assert "BOT-TMP" in verdict.detail
+        del workspace
+    finally:
+        from easyagent import turn as turn_mod
+
+        turn_mod._slot.set(None)
+
+
+def test_apfs_case_spellings_share_one_record_key(tmp_path, monkeypatch):
+    """APFS keeps one file for Sub/Foo.py and sub/foo.py. The record key folds the same way."""
+    import easyagent.strictshell as strictshell
+
+    monkeypatch.setattr(strictshell.sys, "platform", "darwin")
+    workspace = tmp_path / "Work"
+    upper = workspace / "Sub" / "Foo.py"
+    lower = workspace / "sub" / "foo.py"
+    assert strictshell._canonical_key(upper) == strictshell._canonical_key(lower)
+    assert strictshell._canonical_key(upper) == strictshell._canonical_key(upper).casefold()
+
+
+@pytest.mark.skipif(os.name != "posix" or os.uname().sysname != "Darwin", reason="APFS opens either case")
+def test_strict_exec_asks_for_apfs_case_spellings(tmp_path):
+    store, bot = _bot(tmp_path, mode="strict")
+    workspace = _bind_workspace(store, bot)
+    try:
+        path = workspace / "Sub" / "conftest.py"
+        _track(store, bot, path, "# BOT-APFS\n")
+        from easyagent.store import atomic_write_json
+
+        saved = store.get_bot(bot["id"])
+        rec = next(iter(saved["safety_scripts"].values()))
+        current = store.get_bot(bot["id"])
+        current["safety_scripts"] = {str(workspace / "sub" / "conftest.py"): dict(rec)}
+        atomic_write_json(store._bot_dir(bot["id"]) / "bot.json", current)
+        verdict = classify(store, ToolRequest(kind="shell", command="pytest"), bot["id"])
+        assert verdict.tier == "ask" and verdict.rule == "bot-changed", (verdict.tier, verdict.rule)
+        assert "BOT-APFS" in verdict.detail
+    finally:
+        from easyagent import turn as turn_mod
+
+        turn_mod._slot.set(None)
+
+
+def test_diskutil_srm_and_tmutil_wipes_are_blocked(tmp_path):
+    store, bot = _bot(tmp_path, mode="balanced")
+    blocked = (
+        "diskutil eraseDisk JHFS+ Empty /dev/disk0",
+        "diskutil partitionDisk disk0 GPT JHFS+ Empty 100%",
+        "srm -rf /",
+        "srm notes.txt",
+        "tmutil delete /Backups",
+        "tmutil deletelocalsnapshots /",
+        "tmutil disable",
+    )
+    for command in blocked:
+        verdict = classify(store, ToolRequest(kind="shell", command=command), bot["id"])
+        assert verdict.tier == "block" and verdict.rule == "disk-format", (command, verdict.tier, verdict.rule)
+    for command in ("diskutil list", "tmutil listbackups"):
+        verdict = classify(store, ToolRequest(kind="shell", command=command), bot["id"])
+        assert verdict.rule != "disk-format", (command, verdict.tier, verdict.rule)
+
+
 def test_untouched_careful_moves_and_a_chosen_mode_is_offered(tmp_path):
     from easyagent.safety import set_mode
     from easyagent.store import atomic_write_json

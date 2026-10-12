@@ -90,6 +90,7 @@ def unread_snapshot(store: Store) -> dict:
     """Counts only. Does not create unread.json and does not write a chat or room."""
     seen = load_seen(store.root)
     chats = []
+    revisions = []
     rooms = []
     busy: list[str] = []
     total = 0
@@ -101,6 +102,12 @@ def unread_snapshot(store: Store) -> dict:
                 busy.append(chat["bot_id"])
             key = _chat_key(chat["bot_id"], chat["id"])
             unread = count_after(chat.get("messages") or [], seen.get(key, 0), chat_reply)
+            revisions.append({
+                "bot_id": chat["bot_id"],
+                "chat_id": chat["id"],
+                "message_count": len(chat.get("messages") or []),
+                "updated_at": str(chat.get("updated_at") or ""),
+            })
             if unread:
                 chats.append({"bot_id": chat["bot_id"], "chat_id": chat["id"], "unread": unread})
                 total += unread
@@ -112,9 +119,10 @@ def unread_snapshot(store: Store) -> dict:
             rooms.append({"room_id": room["id"], "unread": unread})
             total += unread
     chats.sort(key=lambda item: (item["bot_id"], item["chat_id"]))
+    revisions.sort(key=lambda item: (item["bot_id"], item["chat_id"]))
     rooms.sort(key=lambda item: item["room_id"])
     busy.sort()
-    return {"total": total, "chats": chats, "rooms": rooms, "busy": busy}
+    return {"total": total, "chats": chats, "revisions": revisions, "rooms": rooms, "busy": busy}
 
 
 def mark_chat_read(store: Store, bot_id: str, chat_id: str, through: int | None = None) -> dict:

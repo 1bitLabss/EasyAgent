@@ -55,11 +55,16 @@ Before a replacement, EasyAgent copies the old file into a snapshot. Settings ca
 
 ## Settings, per bot
 
-Careful is the default.
+Strict is the default for a new bot, and for a bot saved before this version. A saved Careful that nobody changed moves to Strict too. That bot gets one note in its chat. The note has a button that switches that bot back to Balanced. A mode you picked stays, and the chat offers Strict once.
 
-- **Careful.** The rules above.
+- **Strict.** A shell command runs on its own only when every program is on the safe list, the arguments are safe, and any write stays in this bot's workspace or temp. Read-only tools and workspace build and test commands can run. Anything else waits. A process substitution is judged like a command substitution. An environment prefix is allowed only for a known inert name such as `LANG`, `LC_*`, `TZ`, `NO_COLOR`, `CI`, `DEBUG`, `NODE_ENV`, `PYTHONUNBUFFERED`, or `FORCE_COLOR`. A flag that can launch a program waits. A script, a dotfile, a file inside a dot-directory, or a known tool config this bot changed since the last approval waits once, and the card shows the diff; after a yes it runs until those files change again. A git repo this bot created with git init or git clone, and any other `.git` under the workspace, is read at run time. `cd`, `cd /d`, `Set-Location`, `Push-Location`, `env -C`, `make -C`, `git -C`, and the same cwd flags on npm, cargo, go, pip, and the other build tools count. A test runner, build tool, package script, or interpreter also waits for any bot-changed file under its directory. `ls`, `git status`, and the other readers do not. That card offers Allow once, Allow for this session, and Always allow. Always allow is saved for that bot and that tool in that workspace, such as pytest or npm test there, and a restart keeps it. It does not cover another tool, another workspace, or the rest of a chain. Settings lists those rules and can remove one. The bot cannot write the rule. Allow for this session lasts until a restart. A real hook or a command in `.git/config` waits, including on `git status`. A checkout that already existed before this bot's first turn, and that this bot did not change, runs, with one note. Sample hooks and a config with no command key do not wait. Home login files, system folders, and drive roots are blocked. The block list above still refuses.
+- **Balanced.** The rules in the sections above, which shipped in 0.3.13. An ordinary command that is not on the block list can run.
 - **Normal.** Replacing a file inside the workspace is allowed. A snapshot is still kept. Deletes, remote changes, and the rest still ask.
 - **Advanced.** You type the bot's name to turn it on. You can unlock a blocked rule by its name. That rule still asks. Nothing on the block list runs by itself.
+
+Off-limits paths stay blocked in every mode. The approval card can offer "Always allow this command for this bot". That saves an exact match for this bot only. A different command still waits. Always allow on a test or build card is a different save: one tool in one workspace. Block rules and off-limits paths still apply on top of it.
+
+The classifier lowers risk. It does not contain a command. OS containment (bubblewrap, Landlock, or the Windows restricted token) is what limits the damage when a command runs. Containment stays off until you turn it on. Until then the file guards and these rules are the check, and a command that is allowed does run on the machine.
 
 ## Untrusted text
 

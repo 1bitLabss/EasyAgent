@@ -1,11 +1,18 @@
 import { QueryClient } from "@tanstack/react-query";
 import { addressAfterPair, isIos, keepPairInAddress, manifestHref, readPairToken } from "@/lib/pair";
+import { keepLoadedHistory, shareChat } from "@/lib/window";
 import { useApp } from "@/store";
 
 export const queryClient = new QueryClient({
   defaultOptions: {
     queries: { retry: false, staleTime: 1500, refetchOnWindowFocus: true },
   },
+});
+
+// Every ["chat", bot, chat] observer fetches ?window=80. Focus refetch stays on so a
+// turn from another tab appears, and the merge keeps history loaded above that window.
+queryClient.setQueryDefaults(["chat"], {
+  structuralSharing: (prev: unknown, incoming: unknown) => shareChat(prev, keepLoadedHistory(prev, incoming)),
 });
 
 export class ApiError extends Error {

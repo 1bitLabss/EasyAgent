@@ -343,7 +343,7 @@ function HonestyBlock({ botId, onError }: { botId: string; onError: (text: strin
   );
 }
 
-function SafetyBlock({ botId, botName, mode, unlocks, onError }: { botId: string; botName: string; mode: string; unlocks: string[]; onError: (text: string) => void }) {
+function SafetyBlock({ botId, botName, mode, unlocks, always, onError }: { botId: string; botName: string; mode: string; unlocks: string[]; always: { id: string; label: string }[]; onError: (text: string) => void }) {
   const audit = useQuery({ queryKey: ["audit", botId], queryFn: () => api<{ at?: string; decision?: string; rule?: string; why?: string; detail?: string }[]>(`/api/bots/${botId}/audit`) });
   const trash = useQuery({ queryKey: ["trash", botId], queryFn: () => api<{ id: string; kind?: string; names?: string[]; name?: string; from?: string }[]>(`/api/bots/${botId}/trash`) });
   const [nextMode, setNextMode] = useState(mode);
@@ -367,10 +367,11 @@ function SafetyBlock({ botId, botName, mode, unlocks, onError }: { botId: string
 
   return (
     <Block id="safety" title="Safety">
-      <Note>Careful is the default. A risky action waits for you in the chat. Normal also allows replacing a file inside this bot's workspace. Advanced asks you to type the bot's name, and a blocked action stays blocked unless you unlock that one rule. An unlocked rule still waits for a yes. It is never automatic.</Note>
+      <Note>Strict is the default, including for a bot saved before this version. A saved Careful that was never changed moves to Strict with one note, and that note can switch it back to Balanced. A mode you picked stays, and the chat offers Strict once. A command runs on its own only when every program is on the safe list and any write stays in this bot's workspace or temp. Anything else waits. Balanced is the previous rules: known dangers wait or stop, and an ordinary command can run. Normal also allows replacing a file inside this bot's workspace. Advanced asks you to type the bot's name, and a blocked action stays blocked unless you unlock that one rule. An unlocked rule still waits for a yes. It is never automatic. Off-limits paths stay blocked in every mode. The classifier lowers risk. OS containment is what limits the damage if a command runs.</Note>
       <label className="block text-sm">Mode
-        <select className="mt-1 h-9 w-full rounded-md border border-border bg-card px-2" value={nextMode} onChange={(event) => setNextMode(event.target.value)}>
-          <option value="careful">Careful</option>
+        <select className="mt-1 h-9 w-full rounded-md border border-border bg-card px-2" value={nextMode === "careful" ? "balanced" : nextMode} onChange={(event) => setNextMode(event.target.value)}>
+          <option value="strict">Strict</option>
+          <option value="balanced">Balanced</option>
           <option value="normal">Normal</option>
           <option value="advanced">Advanced</option>
         </select>
@@ -386,6 +387,16 @@ function SafetyBlock({ botId, botName, mode, unlocks, onError }: { botId: string
         </>
       ) : null}
       <Button type="button" onClick={() => void save().catch((reason: Error) => onError(reason.message))}>Save safety</Button>
+      <h3 className="text-sm font-medium">Always allowed</h3>
+      <Note>Allow once runs that test or build this time. Allow for this session lasts until a restart. Always allow is saved for that one tool in that workspace, such as pytest or npm test there, and it stays after a restart.</Note>
+      <ul className="space-y-2 text-sm" data-testid="exec-always">
+        {always.length ? always.map((rule) => (
+          <li key={rule.id} className="flex items-center justify-between gap-2">
+            <span>{rule.label}</span>
+            <Button size="sm" variant="outline" data-testid="remove-exec-always" onClick={() => void api(`/api/bots/${botId}/safety`, { method: "POST", json: { exec_remove: rule.id } }).then(() => queryClient.invalidateQueries({ queryKey: ["bots"] })).catch((reason: Error) => onError(reason.message))}>Remove</Button>
+          </li>
+        )) : <li className="text-muted">No tool is always allowed yet.</li>}
+      </ul>
       <h3 className="text-sm font-medium">Audit log</h3>
       <ul className="space-y-2 text-sm" data-testid="audit-log">
         {(audit.data || []).length ? (audit.data || []).slice().reverse().map((row, index) => (
@@ -654,7 +665,7 @@ export function SettingsScreen() {
           <Button type="submit">Save</Button>
         </form>
 
-        <SafetyBlock botId={bot.id} botName={bot.name} mode={bot.safety_mode || "careful"} unlocks={bot.safety_unlocks || []} onError={setError} />
+        <SafetyBlock botId={bot.id} botName={bot.name} mode={bot.safety_mode || "strict"} unlocks={bot.safety_unlocks || []} always={bot.safety_exec_always || []} onError={setError} />
 
         <HonestyBlock botId={bot.id} onError={setError} />
 

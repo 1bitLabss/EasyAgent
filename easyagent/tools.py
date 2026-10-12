@@ -1105,10 +1105,10 @@ def _user_path(store: Store, raw: str) -> Path:
     caller = _caller_bot()
     path = _placed_file(text)
     if not path.is_absolute():
-        if caller and _bare_filename(text):
+        if caller:
             from easyagent.workspace import bot_workspace
 
-            path = bot_workspace(store, caller, create=True) / path.name
+            path = bot_workspace(store, caller, create=True) / path
         else:
             path = Path.cwd() / path
     try:
@@ -1355,7 +1355,7 @@ def _write_path(path: Path, body: str) -> str:
         raise ToolError(f"The file was not written. {path} is too long to write.")
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(body, encoding="utf-8")
+        path.write_text(body, encoding="utf-8", newline="\n")
     except OSError as exc:
         raise ToolError(f"The file was not written. {path}: {exc}") from exc
     if not _file_is_present(path):
@@ -1406,6 +1406,25 @@ def _run_files(store: Store, request: ToolRequest) -> str:
     raise ToolError("Say whether to list, read, or write that path.")
 
 
+def _powershell_command(command: str) -> str:
+    """The text passed to powershell.exe -Command.
+
+    A leading quoted string is an expression. `"C:\\Python\\python.exe" -c "..."`
+    is a parse error (Unexpected token '-c') until the call operator is in front.
+    The safety checks still see the original command. A command that already
+    starts with `&` is left alone.
+    """
+    text = (command or "").lstrip()
+    if not text or text.startswith("&") or text[0] not in {'"', "'"}:
+        return command
+    return "& " + text
+
+
+def _windows_powershell_argv(command: str) -> list[str]:
+    """argv for a bot shell command. The call operator is added only here."""
+    return ["powershell.exe", "-NoProfile", "-NonInteractive", "-Command", _powershell_command(command)]
+
+
 def _shell_invocation(command: str) -> tuple[object, bool]:
     """(argv, shell). On Windows the command is one PowerShell -Command argument.
 
@@ -1414,7 +1433,7 @@ def _shell_invocation(command: str) -> tuple[object, bool]:
     .ps1 or .py file the model writes and then runs.
     """
     if sys.platform == "win32":
-        return (["powershell.exe", "-NoProfile", "-NonInteractive", "-Command", command], False)
+        return (_windows_powershell_argv(command), False)
     return (command, True)
 
 
@@ -1424,13 +1443,16 @@ def _empty_command(code: int | None) -> str:
 
 
 def _run_shell(store: Store, command: str) -> str:
-    text = (command or "").strip()
-    if not text:
+    from easyagent.safety import shell_text_as_run
+
+    original = (command or "").strip()
+    if not original:
         raise ToolError("There was no command to run.")
-    if sys.platform == "win32" and _windows_rejects(text):
-        raise ToolError(f"{_windows_rejects(text)} is not a Windows command. It was not run.")
-    if len(text) > 4000:
+    if sys.platform == "win32" and _windows_rejects(original):
+        raise ToolError(f"{_windows_rejects(original)} is not a Windows command. It was not run.")
+    if len(original) > 4000:
         raise ToolError("That command is too long. It was not run.")
+    text = shell_text_as_run(original)
     slot = turn_mod.current_slot()
     bot_id = slot.bot_id if slot is not None else ""
     try:
@@ -1464,6 +1486,8 @@ def _run_shell(store: Store, command: str) -> str:
     from easyagent.sandbox import popen_contained, shell_mode
 
     mode = shell_mode(store)
+    if mode.get("refuse"):
+        raise ToolError(mode.get("reason") or "The restricted-token fallback did not start. The command was not run.")
     notice = mode.get("notice") or ""
     env = scrub_env(store, turn_mod.tool_env())
     proc = None
@@ -1471,9 +1495,9 @@ def _run_shell(store: Store, command: str) -> str:
         try:
             proc = popen_contained(store, bot_id or None, text, env, turn_mod.tool_cwd())
         except OSError as exc:
-            from easyagent.contain import AclError
+            from easyagent.contain import AclError, FallbackError
 
-            if isinstance(exc, AclError):
+            if isinstance(exc, (AclError, FallbackError)):
                 raise ToolError(str(exc)) from exc
             notice = f"OS containment is unavailable: {exc}. This command used the file guards."
             proc = None
@@ -1515,6 +1539,13 @@ def _run_shell(store: Store, command: str) -> str:
         output = (notice + "\n" + output).strip()
     if proc.returncode != 0:
         raise ToolError(output)
+    if bot_id:
+        from easyagent.strictshell import remember_git_command
+
+        try:
+            remember_git_command(store, bot_id, text, cwd_path)
+        except Exception:
+            pass
     return output
 
 

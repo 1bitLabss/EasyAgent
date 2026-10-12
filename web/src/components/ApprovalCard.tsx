@@ -24,6 +24,9 @@ export type Approval = {
     package?: string;
     version?: string;
     env?: string[];
+    diff?: string;
+    session?: boolean;
+    exec_always?: boolean;
   } | null;
 };
 
@@ -60,10 +63,11 @@ export function ApprovalCard({ botId, botName, active }: { botId: string; botNam
 
   if (!card) return null;
 
-  async function decide(decision: "approve" | "deny" | "always" | "done" | "takeover") {
+  async function decide(decision: "approve" | "deny" | "always" | "done" | "takeover" | "session" | "exec-always") {
     await api(`/api/bots/${botId}/approvals/${card.id}`, { method: "POST", json: { decision } });
     await queryClient.invalidateQueries({ queryKey: ["approvals", botId] });
     await queryClient.invalidateQueries({ queryKey: ["audit", botId] });
+    await queryClient.invalidateQueries({ queryKey: ["bots"] });
   }
 
   const takeover = card.proposal?.kind === "takeover";
@@ -85,7 +89,7 @@ export function ApprovalCard({ botId, botName, active }: { botId: string; botNam
       <p className="text-xs font-medium uppercase tracking-wide text-muted">{botName}</p>
       <h2 className="mt-1 text-base font-semibold">{heading}</h2>
       <p className="mt-2 text-sm">{card.why}</p>
-      {card.proposal?.hint ? <p className="mt-2 text-sm">{card.proposal.hint}</p> : null}
+      {card.proposal?.hint ? <p className="mt-2 text-sm" data-testid={card.proposal.exec_always ? "exec-always-hint" : "approval-hint"}>{card.proposal.hint}</p> : null}
       {install ? (
         <dl className="mt-2 space-y-1 text-sm" data-testid="connector-review">
           <div><dt className="inline text-muted">Command </dt><dd className="inline">{command || "—"}</dd></div>
@@ -95,6 +99,9 @@ export function ApprovalCard({ botId, botName, active }: { botId: string; botNam
         </dl>
       ) : null}
       {connector ? <p className="mt-2 text-sm">{card.proposal?.server} · {card.proposal?.tool}</p> : null}
+      {card.proposal?.kind === "script-diff" && card.proposal.diff ? (
+        <pre className="mt-2 max-h-48 overflow-auto whitespace-pre-wrap rounded-xl bg-black/5 p-3 text-xs dark:bg-white/10" data-testid="script-diff">{card.proposal.diff}</pre>
+      ) : null}
       <p className="mt-2 text-xs text-muted">Tier {card.tier}. Rule {card.rule}. If you do not answer, the card expires and that counts as a denial.</p>
       <pre className="mt-2 max-h-40 overflow-auto whitespace-pre-wrap rounded-xl bg-black/5 p-3 text-xs dark:bg-white/10">{card.detail}</pre>
       <div className="mt-3 flex flex-wrap gap-2">
@@ -104,12 +111,21 @@ export function ApprovalCard({ botId, botName, active }: { botId: string; botNam
             <Button type="button" onClick={() => void decide("done")}>Done</Button>
             <Button type="button" variant="danger" onClick={() => void decide("deny")}>Deny</Button>
           </>
+        ) : card.proposal?.kind === "script-diff" && card.proposal.session ? (
+          <>
+            <Button type="button" data-testid="approve-once" onClick={() => void decide("approve")}>Allow once</Button>
+            <Button type="button" variant="outline" data-testid="approve-session" onClick={() => void decide("session")}>Allow for this session</Button>
+            {card.proposal.exec_always ? (
+              <Button type="button" variant="outline" data-testid="approve-exec-always" onClick={() => void decide("exec-always")}>Always allow</Button>
+            ) : null}
+            <Button type="button" variant="danger" onClick={() => void decide("deny")}>Deny</Button>
+          </>
         ) : (
           <>
             <Button type="button" onClick={() => void decide("approve")}>Approve once</Button>
             <Button type="button" variant="danger" onClick={() => void decide("deny")}>Deny</Button>
             {card.offer_always ? (
-              <Button type="button" variant="outline" onClick={() => void decide("always")}>Always allow this exact command for this bot</Button>
+              <Button type="button" variant="outline" onClick={() => void decide("always")}>Always allow this command for this bot</Button>
             ) : null}
           </>
         )}

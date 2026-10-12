@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { approvalPollMs, mergeChat, shareChat, shareMessages, visibleRange, windowChat } from "./window";
+import { approvalPollMs, keepLoadedHistory, mergeChat, shareChat, shareMessages, visibleRange, windowChat } from "./window";
 import type { Chat, ChatMessage } from "@/types";
 
 function message(id: string, content: string): ChatMessage {
@@ -72,5 +72,31 @@ describe("mergeChat", () => {
     expect(merged.messages.map((item) => item.id)).toEqual(["old", "tail", "new"]);
     expect(merged.window_start).toBe(40);
     expect(merged.message_count).toBe(43);
+  });
+});
+
+describe("keepLoadedHistory", () => {
+  it("keeps rows already loaded above a windowed refetch and still appends a new reply", () => {
+    const loaded = Array.from({ length: 150 }, (_, index) => message(`m${index}`, `Question ${index}`));
+    const prev = chat(loaded, { window_start: 0, message_count: 150 });
+    const tail = loaded.slice(-80);
+    const refetch = keepLoadedHistory(prev, chat(tail, { window_start: 70, message_count: 150 })) as Chat;
+    expect(refetch.messages).toHaveLength(150);
+    expect(refetch.messages[0]?.content).toBe("Question 0");
+    expect(refetch.window_start).toBe(0);
+
+    const slid = tail.slice(1);
+    slid.push(message("m150", "Question 150"));
+    const appended = keepLoadedHistory(prev, chat(slid, { window_start: 71, message_count: 151 })) as Chat;
+    expect(appended.messages).toHaveLength(151);
+    expect(appended.messages[0]?.id).toBe("m0");
+    expect(appended.messages[150]?.id).toBe("m150");
+    expect(appended.window_start).toBe(0);
+
+    const sameWindow = chat(tail, { window_start: 70, message_count: 150 });
+    expect(keepLoadedHistory(sameWindow, chat(tail, { window_start: 70, message_count: 150 }))).toMatchObject({
+      window_start: 70,
+      message_count: 150,
+    });
   });
 });

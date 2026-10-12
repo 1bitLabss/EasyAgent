@@ -11,6 +11,7 @@ jobs:
   selftest:
     runs-on: windows-latest
     strategy:
+      fail-fast: false
       matrix:
         python-version: ["3.11", "3.12"]
     steps:
@@ -23,4 +24,5 @@ jobs:
       - name: Pytest
         run: python -m pytest -q
       - name: Containment self-test
+        if: always()
         run: python -m easyagent selftest contain

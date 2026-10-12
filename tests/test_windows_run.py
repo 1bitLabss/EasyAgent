@@ -217,6 +217,46 @@ def test_windows_shell_is_powershell_and_empty_output_names_the_exit_code(tmp_pa
     assert ".ps1" in prompt
 
 
+def test_a_quoted_program_is_invoked_with_powershells_call_operator(tmp_path, monkeypatch):
+    from easyagent.sandbox import popen_contained
+    from easyagent.tools import _powershell_command, _shell_invocation
+
+    store, _bot, _chat = _store(tmp_path)
+    quoted = r'"C:\Program Files\Python\python.exe" -c "print(1)"'
+    called = '& "C:\\Program Files\\Python\\python.exe" -c "print(1)"'
+    assert _powershell_command(quoted) == called
+    assert _powershell_command("& " + quoted) == "& " + quoted
+    assert _powershell_command('python -c "print(1)"') == 'python -c "print(1)"'
+    monkeypatch.setattr(sys, "platform", "win32")
+    argv, use_shell = _shell_invocation(quoted)
+    assert use_shell is False
+    assert argv[-1] == called
+    monkeypatch.setattr(sys, "platform", "linux")
+    argv, use_shell = _shell_invocation(quoted)
+    assert use_shell is True
+    assert argv == quoted
+
+    contained = {}
+
+    def fake_contained(argv, **kwargs):
+        contained["argv"] = list(argv)
+        return object()
+
+    monkeypatch.setattr("easyagent.sandbox._contained_cwd", lambda *_args, **_kwargs: str(tmp_path))
+    monkeypatch.setattr("easyagent.sandbox.work_folders", lambda *_args, **_kwargs: [])
+    monkeypatch.setattr("easyagent.sandbox.web_enabled", lambda: False)
+    monkeypatch.setattr("easyagent.sandbox.Path", lambda path: path)
+    monkeypatch.setattr("easyagent.contain.popen_contained", fake_contained)
+    real_name = os.name
+    os.name = "nt"
+    try:
+        popen_contained(store, None, quoted, {}, str(tmp_path))
+    finally:
+        os.name = real_name
+    assert contained["argv"][0] == "powershell.exe"
+    assert contained["argv"][-1] == called
+
+
 def test_linux_shell_still_says_when_a_command_prints_nothing(tmp_path, monkeypatch):
     store, _bot, _chat = _store(tmp_path)
 

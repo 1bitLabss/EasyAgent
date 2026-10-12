@@ -36,8 +36,27 @@ def work_folders(store, bot_id: str | None) -> list[Path]:
     return [path for path, rights in grant_targets(store, bot_id) if rights == "(OI)(CI)M"]
 
 
+def fallback_refuse_reason(report: dict) -> str:
+    """Why a broken restricted-token fallback must not run the command unsandboxed.
+
+    SKIP on a service session is not this case. A FAIL on an interactive logon is.
+    """
+    for name, status, detail in report.get("rows") or []:
+        if status != "FAIL":
+            continue
+        if name not in {"restricted-whoami", "restricted-token"}:
+            continue
+        extra = f" ({detail})" if detail else ""
+        return f"The restricted-token fallback did not start{extra}. The command was not run."
+    return ""
+
+
 def shell_mode(store) -> dict:
-    """How the next shell runs. Off until consent. Unavailable keeps the file guards."""
+    """How the next shell runs. Off until consent. Unavailable keeps the file guards.
+
+    A restricted token that failed to start on an interactive session refuses the
+    command instead. That failure is not hidden behind the file guards.
+    """
     from easyagent.contain import consented
 
     if not consented():
@@ -54,6 +73,17 @@ def shell_mode(store) -> dict:
             "notice": "",
             "reason": report.get("reason") or "",
             "mechanism": mechanism,
+        }
+    blocked = fallback_refuse_reason(report)
+    if blocked:
+        return {
+            "contained": False,
+            "status": "unavailable",
+            "label": f"unavailable: {blocked}",
+            "notice": "",
+            "reason": blocked,
+            "mechanism": "none",
+            "refuse": True,
         }
     reason = report.get("reason") or "the self-test did not pass"
     notice = f"OS containment is unavailable: {reason}. This command used the file guards."
@@ -101,8 +131,9 @@ def popen_contained(store, bot_id: str | None, command: str, env: dict, cwd: str
     work = _contained_cwd(store, bot_id, cwd)
     if os.name == "nt":
         from easyagent.contain import popen_contained as win_popen
+        from easyagent.tools import _windows_powershell_argv
 
-        argv = ["powershell.exe", "-NoProfile", "-NonInteractive", "-Command", command]
+        argv = _windows_powershell_argv(command)
         return win_popen(
             argv,
             env=env,
@@ -180,6 +211,31 @@ def bwrap_argv(store, bot_id: str | None, command: str, cwd: str, *, web: bool =
     return argv
 
 
+def _sandbox_paths(path: Path) -> list[str]:
+    """Spellings sandbox-exec may compare: the path as given, and the resolved path.
+
+    ``/var`` is ``/private/var`` on macOS. A subpath rule written with only one of
+    those does not match the path the process actually opens. APFS also keeps
+    ``/T/`` and ``/t/`` as one folder, and the filter is case-sensitive.
+    """
+    names: list[str] = []
+
+    def add(text: str) -> None:
+        if text and text not in names:
+            names.append(text)
+
+    raw = os.fspath(path)
+    add(raw)
+    try:
+        resolved = os.fspath(Path(raw).resolve())
+    except OSError:
+        resolved = ""
+    add(resolved)
+    if sys.platform == "darwin" and resolved:
+        add(resolved.casefold())
+    return names
+
+
 def macos_profile(writable: list[Path], data_root: Path | None = None) -> str:
     """sandbox-exec profile. The data directory, ~/.easyagent, Keychains, and securityd are denied."""
     from easyagent.secrets import keychain_paths
@@ -191,14 +247,17 @@ def macos_profile(writable: list[Path], data_root: Path | None = None) -> str:
         '(deny file-read* (regex #"(?i)(cookies|login data|logins\\.json|key4\\.db|Keychains|secrets\\.db)"))',
     ]
     if data_root is not None:
-        lines.append(f'(deny file-read* (subpath "{data_root}"))')
-        lines.append(f'(deny file-write* (subpath "{data_root}"))')
+        for name in _sandbox_paths(data_root):
+            lines.append(f'(deny file-read* (subpath "{name}"))')
+            lines.append(f'(deny file-write* (subpath "{name}"))')
     for path in writable:
-        lines.append(f'(allow file-read* (subpath "{path}"))')
-        lines.append(f'(allow file-write* (subpath "{path}"))')
+        for name in _sandbox_paths(path):
+            lines.append(f'(allow file-read* (subpath "{name}"))')
+            lines.append(f'(allow file-write* (subpath "{name}"))')
     for path in keychain_paths():
-        lines.append(f'(deny file-read* (subpath "{path}"))')
-        lines.append(f'(deny file-write* (subpath "{path}"))')
+        for name in _sandbox_paths(path):
+            lines.append(f'(deny file-read* (subpath "{name}"))')
+            lines.append(f'(deny file-write* (subpath "{name}"))')
     lines.append('(deny mach-lookup (global-name "com.apple.securityd"))')
     lines.append('(deny mach-lookup (global-name "com.apple.SecurityServer"))')
     return "\n".join(lines) + "\n"

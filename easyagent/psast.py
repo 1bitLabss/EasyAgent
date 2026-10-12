@@ -45,10 +45,16 @@ def data_decision(store, command: str, cwd: Path, bot_id: str | None) -> str:
     """
     from easyagent.safety import decode_shell, _unglue
 
+    from easyagent.safety import _BENIGN_EVAL
+
+    if _BENIGN_EVAL.match((command or "").strip()):
+        return "allow"
     text, status = decode_shell(command or "")
     if status == "ask":
         return "ask"
     text = _unglue(text)
+    if _BENIGN_EVAL.match(text.strip()):
+        return "allow"
     if not text.strip():
         return "allow"
     from easyagent.secrets import command_targets_secret, is_protected_secret
@@ -175,6 +181,27 @@ def _walk(
         if consumed:
             unresolved = unresolved or nested_unresolved
             continue
+        if head == "find":
+            skip = False
+            name_flags = {"-name", "-iname", "-path", "-ipath", "-regex", "-iregex", "-wholename", "-lname", "-ilname"}
+            for word in words[1:]:
+                if skip:
+                    skip = False
+                    continue
+                low = word.lower()
+                if low in name_flags:
+                    skip = True
+                    continue
+                if low.startswith("-"):
+                    continue
+                if not _pathish(word):
+                    continue
+                resolved = _resolve_many(word, location, env, store, bot_id)
+                if resolved is None:
+                    unresolved = True
+                else:
+                    found.extend(resolved)
+            continue
         args = words[1:]
         if head in _PATH_CMDS:
             for word in args:
@@ -277,6 +304,8 @@ def _program_name(word: str) -> str:
     name = (word or "").replace("\\", "/").rsplit("/", 1)[-1].lower()
     if name.endswith(".exe"):
         name = name[:-4]
+    if re.fullmatch(r"python\d+(?:\.\d+)?", name):
+        return "python"
     return name
 
 

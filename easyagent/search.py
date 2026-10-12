@@ -29,6 +29,7 @@ _DEFAULT_URL = "https://api.duckduckgo.com/"
 _DDG_HTML = "https://html.duckduckgo.com/html/"
 _CNN_LITE = "https://lite.cnn.com/"
 _NOTHING = "The search found nothing."
+_BLOCKED = "the search provider blocked this request; try again or configure a provider"
 
 
 class SearchError(Exception):
@@ -169,9 +170,19 @@ async def _get_text(url: str, params: dict | None = None, headers: dict | None =
         if headers:
             raise SearchError("Search failed: could not reach the search provider.") from exc
         raise SearchError(f"Search failed: could not reach the search provider. {exc}") from exc
+    if _provider_blocked(response.status_code, response.text):
+        raise SearchError(_BLOCKED)
     if response.status_code >= 400:
         raise SearchError(f"Search failed: {response.status_code} from the search provider.")
     return response.text
+
+
+def _provider_blocked(status: int, body: str) -> bool:
+    """DuckDuckGo answers a bot check with HTTP 202 or a challenge page, not an empty result."""
+    if status == 202:
+        return True
+    folded = (body or "").casefold()
+    return "bot challenge" in folded or "unfortunately, bots use" in folded
 
 
 async def _duckduckgo_items(query: str) -> list[dict]:
@@ -213,31 +224,30 @@ async def web_search(query: str, store: Store | None = None) -> str:
         items = await _tavily_items(text, store)
         return format_results(items) if items else _NOTHING
     items: list[dict] = []
-    errors: list[SearchError] = []
-    reached = False
+    errors: list[tuple[str, SearchError]] = []
     try:
         items = await _duckduckgo_items(text)
-        reached = True
     except SearchError as exc:
-        errors.append(exc)
+        errors.append(("DuckDuckGo", exc))
     if not items and _news_query(text):
         try:
             items = await _cnn_lite_items()
-            reached = True
         except SearchError as exc:
-            errors.append(exc)
+            errors.append(("CNN", exc))
     elif not items:
         try:
             items = await _duckduckgo_html_items(text)
-            reached = True
         except SearchError as exc:
-            errors.append(exc)
+            errors.append(("DuckDuckGo HTML", exc))
     if items:
         return format_results(items)
-    if reached:
-        return _NOTHING
+    # An empty Instant Answer is a reach, but it must not hide a later block.
+    blocked = [name for name, exc in errors if _BLOCKED in str(exc)]
+    if blocked:
+        who = blocked[0] if len(blocked) == 1 else ", ".join(blocked[:-1]) + " and " + blocked[-1]
+        raise SearchError(f"{who}: {_BLOCKED}")
     if errors:
-        raise errors[-1]
+        raise errors[-1][1]
     return _NOTHING
 
 
@@ -520,6 +530,8 @@ async def _post_json(url: str, payload: dict, headers: dict | None = None) -> di
         raise SearchError("Search failed: the search provider timed out.") from exc
     except httpx.HTTPError as exc:
         raise SearchError("Search failed: could not reach the search provider.") from exc
+    if _provider_blocked(response.status_code, response.text):
+        raise SearchError(_BLOCKED)
     if response.status_code >= 400:
         raise SearchError(f"Search failed: {response.status_code} from the search provider.")
     try:

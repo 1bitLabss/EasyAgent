@@ -3,6 +3,7 @@
 import asyncio
 import os
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -238,12 +239,29 @@ def test_macos_profile_denies_the_data_dir_and_keychain():
     assert str(work) in text
 
 
+def test_macos_profile_denies_the_resolved_data_dir(tmp_path):
+    """A /var symlink and its /private/var target are both denied, and the workspace is allowed."""
+    private = tmp_path / "private" / "var" / "data"
+    (private / "bots" / "ada" / "workspace").mkdir(parents=True)
+    (tmp_path / "var").symlink_to(tmp_path / "private" / "var", target_is_directory=True)
+    data = tmp_path / "var" / "data"
+    work = data / "bots" / "ada" / "workspace"
+    text = macos_profile([work], data)
+    assert str(data) in text
+    assert str(data.resolve()) in text
+    assert str(work) in text
+    assert str(work.resolve()) in text
+    assert text.index(f'(deny file-write* (subpath "{data.resolve()}"))') < text.index(
+        f'(allow file-write* (subpath "{work.resolve()}"))'
+    )
+
+
 def test_landlock_holds_when_bubblewrap_is_missing(monkeypatch):
     import shutil
 
     from easyagent.selftest import _linux_rows
 
-    if os.name == "nt":
+    if sys.platform != "linux":
         pytest.skip("Landlock is a Linux fallback")
     real = shutil.which
 
@@ -263,8 +281,8 @@ def test_the_real_container_hides_the_data_dir(tmp_path):
     from easyagent.selftest import _linux_rows
     from easyagent.tools import _run_shell
 
-    if os.name == "nt":
-        pytest.skip("the Windows probe runs on the laptop")
+    if sys.platform != "linux":
+        pytest.skip("bubblewrap and Landlock run on Linux")
     rows = _linux_rows()
     table = {name: (status, detail) for name, status, detail in rows}
     assert table["RESULT"][0] == "PASS", rows
@@ -1014,6 +1032,11 @@ def test_a_failed_deny_does_not_launch_the_restricted_child(monkeypatch, tmp_pat
 
     from easyagent import contain, selftest
 
+    monkeypatch.delenv("GITHUB_ACTIONS", raising=False)
+    monkeypatch.delenv("RUNNER_ENVIRONMENT", raising=False)
+    monkeypatch.delenv("RUNNER_OS", raising=False)
+    monkeypatch.setattr(selftest, "_github_hosted_windows", lambda: False)
+    monkeypatch.setattr(selftest, "_input_desktop_inconclusive", lambda: False)
     monkeypatch.setattr(contain, "_deny_sid", lambda: ctypes.c_void_p(1))
     monkeypatch.setattr(contain, "_sid_text", lambda _sid: "S-1-5-59923")
     monkeypatch.setattr(contain, "_protect_folder", lambda _folder: None)
@@ -1154,6 +1177,211 @@ def test_network_does_not_decide_containment():
     assert _windows_passed(warned, True) is True
     leaked = [(name, "FAIL" if name == "restricted-data-read" else status, detail) for name, status, detail in rows]
     assert _windows_passed(leaked, True) is False
+    skipped = [
+        (name, "SKIP" if name.startswith("restricted-") else status, detail)
+        for name, status, detail in rows
+    ]
+    assert _windows_passed(skipped, True) is True
+    half = [(name, "SKIP" if name == "restricted-whoami" else status, detail) for name, status, detail in rows]
+    assert _windows_passed(half, True) is False
+    broken = [(name, "FAIL" if name == "whoami" else status, detail) for name, status, detail in skipped]
+    assert _windows_passed(broken, True) is False
+
+
+def test_a_service_session_skips_the_restricted_rows(monkeypatch, tmp_path):
+    from easyagent import contain, selftest
+
+    monkeypatch.setattr(selftest, "_interactive_desktop", lambda: False)
+    called = []
+    monkeypatch.setattr(contain, "_deny_sid", lambda: called.append("deny"))
+    monkeypatch.setattr(contain, "_create_restricted", lambda *_args, **_kwargs: called.append("launch"))
+    rows = []
+    selftest._record_restricted(rows, tmp_path, tmp_path, "CANARY", "SECRET", [])
+    assert called == []
+    found = {name: (status, detail) for name, status, detail in rows}
+    for name in selftest._RESTRICTED_ROWS:
+        assert found[name][0] == "SKIP"
+        assert "interactive desktop" in found[name][1]
+    assert selftest._windows_detail(True, rows).startswith("AppContainer held")
+    good = dict(session_id=1, session_name="Console", station_name="WinSta0", visible=True)
+    assert selftest._desktop_is_interactive(**good) is True
+    assert selftest._desktop_is_interactive(**dict(good, session_id=0)) is False
+    assert selftest._desktop_is_interactive(**dict(good, session_name="Services")) is False
+    assert selftest._desktop_is_interactive(**dict(good, station_name="Service-0x0-3e7$")) is False
+    assert selftest._desktop_is_interactive(**dict(good, visible=False)) is False
+    assert selftest._desktop_is_interactive(**dict(good, station_name="", visible=None)) is True
+    assert selftest._desktop_is_interactive(**dict(good, input_desktop=False)) is True
+    assert selftest._desktop_is_interactive(**dict(good, input_desktop=None)) is True
+    assert selftest._desktop_is_interactive(**dict(good, hosted_runner=True)) is False
+
+
+def test_a_hosted_runner_skips_the_restricted_rows_without_launching(monkeypatch, tmp_path):
+    """The hosted image looks interactive. The restricted child cannot open that desktop."""
+    from easyagent import contain, selftest
+
+    monkeypatch.delenv("GITHUB_ACTIONS", raising=False)
+    monkeypatch.delenv("RUNNER_ENVIRONMENT", raising=False)
+    monkeypatch.delenv("RUNNER_OS", raising=False)
+    assert selftest._github_hosted_windows() is False
+    monkeypatch.setenv("GITHUB_ACTIONS", "true")
+    monkeypatch.setenv("RUNNER_ENVIRONMENT", "self-hosted")
+    monkeypatch.setenv("RUNNER_OS", "Windows")
+    assert selftest._github_hosted_windows() is False
+    monkeypatch.setenv("RUNNER_ENVIRONMENT", "github-hosted")
+    assert selftest._github_hosted_windows() is True
+    called = []
+    monkeypatch.setattr(contain, "_deny_sid", lambda: called.append("deny"))
+    monkeypatch.setattr(contain, "_create_restricted", lambda *_args, **_kwargs: called.append("launch"))
+    rows = []
+    selftest._record_restricted(rows, tmp_path, tmp_path, "CANARY", "SECRET", [])
+    assert called == []
+    found = {name: (status, detail) for name, status, detail in rows}
+    for name in selftest._RESTRICTED_ROWS:
+        assert found[name][0] == "SKIP"
+        assert "interactive desktop" in found[name][1]
+        assert "0xC0000142" in found[name][1]
+        assert found[name][0] != "INCONCLUSIVE"
+    assert selftest._windows_passed(
+        [(name, "PASS", "") for name in selftest._APP_ROWS] + rows + [("cleanup", "PASS", "")],
+        False,
+    )
+
+
+def test_a_closed_input_desktop_is_inconclusive_and_does_not_pass(monkeypatch, tmp_path):
+    from easyagent import contain, selftest
+
+    monkeypatch.setattr(selftest, "_interactive_desktop", lambda: True)
+    monkeypatch.setattr(selftest, "_input_desktop_inconclusive", lambda: True)
+    monkeypatch.delenv("GITHUB_ACTIONS", raising=False)
+    called = []
+    monkeypatch.setattr(contain, "_deny_sid", lambda: called.append("deny"))
+    monkeypatch.setattr(contain, "_create_restricted", lambda *_args, **_kwargs: called.append("launch"))
+    rows = []
+    selftest._record_restricted(rows, tmp_path, tmp_path, "CANARY", "SECRET", [])
+    assert called == []
+    found = {name: (status, detail) for name, status, detail in rows}
+    for name in selftest._RESTRICTED_ROWS:
+        assert found[name][0] == "INCONCLUSIVE"
+        assert "OpenInputDesktop" in found[name][1]
+        assert found[name][0] != "SKIP"
+    app = [(name, "PASS", "") for name in selftest._APP_ROWS]
+    assert selftest._windows_passed(app + rows + [("cleanup", "PASS", "")], False) is False
+
+
+def test_an_interactive_dll_init_failure_fails_the_restricted_rows(monkeypatch, tmp_path):
+    import ctypes
+
+    from easyagent import contain, selftest
+
+    monkeypatch.setattr(selftest, "_interactive_desktop", lambda: True)
+    monkeypatch.setattr(selftest, "_input_desktop_inconclusive", lambda: False)
+    monkeypatch.setattr(contain, "_deny_sid", lambda: ctypes.c_void_p(1))
+    monkeypatch.setattr(contain, "_sid_text", lambda _sid: "S-1-5-59923")
+    monkeypatch.setattr(contain, "_protect_folder", lambda _folder: None)
+    monkeypatch.setattr(contain, "_grant_sid", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(contain, "_deny_sid_on", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(contain, "_dll", lambda _name: object())
+
+    def make_launch(code, launches):
+        class Proc:
+            def communicate(self, timeout=None):
+                self.returncode = code
+                return "", ""
+
+        def launch(*_args, **_kwargs):
+            launches.append(code)
+            return Proc()
+
+        return launch
+
+    data = tmp_path / "data"
+    work = data / "workspace"
+    data.mkdir()
+    work.mkdir()
+    launches = []
+    monkeypatch.setattr(contain, "_create_restricted", make_launch(0xC0000142, launches))
+    rows = []
+    selftest._record_restricted(rows, data, work, "CANARY", "SECRET", [])
+    found = {name: (status, detail) for name, status, detail in rows}
+    assert launches[0] == 0xC0000142
+    assert found["restricted-whoami"][0] == "FAIL"
+    assert "0xC0000142" in found["restricted-whoami"][1]
+    assert found["restricted-whoami"][0] not in {"SKIP", "INCONCLUSIVE"}
+    app = [(name, "PASS", "") for name in selftest._APP_ROWS]
+    assert selftest._windows_passed(app + rows + [("cleanup", "PASS", "")], False) is False
+    failed_launches = []
+    monkeypatch.setattr(contain, "_create_restricted", make_launch(1, failed_launches))
+    failed = []
+    selftest._record_restricted(failed, data, work, "CANARY", "SECRET", [])
+    status = {name: row_status for name, row_status, _detail in failed}
+    assert status["restricted-whoami"] == "FAIL"
+    assert failed_launches[0] == 1
+
+
+def test_a_broken_restricted_fallback_does_not_run_unsandboxed(tmp_path, monkeypatch):
+    from easyagent import selftest
+    from easyagent import turn as turn_mod
+    from easyagent.contain import FallbackError, save_ledger
+    from easyagent.mcpclient import launch_stdio
+    from easyagent.tools import ToolError, _run_shell
+
+    store, bot = _bot(tmp_path)
+    save_ledger({"consented": True, "profile": "", "sid": "", "aces": [], "platform": "test"})
+    monkeypatch.setattr(
+        selftest,
+        "cached_probe",
+        lambda: {
+            "passed": False,
+            "reason": "the container did not hold",
+            "mechanism": "none",
+            "status": "unavailable",
+            "rows": [
+                ("whoami", "PASS", "AppContainer SID"),
+                ("restricted-whoami", "FAIL", "whoami did not run (exit 0xC0000142)"),
+                ("RESULT", "FAIL", "the container did not hold"),
+            ],
+        },
+    )
+
+    def unsandboxed(*_args, **_kwargs):
+        raise AssertionError("unsandboxed")
+
+    monkeypatch.setattr(subprocess, "Popen", unsandboxed)
+    slot = turn_mod.slot_for(store, "chat-fallback-refuse")
+    slot.bot_id = bot["id"]
+    slot.store = store
+    slot.cwd = str(tmp_path)
+    turn_mod._slot.set(slot)
+    try:
+        with pytest.raises(ToolError, match="restricted-token fallback did not start") as caught:
+            _run_shell(store, "echo plain-ok")
+        assert "0xC0000142" in str(caught.value)
+        assert "not run" in str(caught.value)
+        with pytest.raises(OSError, match="not run"):
+            launch_stdio(["server"], {}, str(tmp_path), store, bot["id"])
+    finally:
+        turn_mod._slot.set(None)
+    assert shell_mode(store)["refuse"] is True
+
+    monkeypatch.setattr(
+        selftest,
+        "cached_probe",
+        lambda: {"passed": True, "mechanism": "restricted-token", "status": "active", "reason": "", "rows": []},
+    )
+
+    def broken(*_args, **_kwargs):
+        raise FallbackError("The restricted-token fallback did not start (exit 0xC0000142). The command was not run.")
+
+    monkeypatch.setattr("easyagent.sandbox.popen_contained", broken)
+    monkeypatch.setattr("easyagent.mcpclient._popen_contained", broken)
+    turn_mod._slot.set(slot)
+    try:
+        with pytest.raises(ToolError, match="not run"):
+            _run_shell(store, "echo plain-ok")
+        with pytest.raises(FallbackError, match="not run"):
+            launch_stdio(["server"], {}, str(tmp_path), store, bot["id"])
+    finally:
+        turn_mod._slot.set(None)
 
 
 def test_third_party_firewall_names_skip_windows(monkeypatch):
@@ -1481,3 +1709,31 @@ def test_rebuilding_the_dacl_drops_a_deny_and_the_label_comes_off(tmp_path, monk
     assert api.label == b"" or int.from_bytes(api.label[4:6], "little") == 0
     assert not contain._ace_in_blob(api.dacl, other_sid, contain.ACCESS_ALLOWED_ACE_TYPE, contain.FILE_GENERIC_READ, 0)
     contain._remove_low_label(folder)
+
+
+def test_missing_sandbox_exec_is_skip_with_a_reason(monkeypatch):
+    """A runner without sandbox-exec does not pass containment, and it says why."""
+    import shutil
+
+    from easyagent import selftest
+    from easyagent.selftest_all import check_containment
+
+    real = shutil.which
+
+    def hidden(name):
+        if name == "sandbox-exec":
+            return None
+        return real(name)
+
+    monkeypatch.setattr(selftest.shutil, "which", hidden)
+    rows = selftest._darwin_rows()
+    assert rows[-1][0] == "RESULT"
+    assert rows[-1][1] in {"SKIP", "INCONCLUSIVE"}
+    assert rows[-1][1] != "PASS"
+    assert rows[-1][2].strip()
+    assert all(status != "PASS" for _name, status, _detail in rows)
+    monkeypatch.setattr(selftest, "_platform_rows", lambda: rows)
+    status, detail = check_containment(False)
+    assert status in {"SKIP", "INCONCLUSIVE"}
+    assert status != "PASS"
+    assert detail.strip()

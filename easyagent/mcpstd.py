@@ -65,7 +65,7 @@ def handle(kind: str, root: str, message: dict) -> dict | None:
         return _ok(msg_id, {
             "protocolVersion": "2024-11-05",
             "capabilities": {"tools": {}},
-            "serverInfo": {"name": f"easyagent-{kind}", "version": "0.3.12"},
+            "serverInfo": {"name": f"easyagent-{kind}", "version": "0.3.13"},
         })
     if method == "tools/list":
         return _ok(msg_id, {"tools": _tools(kind)})

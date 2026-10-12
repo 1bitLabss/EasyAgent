@@ -115,10 +115,18 @@ def _linux_rows() -> list[tuple[str, str, str]]:
 
 
 def _darwin_rows() -> list[tuple[str, str, str]]:
+    """sandbox-exec rows. A missing tool is SKIP or INCONCLUSIVE with a reason, never PASS."""
     if not shutil.which("sandbox-exec"):
-        detail = "sandbox-exec is not installed"
-        return [("sandbox-exec", "FAIL", detail), ("RESULT", "FAIL", detail)]
-    return _posix_rows("sandbox-exec")
+        detail = "sandbox-exec is not installed, so containment was not checked"
+        return [("sandbox-exec", "SKIP", detail), ("RESULT", "SKIP", detail)]
+    rows = _posix_rows("sandbox-exec")
+    if not rows or rows[-1][1] != "FAIL":
+        return rows
+    launch = next((row for row in rows if row[0] == "launch" and row[1] == "FAIL"), None)
+    if launch is None:
+        return rows
+    detail = (launch[2] or "").strip() or "sandbox-exec did not start, so containment was not checked"
+    return [("sandbox-exec", "INCONCLUSIVE", detail), ("RESULT", "INCONCLUSIVE", detail)]
 
 
 def _posix_rows(mechanism: str) -> list[tuple[str, str, str]]:
@@ -300,36 +308,237 @@ def _windows_probe(rows: list[tuple[str, str, str]]) -> list[tuple[str, str, str
         else:
             rows.append(("cleanup", "PASS", "profile removed"))
     passed = _windows_passed(rows, web)
-    rows.append((
-        "RESULT",
-        "PASS" if passed else "FAIL",
-        "AppContainer and the restricted token held" if passed else "the container did not hold",
-    ))
+    rows.append(("RESULT", "PASS" if passed else "FAIL", _windows_detail(passed, rows)))
     return rows
+
+
+_APP_ROWS = (
+    "whoami",
+    "control",
+    "data-read",
+    "secrets",
+    "workspace-write",
+)
+_RESTRICTED_ROWS = (
+    "restricted-whoami",
+    "restricted-control",
+    "restricted-data-read",
+    "restricted-secrets",
+    "restricted-workspace-write",
+)
+def _windows_detail(passed: bool, rows: list[tuple[str, str, str]]) -> str:
+    if not passed:
+        return "the container did not hold"
+    core = {name: status for name, status, _detail in rows}
+    if all(core.get(name) == "SKIP" for name in _RESTRICTED_ROWS):
+        return "AppContainer held; the restricted token was skipped because this session has no interactive desktop"
+    return "AppContainer and the restricted token held"
 
 
 def _windows_passed(rows: list[tuple[str, str, str]], web: bool) -> bool:
     core = {name: status for name, status, _detail in rows}
-    needed = [
-        "whoami",
-        "control",
-        "data-read",
-        "secrets",
-        "workspace-write",
-        "restricted-whoami",
-        "restricted-control",
-        "restricted-data-read",
-        "restricted-secrets",
-        "restricted-workspace-write",
-    ]
     del web
     if core.get("cleanup") == "FAIL":
         return False
-    return all(core.get(name) == "PASS" for name in needed)
+    if any(core.get(name) != "PASS" for name in _APP_ROWS):
+        return False
+    restricted = [core.get(name) for name in _RESTRICTED_ROWS]
+    if all(status == "PASS" for status in restricted):
+        return True
+    return all(status == "SKIP" for status in restricted)
+
+
+def _mark_restricted(rows, status: str, reason: str) -> None:
+    for name in _RESTRICTED_ROWS:
+        rows.append((name, status, reason))
+    rows.append(("restricted-mechanism", status, reason))
+
+
+def _skip_restricted(rows, reason: str) -> None:
+    _mark_restricted(rows, "SKIP", reason)
+
+
+def _github_hosted_windows() -> bool:
+    """A GitHub-hosted Windows job. A self-hosted runner is not this case.
+
+    The hosted image reports WinSta0 as visible, so the session looks interactive.
+    A restricted token still cannot open that desktop, and the child exits
+    STATUS_DLL_INIT_FAILED (0xC0000142) before it runs.
+    """
+    if os.environ.get("GITHUB_ACTIONS") != "true":
+        return False
+    if (os.environ.get("RUNNER_ENVIRONMENT") or "").strip().casefold() == "self-hosted":
+        return False
+    system = (os.environ.get("RUNNER_OS") or "").strip().casefold()
+    return system in {"", "windows"}
+
+
+def _desktop_is_interactive(
+    *,
+    session_id: int,
+    session_name: str,
+    station_name: str,
+    visible: bool | None,
+    input_desktop: bool | None = None,
+    hosted_runner: bool = False,
+) -> bool:
+    """False only for a service session or a hosted runner. An unknown fact does not skip.
+
+    A closed input desktop (locked screen, disconnected RDP) is not a skip.
+    That probe is inconclusive, so a release check cannot pass without it.
+    """
+    del input_desktop
+    if hosted_runner:
+        return False
+    if int(session_id) == 0:
+        return False
+    if (session_name or "").strip().casefold() == "services":
+        return False
+    name = (station_name or "").strip().casefold()
+    if name and name != "winsta0":
+        return False
+    if visible is False:
+        return False
+    return True
+
+
+def _interactive_desktop() -> bool:
+    """True on an interactive logon. A service session has no desktop a restricted token can open.
+
+    A GitHub-hosted runner is not an interactive logon for this probe: the
+    restricted child dies in DLL init (0xC0000142). A laptop still runs it.
+    """
+    if _github_hosted_windows():
+        return False
+    if os.name != "nt":
+        return True
+    try:
+        return _desktop_is_interactive(**_windows_desktop_facts())
+    except OSError:
+        return True
+
+
+def _windows_desktop_facts() -> dict:
+    import ctypes
+    from ctypes import wintypes
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    user32 = ctypes.WinDLL("user32", use_last_error=True)
+    kernel32.GetCurrentProcessId.restype = wintypes.DWORD
+    kernel32.ProcessIdToSessionId.argtypes = [wintypes.DWORD, ctypes.POINTER(wintypes.DWORD)]
+    kernel32.ProcessIdToSessionId.restype = wintypes.BOOL
+    session = wintypes.DWORD()
+    session_id = -1
+    if kernel32.ProcessIdToSessionId(kernel32.GetCurrentProcessId(), ctypes.byref(session)):
+        session_id = int(session.value)
+    station_name, visible = _window_station_facts(user32)
+    return {
+        "session_id": session_id,
+        "session_name": os.environ.get("SESSIONNAME") or "",
+        "station_name": station_name,
+        "visible": visible,
+        "input_desktop": _input_desktop_open(user32),
+        "hosted_runner": _github_hosted_windows(),
+    }
+
+
+def _input_desktop_inconclusive() -> bool:
+    """True when this logon cannot open the input desktop. A hosted runner is a skip, not this."""
+    if _github_hosted_windows() or os.name != "nt":
+        return False
+    try:
+        return _windows_desktop_facts().get("input_desktop") is False
+    except OSError:
+        return False
+
+
+def _input_desktop_open(user32) -> bool | None:
+    """Whether this process can open the input desktop. None when the check itself failed.
+
+    A null handle is a positive signal: there is no desktop a restricted token can
+    open, and user32 then exits STATUS_DLL_INIT_FAILED (0xC0000142).
+    """
+    from ctypes import wintypes
+
+    try:
+        user32.OpenInputDesktop.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+        user32.OpenInputDesktop.restype = wintypes.HANDLE
+        user32.CloseDesktop.argtypes = [wintypes.HANDLE]
+        user32.CloseDesktop.restype = wintypes.BOOL
+        # DESKTOP_READOBJECTS. Opening the input desktop is the check, not a grant.
+        handle = user32.OpenInputDesktop(0, False, 0x0001)
+    except (AttributeError, OSError):
+        return None
+    if not handle:
+        return False
+    user32.CloseDesktop(handle)
+    return True
+
+
+def _window_station_facts(user32) -> tuple[str, bool | None]:
+    import ctypes
+    from ctypes import wintypes
+
+    user32.GetProcessWindowStation.restype = wintypes.HANDLE
+    user32.GetUserObjectInformationW.argtypes = [
+        wintypes.HANDLE,
+        ctypes.c_int,
+        ctypes.c_void_p,
+        wintypes.DWORD,
+        ctypes.POINTER(wintypes.DWORD),
+    ]
+    user32.GetUserObjectInformationW.restype = wintypes.BOOL
+    station = user32.GetProcessWindowStation()
+    if not station:
+        return "", None
+
+    class _Flags(ctypes.Structure):
+        _fields_ = [
+            ("fInherit", wintypes.BOOL),
+            ("fReserved", wintypes.BOOL),
+            ("dwFlags", wintypes.DWORD),
+        ]
+
+    flags = _Flags()
+    visible = None
+    if user32.GetUserObjectInformationW(station, 1, ctypes.byref(flags), ctypes.sizeof(flags), None):
+        visible = bool(int(flags.dwFlags) & 0x1)
+    name = ""
+    buf = ctypes.create_unicode_buffer(128)
+    needed = wintypes.DWORD()
+    if user32.GetUserObjectInformationW(station, 2, buf, ctypes.sizeof(buf), ctypes.byref(needed)):
+        name = buf.value
+    return name, visible
 
 
 def _record_restricted(rows, data: Path, work: Path, token: str, secret_token: str, aces: list[dict]) -> None:
-    """The fallback launch, run even when the AppContainer succeeded. Its ACEs are removed after."""
+    """The fallback launch, run even when the AppContainer succeeded. Its ACEs are removed after.
+
+    A service session and a GitHub-hosted runner have no desktop the restricted
+    SIDs can open, so those rows are SKIP. A locked screen or a disconnected
+    desktop on a real logon is INCONCLUSIVE: the release check must not pass
+    without testing the fallback. An interactive logon with an input desktop
+    still runs the probe. Exit 0xC0000142 there is a failure: the fallback
+    sandbox is broken.
+    """
+    if not _interactive_desktop():
+        if _github_hosted_windows():
+            reason = (
+                "this hosted runner has no interactive desktop a restricted token can open "
+                "(STATUS_DLL_INIT_FAILED, 0xC0000142)"
+            )
+        else:
+            reason = "this session has no interactive desktop a restricted token can open"
+        _skip_restricted(rows, reason)
+        return
+    if _input_desktop_inconclusive():
+        _mark_restricted(
+            rows,
+            "INCONCLUSIVE",
+            "OpenInputDesktop failed. This session has no input desktop a restricted token can open "
+            "(the screen is locked or the desktop is disconnected). The restricted-token probe is inconclusive.",
+        )
+        return
     from easyagent.contain import _create_restricted, _deny_sid, _deny_sid_on, _dll, _grant_sid, _protect_folder, _sid_text
 
     sid = _deny_sid()

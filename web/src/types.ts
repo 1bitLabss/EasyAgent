@@ -22,6 +22,7 @@ export type Bot = {
   learn_manual: boolean;
   safety_mode?: string;
   safety_unlocks?: string[];
+  safety_exec_always?: { id: string; tool: string; root: string; label: string }[];
 };
 
 export type Run = {
@@ -67,6 +68,8 @@ export type ChatMessage = {
   speaker_name?: string;
   routine_name?: string;
   speaker?: string;
+  kind?: string;
+  git_repo?: string;
   created_at?: string;
 };
 
@@ -143,7 +146,8 @@ export type Job = {
 
 export type Unread = {
   total: number;
-  chats: { bot_id: string; chat_id: string; unread: number }[];
+  chats: { bot_id: string; chat_id: string; unread: number; message_count?: number; updated_at?: string }[];
+  revisions?: { bot_id: string; chat_id: string; message_count: number; updated_at: string }[];
   rooms: { room_id: string; unread: number }[];
   busy?: string[];
 };

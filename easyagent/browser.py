@@ -622,6 +622,8 @@ def _launch_kwargs(playwright, store: Store, bot_id: str, folder: Path, headless
     from easyagent.sandbox import shell_mode
 
     mode = shell_mode(store)
+    if mode.get("refuse"):
+        raise OSError(mode.get("reason") or "The restricted-token fallback did not start. The command was not run.")
     if not mode.get("contained"):
         return kwargs
     try:

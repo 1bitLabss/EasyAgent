@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.3.15-dev
+## 0.3.16-dev
 
 - An unattended routine still uses Strict. A destructive command is blocked. Anything that needs approval is held on a card and is not run. An exact Always allow grant is the only ask that can proceed, and it cannot cover a blocked wipe.
 - Web search results and browser page text are untrusted. A command copied from that text waits, and the page cannot write an Always allow grant or change the bot's mode.

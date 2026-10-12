@@ -1,7 +1,7 @@
 {
   "name": "easyagent-web",
   "private": true,
-  "version": "0.3.15-dev",
+  "version": "0.3.16-dev",
   "license": "MIT",
   "type": "module",
   "scripts": {

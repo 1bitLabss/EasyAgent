@@ -31,7 +31,12 @@ from easyagent.app import create_app, default_data_dir
 
 BOT_PREFIX = "selftest-"
 BOT_NAME = "selftest-gate"
-_USAGE = "usage: python -m easyagent selftest all --data COPY --port PORT [--report FILE] [--consent]"
+_USAGE = (
+    "usage: python -m easyagent selftest all --data COPY --port PORT [--report FILE] [--consent]\n"
+    "COPY must already contain a saved connection. Copy the data directory after that connection exists. "
+    "The live directory is refused, and a new empty folder is not a copy. "
+    "If COPY has secrets.db and this machine's master key does not open it, the gate stops and changes nothing."
+)
 _QUIET = {
     "EASYAGENT_LEARN": "0",
     "EASYAGENT_ROLLING": "0",
@@ -99,6 +104,24 @@ def run_gate(
         return 2, None, None
     if _port_busy(port):
         print(f"Refusing to start. Port {port} is already in use. Nothing was changed.", flush=True)
+        return 2, None, None
+    if not _has_connection(resolved):
+        print(
+            "Refusing to start. This folder has no saved connection. "
+            "Copy a data directory after a connection exists in it. "
+            "A new empty folder cannot run the gate. Nothing was changed.",
+            flush=True,
+        )
+        return 2, None, None
+    secret_problem = _secrets_problem(resolved)
+    if secret_problem:
+        print(
+            "Refusing to start. This copy's secrets do not open with the master key on this machine. "
+            f"{secret_problem} "
+            "Use a copy of a data directory that already has a saved connection on this machine. "
+            "Nothing was changed.",
+            flush=True,
+        )
         return 2, None, None
 
     consent = bool(parsed.get("consent"))
@@ -214,6 +237,12 @@ def run_gate(
             _delete_selftest_bots(server.store)
         _delete_selftest_bots_on_disk(resolved)
         _scrub_ledger(resolved, selftest_ids)
+        report["checks"].append(_timed("routine-attack", _check_routine_attack))
+        report["checks"].append(_timed("web-injection", _check_web_injection))
+        report["checks"].append(_timed("mcp-injection", _check_mcp_injection))
+        report["checks"].append(_timed("helper-isolation", _check_helper_isolation))
+        report["checks"].append(_timed("message-injection", _check_message_injection))
+        report["checks"].append(_timed("debug-attack", _check_debug_attack))
         report["checks"].append(_timed("secrets", _check_secrets))
         report["checks"].append(_timed("containment", lambda: check_containment(consent)))
         report["checks"].append(_timed("honesty", _check_honesty))
@@ -684,6 +713,42 @@ def _check_secrets() -> tuple[str, str]:
         shutil.rmtree(backup, ignore_errors=True)
 
 
+def _check_routine_attack() -> tuple[str, str]:
+    from easyagent.attackcheck import routine_attack
+
+    return routine_attack()
+
+
+def _check_web_injection() -> tuple[str, str]:
+    from easyagent.attackcheck import web_injection
+
+    return web_injection()
+
+
+def _check_mcp_injection() -> tuple[str, str]:
+    from easyagent.attackcheck import mcp_injection
+
+    return mcp_injection()
+
+
+def _check_helper_isolation() -> tuple[str, str]:
+    from easyagent.attackcheck import helper_isolation
+
+    return helper_isolation()
+
+
+def _check_message_injection() -> tuple[str, str]:
+    from easyagent.attackcheck import message_injection
+
+    return message_injection()
+
+
+def _check_debug_attack() -> tuple[str, str]:
+    from easyagent.attackcheck import debug_attack
+
+    return debug_attack()
+
+
 def _check_honesty() -> tuple[str, str]:
     from easyagent.honesty import run_scripted
 
@@ -884,6 +949,51 @@ def _overlaps(left: Path, right: Path) -> bool:
     except OSError:
         return False
     return left == right or left in right.parents or right in left.parents
+
+
+def _has_connection(root: Path) -> bool:
+    path = root / "endpoints.json"
+    if not path.is_file():
+        return False
+    try:
+        rows = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return False
+    return isinstance(rows, list) and any(isinstance(item, dict) and item.get("id") for item in rows)
+
+
+def _secrets_problem(root: Path) -> str:
+    """Open a throwaway copy of secrets.db. The data directory itself is not written."""
+    path = root / "secrets.db"
+    if not path.is_file():
+        return ""
+    from easyagent.secrets import SecretError, _MEMORY_KEYS, get_secret
+    from easyagent.store import Store
+
+    scratch = Path(tempfile.mkdtemp(prefix="easyagent-secrets-probe-"))
+    planted = ""
+    try:
+        shutil.copy2(path, scratch / "secrets.db")
+        for name in ("secrets.db-wal", "secrets.db-shm"):
+            extra = root / name
+            if extra.is_file():
+                shutil.copy2(extra, scratch / name)
+        probe = Store(scratch)
+        # A memory key is kept for the real directory. The throwaway copy has to
+        # use that same key, or a database this machine can open looks locked.
+        held = _MEMORY_KEYS.get(str(root)) or _MEMORY_KEYS.get(str(Path(root).resolve()))
+        if held is not None:
+            planted = str(probe.root)
+            _MEMORY_KEYS[planted] = held
+        try:
+            get_secret("easyagent-selftest-probe", probe)
+        except SecretError as exc:
+            return str(exc)
+        return ""
+    finally:
+        if planted:
+            _MEMORY_KEYS.pop(planted, None)
+        shutil.rmtree(scratch, ignore_errors=True)
 
 
 def _port_busy(port: int) -> bool:

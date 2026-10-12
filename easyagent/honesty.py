@@ -23,6 +23,7 @@ DEFAULTS = {
     "tripwires": True,
     "stall": True,
     "stall_minutes": 5,
+    "debug": True,
 }
 
 _CLEAR_PUSHBACK = (
@@ -66,6 +67,31 @@ _EXIT = re.compile(r"exit code (\d+)")
 _TOOL_LINE = re.compile(r"^TOOL\s+(\S+)(?:\s+(.*))?$")
 _KV = re.compile(r"(\w+)=((?:\"[^\"]*\")|(?:'[^']*')|\S+)")
 _BULLET = re.compile(r"(?m)^\s*(?:[-*]|\d+[.)])\s+\S")
+_BUG = re.compile(
+    r"(?i)\b(bugs?|failures?|failed|fails|failing|errors?|broken|crashes?|crashed|exceptions?|traceback|regressions?)\b"
+)
+_CITE = re.compile(r"[\w./\\-]+\.[A-Za-z0-9]+:\d+")
+_FENCE = re.compile(r"```.*?```", re.DOTALL)
+_PROPOSAL = re.compile(r"(?i)\b(?:i'll|i will)\s+(?:fix|change|edit|patch)\b|\b(?:the fix is|here is the fix|here's the fix)\b")
+_PROOF = {"fixed", "done", "works", "works now"}
+_DEBUG_NOTE = (
+    "Debug mode. Run a command or test that shows the failure before any edit. "
+    "Name the cause in one sentence with a file:line or an output line from that run. "
+    "Rerun that same command before saying it is fixed."
+)
+_NUDGE_REPRO = "Debug: reproduce the failure with a command or test first. The edit was not applied."
+_NUDGE_CAUSE = (
+    "Debug: name the cause in one sentence and cite a file:line or an output line from this turn. "
+    "The edit was not applied."
+)
+_NUDGE_REPEAT = (
+    "Debug: that repeats the last fix. Name a new cause and run a check that tells it apart. "
+    "The edit was not applied."
+)
+_FOLLOW = "Run the failing test or command now."
+_NUDGE_LINE = re.compile(
+    r"(?i)^(?:debug:|investigation first:|investigation is incomplete:|two fixes already failed\b|switching approach\b)"
+)
 _SNAPSHOT_CAP = 2_000_000
 
 _CURRENT: ContextVar["Trace | None"] = ContextVar("easyagent_honesty", default=None)
@@ -103,7 +129,7 @@ def load_settings(store, bot_id: str | None) -> dict:
         return settings
     if not isinstance(raw, dict):
         return settings
-    for key in ("receipts", "pushback", "excuse", "loop", "tripwires", "stall"):
+    for key in ("receipts", "pushback", "excuse", "loop", "tripwires", "stall", "debug"):
         if key in raw:
             settings[key] = bool(raw[key])
     if "stall_minutes" in raw:
@@ -114,7 +140,7 @@ def load_settings(store, bot_id: str | None) -> dict:
 def save_settings(store, bot_id: str, patch: dict) -> dict:
     store.get_bot(bot_id)
     current = load_settings(store, bot_id)
-    for key in ("receipts", "pushback", "excuse", "loop", "tripwires", "stall"):
+    for key in ("receipts", "pushback", "excuse", "loop", "tripwires", "stall", "debug"):
         if key in patch and patch[key] is not None:
             current[key] = bool(patch[key])
     if "stall_minutes" in patch and patch["stall_minutes"] is not None:
@@ -151,6 +177,17 @@ class Trace:
     outcome_taken: bool = False
     excuse_note: str | None = None
     excuse_checked: bool = False
+    debug: bool = False
+    reply_note: str = ""
+    prior_explanation: str = ""
+    last_edit: str = ""
+    repro_command: str = ""
+    repro_output: str = ""
+    repro_failed: bool = False
+    calls: int = 0
+    hold: str = ""
+    followed: bool = False
+    chips: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -159,6 +196,8 @@ class Outcome:
     receipts: list[dict] = field(default_factory=list)
     unverified: bool = False
     needs_verify: bool = False
+    debug: bool = False
+    chips: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -223,6 +262,36 @@ def pushback_json(raw: str) -> bool:
     return "true" in lowered and "false" not in lowered
 
 
+def classify_debug(text: str) -> bool:
+    """A bug or a failure report. Pushback is handled separately."""
+    return _BUG.search(text or "") is not None
+
+
+def mark_debug(yes: bool) -> None:
+    trace = current()
+    if trace is None or not yes or not trace.settings.get("debug", True):
+        return
+    trace.debug = True
+
+
+def remember_prior(messages: list[dict] | None) -> None:
+    """The previous explanation, so a pushback cannot repeat that fix."""
+    trace = current()
+    if trace is None:
+        return
+    for message in reversed(messages or []):
+        if isinstance(message, dict) and message.get("role") == "assistant":
+            trace.prior_explanation = str(message.get("content") or "")[:800]
+            return
+
+
+def note_reply(text: str) -> None:
+    trace = current()
+    if trace is None:
+        return
+    trace.reply_note = text or ""
+
+
 def mark_pushback(yes: bool) -> None:
     trace = current()
     if trace is None or not yes or not trace.settings.get("pushback", True):
@@ -234,9 +303,11 @@ def working_messages(messages: list[dict] | None) -> list[dict]:
     """Drop earlier assistant explanations. The stored chat is left as it is."""
     trace = current()
     source = list(messages or [])
-    if trace is None or not trace.investigate:
-        return source
-    return [item for item in source if item.get("role") not in {"assistant", "tool"}]
+    if trace is not None and trace.investigate:
+        source = [item for item in source if item.get("role") not in {"assistant", "tool"}]
+    if trace is not None and trace.debug:
+        source = [{"role": "system", "content": _DEBUG_NOTE}, *source]
+    return source
 
 
 def poll() -> str | None:
@@ -464,11 +535,55 @@ def _matching_lessons(trace: Trace, request) -> list[tuple]:
     return matched
 
 
+def _chip(trace: Trace, label: str) -> None:
+    if label and label not in trace.chips:
+        trace.chips.append(label)
+
+
+def _hold(trace: Trace, text: str, chip: str) -> str:
+    """The edit does not run. The note goes to the model, and the chip is what the person sees."""
+    _chip(trace, chip)
+    trace.hold = text
+    return text
+
+
+def consume_hold() -> str:
+    trace = current()
+    if trace is None:
+        return ""
+    note = trace.hold
+    trace.hold = ""
+    return note
+
+
+def take_followup(text: str) -> str | None:
+    """One ask when a debug turn claims a result, or promises a fix, and called no tool."""
+    trace = current()
+    if trace is None or trace.followed or trace.calls:
+        return None
+    if not trace.debug or not trace.settings.get("debug", True):
+        return None
+    body = text or ""
+    claims = _with_works(body, _claims(body))
+    if not _PROPOSAL.search(body) and not claims:
+        return None
+    trace.followed = True
+    _chip(trace, "Run the check")
+    return _FOLLOW
+
+
+def _without_nudges(text: str) -> str:
+    kept = [line for line in (text or "").splitlines() if not _NUDGE_LINE.match(line.strip())]
+    return "\n".join(kept).strip()
+
+
 def before_tool(request) -> str | None:
     """Block a tool, or return None so it runs. A block is the tool result."""
     trace = current()
     if trace is None:
         return None
+    trace.calls += 1
+    trace.hold = ""
     if trace.settings.get("tripwires", True):
         matched = _matching_lessons(trace, request)
         if matched:
@@ -495,9 +610,20 @@ def before_tool(request) -> str | None:
     if trace.investigate and trace.settings.get("pushback", True) and is_edit(request):
         trace.last_progress = float(trace.clock())
         if not trace.reproduced:
-            return "Investigation first: reproduce the failure with a command, a log, or a test before editing."
+            return _hold(
+                trace,
+                "Investigation first: reproduce the failure with a command, a log, or a test before editing.",
+                "Reproduce first",
+            )
         if trace.fix_attempts >= 2:
-            return "Two fixes already failed. Switch approach before another edit."
+            return _hold(
+                trace,
+                "Two fixes already failed. Switch approach before another edit.",
+                "Switch approach",
+            )
+    held = _debug_hold(trace, request)
+    if held:
+        return held
     if is_edit(request) and (getattr(request, "kind", "") or "") == "files":
         _snapshot(trace, getattr(request, "path", "") or "")
     return None
@@ -549,7 +675,128 @@ def after_tool(request, output: str, *, ok: bool) -> str:
         trace.pending_fix = False
     if trace.investigate and not edit and text.strip():
         trace.reproduced = True
+    if (
+        trace.debug
+        and kind in {"shell", "windows"}
+        and command
+        and (failed or _shows_failure(raw))
+    ):
+        trace.repro_failed = True
+        trace.repro_command = " ".join(command.split())
+        trace.repro_output = raw[:500]
+        trace.reproduced = True
+    if edit and not failed:
+        trace.last_edit = ((path or "") + "\n" + (getattr(request, "body", "") or "")).strip()
     return text if trace.events else raw
+
+
+def _debug_hold(trace: Trace, request) -> str | None:
+    """A short nudge instead of a stall. The edit does not land."""
+    if not trace.debug or not trace.settings.get("debug", True) or not is_edit(request):
+        return None
+    trace.last_progress = float(trace.clock())
+    if trace.investigate and _repeats_fix(trace, request):
+        _count_hold(trace, request)
+        return _hold(trace, _NUDGE_REPEAT, "New cause")
+    if not trace.repro_failed:
+        _count_hold(trace, request)
+        return _hold(trace, _NUDGE_REPRO, "Reproduce first")
+    if not _cause_ready(trace):
+        _count_hold(trace, request)
+        return _hold(trace, _NUDGE_CAUSE, "Name the cause")
+    return None
+
+
+def _count_hold(trace: Trace, request) -> None:
+    sig = _signature(request)
+    trace.fail_counts[sig] = trace.fail_counts.get(sig, 0) + 1
+
+
+def _repeats_fix(trace: Trace, request) -> bool:
+    body = (getattr(request, "body", "") or "").strip()
+    current = ((getattr(request, "path", "") or "") + "\n" + (getattr(request, "body", "") or "")).strip()
+    if trace.last_edit and current == trace.last_edit:
+        return True
+    prior = trace.prior_explanation or ""
+    return bool(body) and len(body) >= 16 and body in prior
+
+
+def _shows_failure(output: str) -> bool:
+    return re.search(r"(?i)\b(failed|traceback|assertionerror|exception)\b", output or "") is not None
+
+
+def _prose_note(text: str) -> str:
+    return _FENCE.sub(" ", text or "")
+
+
+def _evidence_blob(trace: Trace) -> str:
+    parts = []
+    for event in trace.events:
+        parts.append(str(event.get("output") or ""))
+        parts.append(str(event.get("path") or ""))
+        parts.append(str(event.get("command") or ""))
+    return "\n".join(parts)
+
+
+def _cause_ready(trace: Trace) -> bool:
+    prose = _prose_note(trace.reply_note)
+    blob = _evidence_blob(trace)
+    if not blob.strip():
+        return False
+    folded_blob = blob.lower()
+    sentences = [part.strip() for part in re.split(r"(?<=\.)\s+|\n", prose) if len(part.split()) >= 4]
+    for sentence in sentences:
+        folded = sentence.lower()
+        for match in _CITE.finditer(sentence):
+            if match.group(0).lower() in folded_blob:
+                return True
+        for line in blob.splitlines():
+            line = line.strip()
+            if len(line) >= 11 and line.lower() in folded:
+                return True
+        folded_norm = folded.replace("\\", "/")
+        blob_norm = folded_blob.replace("\\", "/")
+        for match in re.finditer(r"[a-z0-9_./-]{12,}", folded_norm):
+            token = match.group(0).strip("./-")
+            if len(token) >= 12 and token in blob_norm:
+                return True
+    return False
+
+
+def _proof_event(trace: Trace) -> dict | None:
+    if not trace.repro_failed or not trace.repro_command:
+        return None
+    command = " ".join(trace.repro_command.split())
+    marker = ""
+    for line in (trace.repro_output or "").splitlines():
+        stripped = line.strip()
+        if len(stripped) >= 11 and _shows_failure(stripped) and "exit code" not in stripped.lower():
+            marker = stripped
+            break
+    for index in range(len(trace.events) - 1, trace.last_change_index, -1):
+        event = trace.events[index]
+        if " ".join(str(event.get("command") or "").split()) != command:
+            continue
+        if not event.get("ok"):
+            continue
+        output = str(event.get("output") or "")
+        if output_failed(output) or _shows_failure(output):
+            continue
+        if marker and marker in output:
+            continue
+        return event
+    return None
+
+
+def _with_works(text: str, claims: list[str]) -> list[str]:
+    if "works" in claims or "works now" in claims:
+        return claims
+    for match in re.finditer(r"(?i)\bworks\b", text or ""):
+        window = (text or "")[max(0, match.start() - 24) : match.start()]
+        if _NEG_BEFORE.search(window):
+            continue
+        return [*claims, "works"]
+    return claims
 
 
 def _claims(text: str) -> list[str]:
@@ -696,33 +943,44 @@ def settle(text: str, *, allow_model: bool = False) -> Outcome:
     raw = text or ""
     if trace is None:
         return Outcome(raw)
+    if trace.debug or trace.investigate:
+        raw = _without_nudges(raw)
     if trace.settings.get("receipts", True):
         rewritten, hedged = _rewrite_hedges(raw)
     else:
         rewritten, hedged = raw, False
     claims = _claims(rewritten) if trace.settings.get("receipts", True) else []
+    if trace.debug and trace.settings.get("debug", True):
+        claims = _with_works(rewritten, claims)
     backing = _backing(trace)
+    proof = _proof_event(trace) if trace.debug and trace.settings.get("debug", True) else None
     receipts = []
     unverified = False
     needs_verify = False
     if claims:
-        if backing:
-            for claim in claims:
+        for claim in claims:
+            use_proof = bool(trace.debug and claim in _PROOF)
+            event = proof if use_proof else backing
+            if event:
                 receipts.append(
                     {
                         "claim": claim,
-                        "tool": _label(backing),
-                        "output": str(backing.get("output") or "")[:240],
+                        "tool": _label(event),
+                        "output": str(event.get("output") or "")[:240],
                     }
                 )
-        else:
-            for claim in claims:
-                receipts.append({"claim": claim, "tool": "", "output": ""})
+                continue
+            receipts.append({"claim": claim, "tool": "", "output": ""})
+            if use_proof and proof is None and backing is not None:
+                unverified = True
+                continue
             if allow_model and trace.model_calls == 0:
                 needs_verify = True
             else:
                 unverified = True
-    if hedged and not backing and not needs_verify:
+        if trace.debug and any(claim in _PROOF for claim in claims) and proof is None and not needs_verify:
+            unverified = True
+    if hedged and not backing and not proof and not needs_verify:
         unverified = True
     pieces = [rewritten.rstrip()]
     excuse = _excuse_note(trace, rewritten)
@@ -730,11 +988,22 @@ def settle(text: str, *, allow_model: bool = False) -> Outcome:
         pieces.append(excuse)
     if trace.investigate and trace.settings.get("pushback", True):
         if not _has_causes(rewritten):
-            pieces.append(
-                "Investigation is incomplete: list at least two causes, including that your last change caused it."
-            )
+            _chip(trace, "Two causes")
         if trace.fix_attempts >= 2 and ("switch" not in rewritten.lower() or "approach" not in rewritten.lower()):
-            pieces.append("Switching approach. Two fixes already failed.")
+            _chip(trace, "Switch approach")
+        prior = (trace.prior_explanation or "").strip()
+        first = prior.split("\n", 1)[0].strip()
+        if len(first) >= 24 and first.lower() in rewritten.lower():
+            _chip(trace, "New cause")
+        if not any(event.get("kind") in {"shell", "windows"} for event in trace.events):
+            _chip(trace, "Run the check")
+    if (
+        trace.debug
+        and trace.settings.get("debug", True)
+        and not trace.repro_failed
+        and _PROPOSAL.search(rewritten)
+    ):
+        _chip(trace, "Reproduce first")
     if _APOLOGY.search(rewritten) and not trace.events and not _ACTION.search(rewritten):
         pieces.append("An apology needs a new action.")
     if trace.settings.get("stall", True):
@@ -749,7 +1018,7 @@ def settle(text: str, *, allow_model: bool = False) -> Outcome:
     if not body:
         stall = _stall_line(trace) if trace.settings.get("stall", True) else ""
         body = stall
-    return Outcome(body, receipts, unverified, needs_verify)
+    return Outcome(body, receipts, unverified, needs_verify, bool(trace.debug), list(trace.chips))
 
 
 def _rewrite_hedges(text: str) -> tuple[str, bool]:
@@ -825,6 +1094,7 @@ async def run_scripted(
     trace = begin(store, bot_id, settings=settings)
     messages = list(prior or [])
     messages.append({"role": "user", "content": user})
+    remember_prior(messages)
     kind = classify_pushback(user)
     if (
         kind == "maybe"
@@ -837,17 +1107,31 @@ async def run_scripted(
         kind = "yes" if pushback_json(raw) else "no"
     if kind == "yes":
         mark_pushback(True)
+        mark_debug(True)
+    elif classify_debug(user):
+        mark_debug(True)
     context = working_messages(messages)
     outputs: list[str] = []
+    hidden: list[dict] = []
     prose = ""
+    claimed = ""
     try:
         while queue:
             reply = queue.pop(0)
+            note_reply(reply)
             calls, prose = parse_script(reply)
+            if prose:
+                claimed = prose
             for call in calls:
                 await _run_call(tools, call, outputs)
-            if prose or not calls:
-                break
+            if calls:
+                continue
+            ask = take_followup(prose)
+            if ask and queue:
+                hidden.append({"role": "user", "content": ask})
+                continue
+            break
+        prose = claimed or prose
         if prose:
             touch()
         if jump_seconds:
@@ -867,8 +1151,11 @@ async def run_scripted(
             "unverified": outcome.unverified,
             "model_calls": trace.model_calls,
             "investigate": trace.investigate,
+            "debug": trace.debug,
+            "chips": list(outcome.chips),
+            "hidden": hidden,
             "outputs": outputs,
-            "context": context,
+            "context": [*context, *hidden],
         }
     finally:
         _CURRENT.set(None)

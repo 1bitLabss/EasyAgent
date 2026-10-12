@@ -105,6 +105,53 @@ def bot_context_chars(bot: dict | None) -> int:
     return budget
 
 
+def clip_head_tail(text: str, cap: int) -> str:
+    """Keep the start and the end when one message is too large for the window.
+
+    The stored transcript is not rewritten. This is only the copy the model sees.
+    """
+    body = text or ""
+    try:
+        limit = int(cap)
+    except (TypeError, ValueError):
+        return body
+    if limit <= 0 or len(body) <= limit:
+        return body
+    omitted = len(body)
+    head = 0
+    tail = 0
+    note = ""
+    for _ in range(3):
+        note = f"\n[… {omitted} characters omitted. The start and the end are kept.]\n"
+        room = limit - len(note)
+        if room < 2:
+            return body[:limit]
+        head = room // 2
+        tail = room - head
+        omitted = max(0, len(body) - head - tail)
+    note = f"\n[… {omitted} characters omitted. The start and the end are kept.]\n"
+    built = body[:head] + note + body[-tail:]
+    if len(built) > limit:
+        extra = len(built) - limit
+        tail = max(0, tail - extra)
+        omitted = max(0, len(body) - head - tail)
+        note = f"\n[… {omitted} characters omitted. The start and the end are kept.]\n"
+        built = body[:head] + note + (body[-tail:] if tail else "")
+    if len(built) > limit:
+        return built[:limit]
+    return built
+
+
+def _view_text(content: str, per_message: int, message_cap: int) -> str:
+    text = content or ""
+    if message_cap > 0 and len(text) > message_cap:
+        limit = message_cap
+        if per_message > 0:
+            limit = min(per_message, message_cap)
+        return clip_head_tail(text, limit)
+    return clip_message(text, per_message)
+
+
 def clip_message(content: str, limit: int | None = None) -> str:
     cap = MIN_MESSAGE_PAYLOAD_CHARS if limit is None else int(limit)
     if cap < 1:
@@ -194,6 +241,8 @@ def prepare_context(
     summary: str,
     summarized_through: int,
     context_chars: int | None = None,
+    floor: int = 0,
+    message_cap: int = 0,
 ) -> PreparedContext:
     """Return the summary + recent chat for one request. Does not mutate `messages`.
 
@@ -202,8 +251,21 @@ def prepare_context(
     goes in, newest first, until the next older one would not fit. Only the
     messages before that point are folded into the summary. A chat that fits
     is sent whole and nothing is compacted. The stored list is not trimmed.
+
+    `floor` keeps messages before that index folded even when they would still
+    fit. Zero leaves the budget in charge.
+
+    `message_cap` clips one message that is too large for the model's window,
+    keeping its start and its end. Zero leaves the per-message budget in charge.
+    The stored messages are not changed.
     """
     budget, summary_cap, per_message = context_window(context_chars)
+    try:
+        single_cap = int(message_cap or 0)
+    except (TypeError, ValueError):
+        single_cap = 0
+    if single_cap < 0:
+        single_cap = 0
     tail_budget = max(1, budget - summary_cap)
     summary = summary or ""
     count = len(messages)
@@ -222,11 +284,22 @@ def prepare_context(
     start = count
     used = 0
     for index in range(count - 1, -1, -1):
-        cost = _payload_len(model_content(messages[index]), per_message)
+        cost = len(_view_text(model_content(messages[index]), per_message, single_cap))
         if index < count - 1 and used + cost > tail_budget:
             break
         used += cost
         start = index
+
+    try:
+        forced = int(floor or 0)
+    except (TypeError, ValueError):
+        forced = 0
+    if forced < 0:
+        forced = 0
+    if forced > count:
+        forced = count
+    if forced > start:
+        start = forced
 
     if start == 0:
         summary = ""
@@ -241,7 +314,7 @@ def prepare_context(
     through = start
 
     tail = [
-        {"role": m.get("role", "user"), "content": clip_message(model_content(m), per_message)}
+        {"role": m.get("role", "user"), "content": _view_text(model_content(m), per_message, single_cap)}
         for m in messages[through:]
     ]
     stats = _stats(messages, summary, through, tail, budget, summary_cap)

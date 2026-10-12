@@ -27,7 +27,34 @@ def _fresh(chat: dict, count: int) -> int:
     return fresh
 
 
-def visible_prepare(chat: dict, budget: int) -> PreparedContext:
+def message_cap_chars(n_ctx: int, system_tokens: int = 0, kept: int = 2) -> int:
+    """Characters one message may take. About 40% of the window, tighter when the system prompt is large."""
+    from easyagent.limits import CHARS_PER_TOKEN
+
+    try:
+        window = int(n_ctx or 0)
+    except (TypeError, ValueError):
+        window = 0
+    if window <= 0:
+        return 0
+    single = int(window * 0.4 * CHARS_PER_TOKEN)
+    try:
+        overhead = int(system_tokens or 0)
+    except (TypeError, ValueError):
+        overhead = 0
+    if overhead < 0:
+        overhead = 0
+    if overhead <= 0:
+        return max(240, single)
+    room = int(window * 0.85) - overhead
+    if room < 128:
+        room = 128
+    shares = kept if isinstance(kept, int) and kept > 0 else 1
+    shared = room * CHARS_PER_TOKEN // shares
+    return max(240, min(single, shared))
+
+
+def visible_prepare(chat: dict, budget: int, message_cap: int = 0) -> PreparedContext:
     """Same fold as `prepare_context`, ignoring turns hidden by Start fresh.
 
     With no fresh floor this is `prepare_context` itself, stats included.
@@ -37,7 +64,20 @@ def visible_prepare(chat: dict, budget: int) -> PreparedContext:
     through = int(chat.get("summarized_through") or 0) - fresh
     if through < 0:
         through = 0
-    prepared = prepare_context(messages[fresh:], chat.get("summary") or "", through, budget)
+    try:
+        floor = int(chat.get("compact_through") or 0) - fresh
+    except (TypeError, ValueError):
+        floor = 0
+    if floor < 0:
+        floor = 0
+    prepared = prepare_context(
+        messages[fresh:],
+        chat.get("summary") or "",
+        through,
+        budget,
+        floor,
+        message_cap,
+    )
     if fresh == 0:
         return prepared
     stats = dict(prepared.stats)
@@ -119,7 +159,19 @@ class ModelTurn:
 def model_turn(store: Store, bot: dict, chat: dict, endpoint: dict | None = None) -> ModelTurn:
     """Direction stays outside this budget. Summary, tail, and retrieval stay inside it."""
     budget = bot_context_chars(bot)
-    prepared = visible_prepare(chat, budget)
+    cap = 0
+    if endpoint:
+        from easyagent.nctx import resolve_n_ctx
+
+        bot_model = (bot.get("model") or "").strip()
+        endpoint_model = (endpoint.get("model") or "").strip()
+        model = bot_model or endpoint_model or None
+        try:
+            overhead = int(chat.get("system_tokens") or 0)
+        except (TypeError, ValueError):
+            overhead = 0
+        cap = message_cap_chars(resolve_n_ctx(endpoint, None, model), overhead, 2)
+    prepared = visible_prepare(chat, budget, cap)
     messages = list(chat.get("messages") or [])
     earlier = earlier_block(store, bot["id"], chat, int(prepared.summarized_through or 0), endpoint)
     try:

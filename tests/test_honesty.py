@@ -95,7 +95,7 @@ def test_pushback_drops_the_previous_explanation_and_blocks_edits_until_a_failur
         [
             'TOOL files action=write path=/tmp/ea-honesty.py body=one',
             'TOOL shell command="pytest -q"',
-            'TOOL files action=write path=/tmp/ea-honesty.py body=two',
+            'Cause: FAILED test_one shows the failure.\nTOOL files action=write path=/tmp/ea-honesty.py body=two',
             "- the fixture is stale\n- my last change caused it",
         ],
         "it's still broken",
@@ -132,8 +132,11 @@ def test_an_ambiguous_complaint_spends_the_only_model_call():
     assert pushed["investigate"] is True
     assert pushed["model_calls"] == 1
     assert pushed["unverified"] is True
-    assert ran["n"] == 0
-    assert "Investigation is incomplete" in pushed["text"]
+    assert ran["n"] == 1
+    assert "Investigation is incomplete" not in pushed["text"]
+    assert pushed["text"] == "Fixed."
+    assert "Two causes" in pushed["chips"]
+    assert "Run the check" in pushed["chips"]
 
     clear = _turn(
         ["Acknowledged."],
@@ -165,8 +168,8 @@ def test_two_failed_fixes_block_the_next_edit_and_the_reply_says_so():
     result = _turn(
         [
             'TOOL shell command="pytest -q"',
-            "TOOL files action=write path=/tmp/ea-honesty.py body=one",
-            "TOOL files action=write path=/tmp/ea-honesty.py body=two",
+            "The cause is exit code 1 in the output.\nTOOL files action=write path=/tmp/ea-honesty.py body=one",
+            "The cause is exit code 1 in the output.\nTOOL files action=write path=/tmp/ea-honesty.py body=two",
             "TOOL files action=write path=/tmp/ea-honesty.py body=three",
             "- the fixture is stale\n- my last change caused it",
         ],
@@ -175,7 +178,8 @@ def test_two_failed_fixes_block_the_next_edit_and_the_reply_says_so():
     )
     assert writes == ["one", "two"]
     assert "Switch approach" in result["outputs"][-1]
-    assert "Switching approach. Two fixes already failed." in result["text"]
+    assert "Switching approach" not in result["text"]
+    assert "Switch approach" in result["chips"]
 
 
 def test_an_apology_without_a_new_action_is_flagged():
@@ -358,7 +362,7 @@ def test_honesty_settings_default_on_and_round_trip(tmp_path):
     got = client.get(f"/api/bots/{bot['id']}/honesty")
     assert got.status_code == 200, got.text
     body = got.json()
-    for key in ("receipts", "pushback", "excuse", "loop", "tripwires", "stall"):
+    for key in ("receipts", "pushback", "excuse", "loop", "tripwires", "stall", "debug"):
         assert body[key] is True
     assert body["stall_minutes"] == 5
     saved = client.post(
@@ -373,3 +377,143 @@ def test_honesty_settings_default_on_and_round_trip(tmp_path):
     assert again["loop"] is False
     assert again["pushback"] is True
     assert again["stall_minutes"] == 2
+
+
+def test_a_bug_report_holds_a_fix_until_a_failing_command_and_a_cited_cause():
+    ran = []
+
+    def run(call):
+        ran.append(call.kind)
+        if call.kind == "shell":
+            return "check.py:4 FAILED add\nexit code 1"
+        return "wrote"
+
+    held = _turn(
+        [
+            "TOOL files action=write path=/tmp/ea-debug.py body=return a + b",
+            "I'll change the helper so the sum is right.",
+        ],
+        "There is a bug. The check fails.",
+        run,
+    )
+    assert held["debug"] is True
+    assert ran == []
+    assert "reproduce the failure" in held["outputs"][0]
+    assert "Debug:" not in held["text"]
+    assert held["text"] == "I'll change the helper so the sum is right."
+    assert "Reproduce first" in held["chips"]
+
+    bare = _turn(
+        [
+            'TOOL shell command="python check.py"',
+            "TOOL files action=write path=/tmp/ea-debug.py body=return-a-plus-b-now",
+        ],
+        "There is a bug. The check fails.",
+        lambda _call: "check.py:4 FAILED add\nexit code 1",
+    )
+    assert "cite a file:line" in bare["outputs"][-1]
+
+
+def test_debug_proof_needs_the_same_command_to_pass_after_the_fix():
+    def run(call):
+        if call.kind == "files":
+            return "wrote"
+        if call.command == "python check.py" and run.passed:
+            return "ok\nexit code 0"
+        run.passed = True
+        return "check.py:4 FAILED add\nexit code 1"
+
+    run.passed = False
+    missing = _turn(
+        [
+            'TOOL shell command="python check.py"',
+            "The cause is check.py:4 in the failing check.\nTOOL files action=write path=/tmp/ea-debug.py body=return a + b",
+            "Fixed.",
+            'TOOL shell command="echo ok"',
+        ],
+        "There is a bug. The check fails.",
+        run,
+    )
+    assert missing["unverified"] is True
+    assert missing["debug"] is True
+
+    run.passed = False
+
+    def prove(call):
+        if call.kind == "files":
+            return "wrote"
+        if prove.seen:
+            return "ok\nexit code 0"
+        prove.seen = True
+        return "check.py:4 FAILED add\nexit code 1"
+
+    prove.seen = False
+    shown = _turn(
+        [
+            'TOOL shell command="python check.py"',
+            "The cause is check.py:4 in the failing check.\nTOOL files action=write path=/tmp/ea-debug.py body=return a + b",
+            'TOOL shell command="python check.py"',
+            "Fixed.",
+        ],
+        "There is a bug. The check fails.",
+        prove,
+    )
+    assert shown["unverified"] is False
+    assert shown["receipts"][0]["claim"] == "fixed"
+    assert "exit code 0" in shown["receipts"][0]["output"]
+
+
+def test_pushback_refuses_the_same_fix_and_accepts_a_new_cause():
+    ran = []
+
+    def run(call):
+        ran.append(call.body or call.command)
+        if call.kind == "shell":
+            return "check.py:4 FAILED add\nexit code 1"
+        return "wrote\nexit code 0"
+
+    old = "return a - b exactly"
+    result = _turn(
+        [
+            'TOOL shell command="python check.py"',
+            'TOOL files action=write path=/tmp/ea-debug.py body="return a - b exactly"',
+            "The cause is check.py:4 in the failing check.\nTOOL files action=write path=/tmp/ea-debug.py body=return-a-plus-b-now",
+            "- the subtraction is the bug\n- my last change caused it",
+        ],
+        "it's still broken",
+        run,
+        prior=[
+            {"role": "user", "content": "fix the bug"},
+            {"role": "assistant", "content": "I changed it to return a - b exactly."},
+        ],
+    )
+    assert result["debug"] is True
+    assert result["investigate"] is True
+    assert "repeats the last fix" in result["outputs"][1]
+    assert ran == ["python check.py", "return-a-plus-b-now"]
+    assert "Investigation is incomplete" not in result["text"]
+    assert "Debug:" not in result["text"]
+
+
+def test_a_promise_with_no_tool_asks_once_to_run_the_check():
+    ran = []
+
+    def run(call):
+        ran.append(call.command or call.kind)
+        return "FAILED\nexit code 1"
+
+    result = _turn(
+        [
+            "I'll fix the helper.",
+            "I'll fix the helper again.",
+            'TOOL shell command="python check.py"',
+        ],
+        "There is a bug. The check fails.",
+        run,
+    )
+    assert ran == []
+    assert result["text"] == "I'll fix the helper again."
+    assert "Debug:" not in result["text"]
+    assert result["hidden"] == [{"role": "user", "content": "Run the failing test or command now."}]
+    assert "Run the check" in result["chips"]
+    assert "Run the failing test" not in result["text"]

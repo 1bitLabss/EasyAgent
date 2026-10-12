@@ -35,8 +35,10 @@ from easyagent.context import (
     ERROR_PLACEHOLDER,
     bot_context_chars,
     bot_context_tokens,
+    clean_tokens,
     clip_message,
     context_window,
+    estimate_tokens,
     prepare_context,
 )
 from easyagent.prompt import build_system
@@ -143,6 +145,7 @@ def public_endpoint(endpoint: dict) -> dict:
         "has_api_key": bool(endpoint.get("has_api_key")) or bool(endpoint.get("api_key")),
         "model": endpoint.get("model") or None,
         "max_parallel": gate.clamp_parallel(endpoint.get("max_parallel")),
+        "n_ctx": clean_tokens(endpoint.get("n_ctx")),
         "created_at": endpoint.get("created_at"),
     }
 
@@ -195,6 +198,8 @@ def public_bot(store: Store, bot: dict) -> dict:
         "browser_headless": bool(bot.get("browser_headless")),
         "browser_allow": list(bot.get("browser_allow") or []),
         "browser_deny": list(bot.get("browser_deny") or []),
+        "situation": bot.get("situation") is True,
+        "situation_title": bot.get("situation_title") is True,
     }
 
 
@@ -279,6 +284,21 @@ def clean_context_tokens(value: int | None) -> int | None:
     return value
 
 
+def clean_n_ctx(value) -> int | None:
+    """The endpoint's context window, used when the server does not say."""
+    if value is None:
+        return None
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise StoreError("Context window must be a whole number of tokens, or blank.", 400)
+    cleaned = clean_tokens(value)
+    if cleaned is None:
+        raise StoreError(
+            f"Context window must be a whole number of tokens from {MIN_CONTEXT_TOKENS} to {MAX_CONTEXT_TOKENS}, or blank.",
+            400,
+        )
+    return cleaned
+
+
 def clean_max_parallel(value) -> int:
     """How many replies may use this connection at once."""
     if isinstance(value, bool) or not isinstance(value, int):
@@ -306,6 +326,7 @@ class EndpointIn(BaseModel):
     api_key: str | None = None
     model: str | None = None
     max_parallel: int | None = None
+    n_ctx: int | None = None
 
 
 class EndpointPatch(BaseModel):
@@ -316,6 +337,7 @@ class EndpointPatch(BaseModel):
     model: str | None = None
     clear_api_key: bool = False
     max_parallel: int | None = None
+    n_ctx: int | None = None
 
 
 class ConfirmIn(BaseModel):
@@ -338,6 +360,8 @@ class BotPatch(BaseModel):
     context_tokens: int | None = None
     face_color: str | None = None
     check_enabled: bool | None = None
+    situation: bool | None = None
+    situation_title: bool | None = None
 
 
 class LearnFlag(BaseModel):
@@ -363,6 +387,7 @@ class HonestyIn(BaseModel):
     tripwires: bool | None = None
     stall: bool | None = None
     stall_minutes: int | None = None
+    debug: bool | None = None
 
 
 class ApprovalIn(BaseModel):
@@ -430,6 +455,22 @@ class MessageIn(BaseModel):
     model_config = ConfigDict(extra="ignore")
     content: str = ""
     attachment_id: str | None = None
+
+
+class BridgeIn(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+    kind: str = "telegram"
+    name: str = ""
+    bot_id: str = ""
+    allow_ids: list[str] = Field(default_factory=list)
+    token: str = ""
+
+
+class BridgePatch(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+    enabled: bool | None = None
+    allow_ids: list[str] | None = None
+    token: str = ""
 
 
 class MemoryIn(BaseModel):
@@ -541,6 +582,7 @@ async def _lifespan(app: FastAPI):
     task = asyncio.create_task(schedule_loop(app.state.store, stop))
     learn_task = asyncio.create_task(learn_loop(app.state.store, stop))
     relay_task = asyncio.create_task(relay_loop(app, stop))
+    bridge_task = asyncio.create_task(_bridge_loop(app.state.store, stop))
     try:
         yield
     finally:
@@ -551,6 +593,7 @@ async def _lifespan(app: FastAPI):
         relay_task.cancel()
         learn_task.cancel()
         task.cancel()
+        bridge_task.cancel()
         for worker in running:
             with suppress(asyncio.CancelledError, Exception):
                 await worker
@@ -560,6 +603,8 @@ async def _lifespan(app: FastAPI):
             await learn_task
         with suppress(asyncio.CancelledError):
             await task
+        with suppress(asyncio.CancelledError):
+            await bridge_task
 
 
 def create_app(data_dir: str | Path | None = None) -> FastAPI:
@@ -747,6 +792,7 @@ def create_app(data_dir: str | Path | None = None) -> FastAPI:
             api_key=(body.api_key or "").strip() or None,
             model=clean_model(body.model),
             max_parallel=1 if body.max_parallel is None else clean_max_parallel(body.max_parallel),
+            n_ctx=clean_n_ctx(body.n_ctx) if "n_ctx" in body.model_fields_set else None,
         )
         return public_endpoint(record)
 
@@ -765,6 +811,8 @@ def create_app(data_dir: str | Path | None = None) -> FastAPI:
             model_set="model" in fields,
             max_parallel=clean_max_parallel(body.max_parallel) if "max_parallel" in fields and body.max_parallel is not None else None,
             max_parallel_set="max_parallel" in fields and body.max_parallel is not None,
+            n_ctx=clean_n_ctx(body.n_ctx) if "n_ctx" in fields else None,
+            n_ctx_set="n_ctx" in fields,
         )
         if _snapshot_bots(store) != bots_before:
             raise HTTPException(500, "Saving a connection changed a bot or a chat.")
@@ -813,6 +861,10 @@ def create_app(data_dir: str | Path | None = None) -> FastAPI:
             face_color_set="face_color" in fields,
             check_enabled=body.check_enabled if "check_enabled" in fields else None,
             check_enabled_set="check_enabled" in fields,
+            situation=bool(body.situation) if "situation" in fields else None,
+            situation_set="situation" in fields,
+            situation_title=bool(body.situation_title) if "situation_title" in fields else None,
+            situation_title_set="situation_title" in fields,
         )
         chats_after = _snapshot_chats(store, bot_id)
         if chats_before != chats_after:
@@ -949,6 +1001,56 @@ def create_app(data_dir: str | Path | None = None) -> FastAPI:
 
         try:
             delete_connector(store, bot_id, connector_id)
+        except StoreError as exc:
+            raise HTTPException(exc.status, exc.message) from exc
+        return {"ok": True}
+
+    @app.get("/api/bridges")
+    def get_bridges():
+        from easyagent.bridges import list_records, public_record
+
+        return [public_record(row) for row in list_records(store)]
+
+    @app.post("/api/bridges")
+    def post_bridge(body: BridgeIn):
+        from easyagent.bridges import add_bridge, public_record
+
+        try:
+            store.get_bot(body.bot_id)
+            row = add_bridge(
+                store,
+                kind=body.kind,
+                name=body.name,
+                bot_id=body.bot_id,
+                allow_ids=body.allow_ids,
+                token=body.token,
+            )
+        except StoreError as exc:
+            raise HTTPException(exc.status, exc.message) from exc
+        return public_record(row)
+
+    @app.post("/api/bridges/{bridge_id}")
+    def post_bridge_update(bridge_id: str, body: BridgePatch):
+        from easyagent.bridges import public_record, update_bridge
+
+        try:
+            row = update_bridge(
+                store,
+                bridge_id,
+                enabled=body.enabled,
+                allow_ids=body.allow_ids,
+                token=body.token or None,
+            )
+        except StoreError as exc:
+            raise HTTPException(exc.status, exc.message) from exc
+        return public_record(row)
+
+    @app.delete("/api/bridges/{bridge_id}")
+    def delete_bridge_route(bridge_id: str):
+        from easyagent.bridges import delete_bridge
+
+        try:
+            delete_bridge(store, bridge_id)
         except StoreError as exc:
             raise HTTPException(exc.status, exc.message) from exc
         return {"ok": True}
@@ -1270,6 +1372,25 @@ def create_app(data_dir: str | Path | None = None) -> FastAPI:
     def fresh_chat(bot_id: str, chat_id: str):
         """Clear what the model sees. The transcript is not deleted."""
         return _public_chat(store, store.start_fresh(bot_id, chat_id))
+
+    @app.post("/api/bots/{bot_id}/chats/{chat_id}/compact")
+    def compact_chat(bot_id: str, chat_id: str):
+        """Fold older turns into the summary. No model call. The transcript stays."""
+        chat = store.get_chat(bot_id, chat_id)
+        count = len(chat.get("messages") or [])
+        if count > 2:
+            floor = count - 2
+        elif count > 1:
+            floor = count - 1
+        else:
+            floor = 0
+        chat["compact_through"] = floor
+        chat.pop("usage_prompt_tokens", None)
+        chat.pop("context_overflow", None)
+        _persist_context(store, chat)
+        chat["updated_at"] = now_iso()
+        store.save_chat(chat)
+        return _public_chat(store, chat)
 
     @app.post("/api/bots/{bot_id}/chats/{chat_id}/read")
     def read_chat(bot_id: str, chat_id: str, body: ReadIn | None = None):
@@ -2017,6 +2138,10 @@ def _model_message(store: Store, bot_id: str, chat_id: str, stored: dict, clippe
     """Show an attached file to the model without putting a typed path in its place."""
     content = clipped.get("content") or ""
     role = clipped.get("role") or "user"
+    if isinstance(stored, dict) and stored.get("bridge") and role == "user" and isinstance(content, str) and content.strip():
+        from easyagent.safety import mark_untrusted
+
+        content = mark_untrusted(content)
     attachment = stored.get("attachment") if isinstance(stored, dict) else None
     if not isinstance(attachment, dict) or not attachment.get("id"):
         return _with_reaction(stored, {"role": role, "content": content})
@@ -2191,11 +2316,68 @@ def _chat_budget(store: Store, chat: dict) -> int:
     return bot_context_chars(bot)
 
 
+def _window_for(store: Store, chat: dict) -> int:
+    from easyagent.nctx import resolve_n_ctx
+
+    endpoint = None
+    model = None
+    try:
+        bot = store.get_bot(chat["bot_id"])
+        endpoint = store.get_endpoint(bot["endpoint_id"])
+        if endpoint is not None:
+            model = chosen_model(bot, endpoint)
+    except Exception:
+        endpoint = None
+    return resolve_n_ctx(endpoint, None, model)
+
+
+def _metered_stats(store: Store, chat: dict, stats: dict) -> dict:
+    from easyagent.nctx import apply_meter
+
+    try:
+        usage = int(chat.get("usage_prompt_tokens") or 0)
+    except (TypeError, ValueError):
+        usage = 0
+    merged = dict(stats or {})
+    try:
+        system_tokens = int(chat.get("system_tokens") or 0)
+    except (TypeError, ValueError):
+        system_tokens = 0
+    if system_tokens > 0:
+        merged["system_tokens"] = system_tokens
+    if chat.get("context_overflow"):
+        merged["context_overflow"] = 1
+    return apply_meter(merged, _window_for(store, chat), usage)
+
+
+def _record_turn_meter(chat: dict, *, detail: str = "", clear_overflow: bool = False) -> None:
+    """Keep the system-prompt estimate, and remember a context-size refusal."""
+    from easyagent.nctx import context_overflow, take_system_tokens
+
+    overhead = take_system_tokens()
+    if overhead > 0:
+        chat["system_tokens"] = overhead
+    if clear_overflow:
+        chat.pop("context_overflow", None)
+    elif detail and context_overflow(detail):
+        chat["context_overflow"] = True
+
+
+def _message_cap(store: Store, chat: dict) -> int:
+    from easyagent.turnctx import message_cap_chars
+
+    try:
+        overhead = int(chat.get("system_tokens") or 0)
+    except (TypeError, ValueError):
+        overhead = 0
+    return message_cap_chars(_window_for(store, chat), overhead, 2)
+
+
 def _persist_context(store: Store, chat: dict) -> dict:
-    prepared = visible_prepare(chat, _chat_budget(store, chat))
+    prepared = visible_prepare(chat, _chat_budget(store, chat), _message_cap(store, chat))
     chat["summary"] = prepared.summary
     chat["summarized_through"] = prepared.summarized_through
-    return prepared.stats
+    return _metered_stats(store, chat, prepared.stats)
 
 
 def _public_chat(store: Store, chat: dict, window: int | None = None) -> dict:
@@ -2203,7 +2385,7 @@ def _public_chat(store: Store, chat: dict, window: int | None = None) -> dict:
 
     `window` returns only the recent tail. Omit it and every message is included.
     """
-    prepared = visible_prepare(chat, _chat_budget(store, chat))
+    prepared = visible_prepare(chat, _chat_budget(store, chat), _message_cap(store, chat))
     messages = list(chat.get("messages") or [])
     shown = messages
     start = 0
@@ -2226,7 +2408,7 @@ def _public_chat(store: Store, chat: dict, window: int | None = None) -> dict:
         "messages": shown,
         "message_count": len(messages),
         "window_start": start,
-        "context": prepared.stats,
+        "context": _metered_stats(store, chat, prepared.stats),
         "run": public_run(chat),
     }
 
@@ -2477,7 +2659,13 @@ def _turn_messages(store: Store, bot_id: str, chat: dict) -> tuple[dict, list[di
         earlier=view.earlier,
         workspace=_workspace_text(store, bot_id),
         connectors=_connectors_prompt(store, bot_id),
+        bridges=_bridges_prompt(store),
     )
+    from easyagent.nctx import note_system_tokens
+    from easyagent.situation import attach_desktop
+
+    desktop = attach_desktop(bot)
+    note_system_tokens(estimate_tokens(len(system)))
     source = list(chat.get("messages") or [])[view.summarized_through :]
     if len(source) >= len(view.tail):
         source = source[len(source) - len(view.tail) :]
@@ -2488,13 +2676,82 @@ def _turn_messages(store: Store, bot_id: str, chat: dict) -> tuple[dict, list[di
         ]
     else:
         tail = view.tail
-    return endpoint, [{"role": "system", "content": system}, *tail]
+    messages = [{"role": "system", "content": system}, *tail]
+    if desktop:
+        messages = _with_window(messages, desktop)
+    return endpoint, messages
+
+
+def _with_window(messages: list[dict], block: str) -> list[dict]:
+    """Attach window metadata to a copy of the last user turn.
+
+    The stored transcript is not changed. The block is untrusted data, not a
+    system instruction, and it cannot grant a tool or write an Always allow.
+    """
+    copied = [dict(item) for item in messages]
+    for index in range(len(copied) - 1, -1, -1):
+        item = copied[index]
+        if item.get("role") != "user":
+            continue
+        content = item.get("content")
+        if isinstance(content, list):
+            item["content"] = [*content, {"type": "text", "text": block}]
+        else:
+            text = content or ""
+            item["content"] = f"{text}\n\n{block}".strip() if text else block
+        return copied
+    copied.append({"role": "user", "content": block})
+    return copied
 
 
 def _connectors_prompt(store: Store, bot_id: str) -> str:
     from easyagent.connectors import prompt_block
 
     return prompt_block(store, bot_id)
+
+
+def _bridges_prompt(store: Store) -> str:
+    from easyagent.bridges import prompt_block
+
+    return prompt_block(store)
+
+
+async def _bridge_loop(store: Store, stop: asyncio.Event) -> None:
+    from easyagent.bridges import run_bridges
+
+    async def reply(current: Store, bot_id: str) -> str:
+        return await _bridge_reply(current, bot_id)
+
+    await run_bridges(store, stop, reply)
+
+
+async def _bridge_reply(store: Store, bot_id: str) -> str:
+    """Answer a bridge message. Tools still go through Strict. The chat is not marked running."""
+    from easyagent.bridges import append_reply
+
+    bot = store.get_bot(bot_id)
+    chat = store.ongoing_chat(bot_id)
+    endpoint, messages = _turn_messages(store, bot_id, chat)
+    conn = gate.bind_connection(endpoint, bot.get("name") or "")
+    try:
+        settled = await complete_with_tools(
+            base_url=endpoint["base_url"],
+            api_key=endpoint.get("api_key") or None,
+            model=chosen_model(bot, endpoint),
+            messages=messages,
+            store=store,
+            bot_id=bot_id,
+            chat_id=chat.get("id"),
+        )
+    finally:
+        gate.reset_connection(conn)
+    visible, _saved = extract_skills(settled.text or "")
+    append_reply(store, bot_id, visible or "(empty reply)")
+    stored = store.get_chat(bot_id, chat["id"])
+    if (stored.get("run") or {}).get("status") == "running":
+        stored["run"] = {**(stored.get("run") or {}), "status": "idle"}
+        store.save_chat(stored)
+    return visible or ""
 
 
 def _projects_prompt(store: Store, bot_id: str) -> str:
@@ -2573,6 +2830,25 @@ def _save_uploads(store: Store, project_id: str, prepared: list[tuple[str, bytes
     return _public_project(store, project)
 
 
+async def _refresh_window(store: Store, bot: dict, endpoint: dict) -> None:
+    """Detect n_ctx once per turn. The result stays in memory, not on disk."""
+    from easyagent.nctx import probe_n_ctx, remember_runtime
+
+    del store
+    model = chosen_model(bot, endpoint)
+    try:
+        detected = await probe_n_ctx(
+            endpoint.get("base_url") or "",
+            model,
+            endpoint.get("api_key") or None,
+        )
+    except Exception:
+        return
+    if not detected:
+        return
+    remember_runtime(endpoint.get("base_url") or "", model, detected)
+
+
 def _memory_prompt(store: Store, bot_id: str) -> str:
     """The index only. Topic files are read later, one at a time."""
     try:
@@ -2586,6 +2862,8 @@ def _memory_prompt(store: Store, bot_id: str) -> str:
 
 async def _complete_for_chat(store: Store, bot_id: str, chat: dict) -> tuple[str, list[str], list[str], str, str, bool, str, str]:
     bot = store.get_bot(bot_id)
+    endpoint = _require_endpoint(store, bot_id)
+    await _refresh_window(store, bot, endpoint)
     endpoint, messages = _turn_messages(store, bot_id, chat)
     conn = gate.bind_connection(endpoint, bot.get("name") or "")
     try:
@@ -2737,6 +3015,7 @@ async def _complete_for_room_bot(store: Store, room: dict, bot_id: str) -> tuple
         own_files=own_files_prompt(store, bot["id"]),
         workspace=_workspace_text(store, bot["id"]),
         connectors=_connectors_prompt(store, bot["id"]),
+        bridges=_bridges_prompt(store),
     )
     _, _, clip_limit = context_window(budget)
     tail = [
@@ -2868,6 +3147,7 @@ async def _ack_room_reaction(store: Store, room_id: str, message: dict) -> None:
         memory=_memory_prompt(store, bot["id"]),
         message_ids=message_index(room.get("messages") or [], self_id=bot["id"]),
         connectors=_connectors_prompt(store, bot["id"]),
+        bridges=_bridges_prompt(store),
     )
     _, _, clip_limit = context_window(budget)
     tail = [
@@ -3180,6 +3460,7 @@ def _append_error(store: Store, bot_id: str, chat_id: str, detail: str) -> dict:
         if not (last.get("content") or "").strip():
             last["content"] = shown
             last["error"] = True
+            _record_turn_meter(chat, detail=detail)
             stats = _persist_context(store, chat)
             chat["updated_at"] = now_iso()
             _apply_run(chat, status="error", reason=shown, step="")
@@ -3197,6 +3478,7 @@ def _append_error(store: Store, bot_id: str, chat_id: str, detail: str) -> dict:
             "created_at": now_iso(),
         }
     )
+    _record_turn_meter(chat, detail=detail)
     stats = _persist_context(store, chat)
     chat["updated_at"] = now_iso()
     _apply_run(chat, status="error", reason=shown, step="")
@@ -3223,7 +3505,11 @@ async def _finish_and_maybe_ask(
     lesson: str = "",
     thought_seconds: int = 0,
 ) -> dict:
-    """Save the parent reply, then run at most one child ask found in it."""
+    """Save the parent reply, then run helpers, then at most one child ask found in it."""
+    from easyagent.helpers import for_model, parse_helpers, run_helpers, strip_helper_fences
+
+    helpers = parse_helpers(visible)
+    visible = strip_helper_fences(visible)
     ask = parse_subagent(visible)
     visible = strip_subagent_fences(visible)
     if ask and not visible.strip():
@@ -3242,6 +3528,18 @@ async def _finish_and_maybe_ask(
         lesson=lesson,
         thought_seconds=thought_seconds,
     )
+    if helpers:
+        rows = await run_helpers(store, bot_id, helpers)
+        summary = for_model(rows) or "The helper finished with nothing to report."
+        finished = _append_parent_result(
+            store,
+            bot_id,
+            chat_id,
+            summary,
+            speaker="Helper",
+            failed=any(row.get("status") == "error" for row in rows),
+            child_chat_id=None,
+        )
     if not ask:
         return finished
     if len(ask[1]) > 8000:
@@ -3503,11 +3801,13 @@ def _finish_reply(
             else:
                 messages.pop()
         _apply_run(chat, status="idle")
+        _record_turn_meter(chat, clear_overflow=True)
         store.save_chat(chat)
         public = _public_chat(store, chat)
         return {"reply": "", "skills_saved": saved, "chat": public, "context": public["context"]}
+    had_words = bool(visible.strip())
     blank_reply = False
-    if not visible.strip() and not kept:
+    if not had_words and not kept:
         visible = "(empty reply)"
         blank_reply = True
     messages = chat.setdefault("messages", [])
@@ -3569,12 +3869,33 @@ def _finish_reply(
         message["unverified"] = True
     elif "unverified" in message:
         message.pop("unverified", None)
+    if outcome is not None and outcome.debug:
+        message["debug"] = True
+    elif "debug" in message:
+        message.pop("debug", None)
+    if outcome is not None and outcome.chips:
+        message["chips"] = [redact(store, str(item))[:80] for item in outcome.chips if str(item).strip()]
+    elif "chips" in message:
+        message.pop("chips", None)
+    from easyagent.situation import scrub_secrets, take_shared
+
+    shared = scrub_secrets(take_shared())
+    if shared:
+        message["shared"] = shared[:120]
+    elif "shared" in message:
+        message.pop("shared", None)
+    if message.get("chips") and not had_words and not kept:
+        message["content"] = ""
+        message.pop("error", None)
+        visible = ""
+        blank_reply = False
     if len(kept) >= 2:
         message["choices"] = kept
     elif "choices" in message:
         message.pop("choices", None)
     if attachment:
         message["attachment"] = attachment
+    _record_turn_meter(chat, clear_overflow=True)
     stats = _persist_context(store, chat)
     chat["updated_at"] = now_iso()
     if blank_reply:
@@ -3630,6 +3951,8 @@ async def _stream_reply(store: Store, bot_id: str, chat_id: str):
     chat = store.get_chat(bot_id, chat_id)
     await _propose_if_corrected(store, bot_id, chat)
     chat = store.get_chat(bot_id, chat_id)
+    endpoint = _require_endpoint(store, bot_id)
+    await _refresh_window(store, bot, endpoint)
     endpoint, messages = _turn_messages(store, bot_id, chat)
     opened = _write_live(store, bot_id, chat_id, step="Waiting on model", start=True, force=True)
     if opened:

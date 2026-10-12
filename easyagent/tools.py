@@ -77,6 +77,7 @@ _REACT_FENCE = re.compile(r"```react[ \t]*\r?\n(.*?)```", re.DOTALL | re.IGNOREC
 _ROUTINE_FENCE = re.compile(r"```routine[ \t]*\r?\n(.*?)```", re.DOTALL | re.IGNORECASE)
 _BROWSER_FENCE = re.compile(r"```browser[ \t]*\r?\n(.*?)```", re.DOTALL | re.IGNORECASE)
 _MCP_FENCE = re.compile(r"```mcp[ \t]*\r?\n(.*?)```", re.DOTALL | re.IGNORECASE)
+_BRIDGE_FENCE = re.compile(r"```bridge[ \t]*\r?\n(.*?)```", re.DOTALL | re.IGNORECASE)
 _BROWSER_ACTIONS = {"open", "read", "click", "type", "select", "scroll", "back", "wait", "tabs", "download"}
 _HISTORY_FENCE = re.compile(r"```history[ \t]*\r?\n(.*?)```", re.DOTALL | re.IGNORECASE)
 _HISTORY_ACTIONS = {"list", "ls", "chats", "search", "find", "grep", "read", "open", "chat", "memory", "notes"}
@@ -385,6 +386,12 @@ def _from_invoke(name: str, body: str) -> ToolRequest | None:
         if isinstance(raw, dict):
             raw = json.dumps(raw)
         return ToolRequest(kind="mcp", path=server, command=tool, body=str(raw).strip() or "{}")
+    if kind in {"bridge", "send_message"}:
+        return _bridge_fields(
+            str(params.get("bridge") or params.get("name") or ""),
+            str(params.get("to") or params.get("recipient") or ""),
+            str(params.get("message") or params.get("text") or params.get("body") or ""),
+        )
     if kind in {"fetch_page", "fetch"}:
         page = params.get("url") or params.get("href") or ""
         if not page.strip():
@@ -517,6 +524,15 @@ def _request_from_call(data: dict) -> ToolRequest:
         if not isinstance(raw, str):
             raw = json.dumps(raw if isinstance(raw, dict) else {})
         return ToolRequest(kind="mcp", path=server, command=tool, body=raw.strip() or "{}")
+    if name in {"bridge", "send_message"}:
+        request = _bridge_fields(
+            str(raw_args.get("bridge") or raw_args.get("name") or ""),
+            str(raw_args.get("to") or raw_args.get("recipient") or ""),
+            str(raw_args.get("message") or raw_args.get("text") or content or ""),
+        )
+        if request is None:
+            raise ToolError("Name the bridge, who receives it, and the message.")
+        return request
     if name in {"fetch_page", "fetch"}:
         page = str(raw_args.get("url") or raw_args.get("href") or "").strip()
         if not page:
@@ -581,7 +597,7 @@ def _cut_off_tool(text: str) -> bool:
     ):
         if lowered.count(open_tag) > lowered.count(close_tag):
             return True
-    if re.search(r"```(?:files|shell|search|ssh|windows|project|memory|history|finish|react|routine|browser|fetch|research|mcp)\b", raw, re.IGNORECASE):
+    if re.search(r"```(?:files|shell|search|ssh|windows|project|memory|history|finish|react|routine|browser|fetch|research|mcp|bridge)\b", raw, re.IGNORECASE):
         if raw.count("```") % 2 == 1:
             return True
     return False
@@ -653,6 +669,11 @@ def parse_tool(text: str) -> ToolRequest | None:
     mcp = _fence_request(_MCP_FENCE, text)
     if mcp is not None:
         request = _mcp_from_body(mcp)
+        if request is not None:
+            return request
+    bridge = _fence_request(_BRIDGE_FENCE, text)
+    if bridge is not None:
+        request = _bridge_from_body(bridge)
         if request is not None:
             return request
     browser = _fence_request(_BROWSER_FENCE, text)
@@ -785,6 +806,31 @@ def _mcp_from_body(body: str) -> ToolRequest | None:
     return ToolRequest(kind="mcp", path=server, command=tool, body=payload)
 
 
+def _bridge_fields(bridge: str, recipient: str, message: str) -> ToolRequest | None:
+    name = " ".join((bridge or "").split())
+    who = " ".join((recipient or "").split())
+    text = (message or "").strip()
+    if who.lower() in {"the person", "person", "the user", "user", ""} and text.lower() in {"the message", "message", ""}:
+        return None
+    if not name or not who or not text:
+        raise ToolError("Name the bridge, who receives it, and the message.")
+    return ToolRequest(kind="bridge", path=name, command=who, body=text)
+
+
+def _bridge_from_body(body: str) -> ToolRequest | None:
+    text = body or ""
+    head, sep, tail = text.partition("\n---\n")
+    if not sep:
+        head, tail = text, ""
+    fields: dict[str, str] = {}
+    for line in head.splitlines():
+        if ":" not in line:
+            continue
+        key, value = line.split(":", 1)
+        fields[key.strip().lower()] = value.strip()
+    return _bridge_fields(fields.get("bridge") or fields.get("name") or "", fields.get("to") or "", tail)
+
+
 def _fetch_from_body(body: str) -> ToolRequest | None:
     url = " ".join((body or "").split())
     if not url or url.lower() in {"the url", "url", "https://example.com"}:
@@ -888,6 +934,7 @@ def parse_tools(text: str) -> list[ToolRequest]:
     take(_ROUTINE_FENCE, _routine_from_body)
     take(_BROWSER_FENCE, _browser_from_body)
     take(_MCP_FENCE, _mcp_from_body)
+    take(_BRIDGE_FENCE, _bridge_from_body)
     take(search_mod.FENCE_RE, _search_from_body)
     take(search_mod.FETCH_RE, _fetch_from_body)
     take(search_mod.RESEARCH_RE, _research_from_body)
@@ -954,6 +1001,8 @@ def status_label(request: ToolRequest) -> str:
         return "Searching"
     if request.kind == "mcp":
         return "Calling a connector"
+    if request.kind == "bridge":
+        return "Sending a message"
     return "Connecting"
 
 
@@ -983,6 +1032,14 @@ def secret_strings(store: Store) -> list[str]:
 
         for item in secret_values(store):
             if isinstance(item, str) and len(item) >= 6 and item not in found:
+                found.append(item)
+    except Exception:
+        pass
+    try:
+        from easyagent.bridges import token_values
+
+        for item in token_values(store):
+            if isinstance(item, str) and item and item not in found:
                 found.append(item)
     except Exception:
         pass
@@ -1072,21 +1129,10 @@ def _under(root: Path, target: Path) -> bool:
 
 
 def _data_path_blocked(store: Store, resolved: Path, bot_id: str | None) -> bool:
-    """True when a resolved path is in the data folder outside this bot's own work folders.
+    """The same data-folder test the checker uses, so a read cannot be allowed and then refused."""
+    from easyagent.safety import saved_data_blocked
 
-    The folder this store opened is protected. So is EASYAGENT_DATA when it names
-    a different directory, which is the data folder a redirected test or install uses.
-    """
-    import os
-
-    target = Path(resolved)
-    roots = [Path(store.root)]
-    env = (os.environ.get("EASYAGENT_DATA") or "").strip()
-    if env:
-        roots.append(Path(env))
-    if not any(_under(root, target) for root in roots):
-        return False
-    return not _bot_work_path(store, target, bot_id)
+    return saved_data_blocked(store, resolved, bot_id)
 
 
 def _bare_filename(raw: str) -> bool:
@@ -2023,7 +2069,7 @@ async def execute(store: Store, request: ToolRequest, bot_id: str | None = None)
 
     blocked = honesty.before_tool(request)
     if blocked:
-        return blocked
+        raise ToolError(blocked)
     try:
         result = await _execute_now(store, request, bot_id)
     except ToolError as exc:
@@ -2034,9 +2080,13 @@ async def execute(store: Store, request: ToolRequest, bot_id: str | None = None)
 
 async def _execute_now(store: Store, request: ToolRequest, bot_id: str | None = None) -> str:
     turn_mod.raise_if_cancelled()
+    from easyagent.helpers import scope_block
     from easyagent.safety import _audit, guard, unattended_blocked_target, wrap_output
     from easyagent.store import now_iso
 
+    limited = scope_block(request.kind)
+    if limited:
+        raise ToolError(limited + " It was not run.")
     if request.kind == "routine":
         return await _routine_proposal(store, request, bot_id)
     if request.kind == "browser":
@@ -2062,6 +2112,12 @@ async def _execute_now(store: Store, request: ToolRequest, bot_id: str | None = 
         text = await asyncio.to_thread(invoke, store, request, bot_id)
         turn_mod.raise_if_cancelled()
         return wrap_output(request, text, store)
+    if request.kind == "bridge":
+        from easyagent.bridges import deliver
+
+        text = await deliver(store, request, bot_id)
+        turn_mod.raise_if_cancelled()
+        return text
     if request.kind == "browser":
         from easyagent.browser import note_vision_shot, perform
 
@@ -2162,6 +2218,8 @@ def happened_line(request: ToolRequest, messages: list[dict] | None = None) -> s
         }.get(request.action, "Used this bot's browser.")
     if request.kind == "mcp":
         return f"Called {request.command} on {request.path}."
+    if request.kind == "bridge":
+        return "Sent a bridge message."
     if request.kind == "fetch":
         return "Fetched a page."
     if request.kind == "research":
@@ -6375,6 +6433,7 @@ async def run_turn(
         else:
             text = raw_text
             parts = text_bits if stream else None
+        honesty.note_reply(text or "")
         if text:
             if _turn_marked_a_lesson(text):
                 lesson_marked = True
@@ -7110,6 +7169,12 @@ async def run_turn(
                 for event in close(""):
                     yield event
                 return
+            follow = honesty.take_followup(prose) if not nudged else None
+            if follow:
+                nudged = True
+                working = [*working, {"role": "user", "content": follow}]
+                yield "status", "Thinking"
+                continue
             if ledger is not None and not ledger.all_proven() and is_bare_not_written(prose):
                 if not bare_held:
                     bare_held = True
@@ -7258,6 +7323,22 @@ async def run_turn(
         try:
             result = await execute(store, request, bot_id)
         except ToolError as exc:
+            held_note = honesty.consume_hold()
+            if held_note:
+                _failed(request, str(exc))
+                yield "face", "sad"
+                last_sig = sig
+                seen_results[sig] = "Not applied."
+                working = _continue_messages(
+                    working,
+                    "",
+                    "Not applied.",
+                    voice=_spoken(text or ""),
+                    requests=[request],
+                    note=held_note,
+                )
+                yield "status", "Thinking"
+                continue
             _failed(request, str(exc))
             yield "face", "sad"
             if request.kind == "files" and request.action == "write" and _wanted_write(messages):
@@ -7460,6 +7541,7 @@ _VERIFY_ASK = (
     "Run a tool that shows the result after your last change. "
     "Reply with that tool call only."
 )
+_VERIFY_ASK_DEBUG = "Rerun the same command that showed the failure. One tool call."
 
 
 async def open_honesty(
@@ -7475,6 +7557,7 @@ async def open_honesty(
     from easyagent import honesty
 
     honesty.begin(store, bot_id)
+    honesty.remember_prior(messages)
     kind = honesty.classify_pushback(honesty.latest_user(messages))
     trace = honesty.current()
     if (
@@ -7507,6 +7590,9 @@ async def open_honesty(
             kind = "no"
     if kind == "yes":
         honesty.mark_pushback(True)
+        honesty.mark_debug(True)
+    elif honesty.classify_debug(honesty.latest_user(messages)):
+        honesty.mark_debug(True)
     return honesty.working_messages(messages)
 
 
@@ -7538,7 +7624,7 @@ async def finish_honesty(
                 messages=[
                     *list(messages or [])[-6:],
                     {"role": "assistant", "content": (final or "")[:2000]},
-                    {"role": "user", "content": _VERIFY_ASK},
+                    {"role": "user", "content": _VERIFY_ASK_DEBUG if trace.debug and trace.repro_command else _VERIFY_ASK},
                 ],
                 tools=False,
             )
@@ -7555,6 +7641,24 @@ async def finish_honesty(
     return outcome.text
 
 
+def _remember_inbound(messages: list[dict]) -> None:
+    """A bridge message is data. Remember it before any tool call reads it as an instruction.
+
+    The stored sentence stays plain. ``note_untrusted`` records that sentence
+    for the injection check. It does not rewrite the message.
+    """
+    from easyagent.safety import note_untrusted
+
+    for message in messages or []:
+        if not isinstance(message, dict) or message.get("role") != "user":
+            continue
+        if not message.get("bridge"):
+            continue
+        content = message.get("content")
+        if isinstance(content, str) and content.strip():
+            note_untrusted(content)
+
+
 async def complete_with_tools(
     *,
     base_url: str,
@@ -7566,6 +7670,7 @@ async def complete_with_tools(
     chat_id: str | None = None,
 ) -> Settled:
     """Run tools and keep calling the model until it answers, or the loop is stuck."""
+    _remember_inbound(messages)
     messages = await open_honesty(
         messages,
         store=store,
@@ -7645,6 +7750,7 @@ async def stream_with_tools(
     chat_id: str | None = None,
 ):
     """Yield stream events, then ('final', text). The turn stays open across tools."""
+    _remember_inbound(messages)
     messages = await open_honesty(
         messages,
         store=store,

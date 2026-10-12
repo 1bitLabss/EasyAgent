@@ -162,21 +162,42 @@ def _posix_rows(mechanism: str) -> list[tuple[str, str, str]]:
         try:
             proc = popen_contained(_Store(data), bot, probe_command(), env, str(work))
             out, err = proc.communicate(timeout=20)
-        except (OSError, subprocess.TimeoutExpired) as exc:
+        except (OSError, subprocess.SubprocessError, subprocess.TimeoutExpired) as exc:
             detail = str(exc)[:200]
             rows.append(("launch", "FAIL", detail))
+            rows[0] = ("mechanism", "FAIL", f"{mechanism} did not start")
             rows.append(("RESULT", "FAIL", detail))
             return rows
         heard = (out or "") + "\n" + (err or "")
         fields = _probe_fields(heard)
+        ran = bool(fields)
         identity = fields.get("IDENTITY", "")
-        rows.append(("whoami", "PASS" if identity and identity != "none" else "FAIL", identity[:120] or "no identity"))
+        who = identity[:120] if identity and identity != "none" else ("the probe did not run" if not ran else "no identity")
+        rows.append(("whoami", "PASS" if identity and identity != "none" else "FAIL", who))
         leaked = token in heard or secret_token in heard
-        rows.append(("data-read", "FAIL" if leaked or fields.get("DATA") != "DENIED" else "PASS", "denied" if fields.get("DATA") == "DENIED" and not leaked else "the canary was readable"))
-        rows.append(("secrets", "FAIL" if fields.get("SECRETS") != "DENIED" or secret_token in heard else "PASS", "denied" if fields.get("SECRETS") == "DENIED" else "secrets.db was readable"))
+        if fields.get("DATA") == "DENIED" and not leaked:
+            data_detail = "denied"
+            data_ok = True
+        elif leaked or fields.get("DATA") == "LEAK":
+            data_detail = "the canary was readable"
+            data_ok = False
+        else:
+            data_detail = "the probe did not run"
+            data_ok = False
+        rows.append(("data-read", "PASS" if data_ok else "FAIL", data_detail))
+        if fields.get("SECRETS") == "DENIED" and secret_token not in heard:
+            secret_detail = "denied"
+            secret_ok = True
+        elif fields.get("SECRETS") == "LEAK" or secret_token in heard:
+            secret_detail = "secrets.db was readable"
+            secret_ok = False
+        else:
+            secret_detail = "the probe did not run"
+            secret_ok = False
+        rows.append(("secrets", "PASS" if secret_ok else "FAIL", secret_detail))
         marker = work / "probe.txt"
         wrote = fields.get("WROTE") == "ok" and marker.is_file() and "probe-ok" in marker.read_text(encoding="utf-8", errors="replace")
-        rows.append(("workspace-write", "PASS" if wrote else "FAIL", "wrote probe.txt" if wrote else "the workspace was not writable"))
+        rows.append(("workspace-write", "PASS" if wrote else "FAIL", "wrote probe.txt" if wrote else ("the probe did not run" if not ran else "the workspace was not writable")))
         connected = False
         try:
             client, _addr = sock.accept()
@@ -185,13 +206,21 @@ def _posix_rows(mechanism: str) -> list[tuple[str, str, str]]:
         except OSError:
             connected = False
         web_ok = connected and fields.get("WEB") == "ok"
-        rows.append(("web", "PASS" if web_ok else "FAIL", "connected" if web_ok else "the container could not reach the local listener"))
+        if web_ok:
+            web_detail = "connected"
+        elif not ran:
+            web_detail = "the probe did not run"
+        else:
+            web_detail = "the container could not reach the local listener"
+        rows.append(("web", "PASS" if web_ok else "FAIL", web_detail))
     finally:
         if sock is not None:
             sock.close()
         shutil.rmtree(temp, ignore_errors=True)
     core = {name: status for name, status, _detail in rows}
     passed = all(core.get(name) == "PASS" for name in ("whoami", "data-read", "secrets", "workspace-write", "web"))
+    if not passed:
+        rows[0] = ("mechanism", "FAIL", f"{mechanism} did not hold")
     rows.append(("RESULT", "PASS" if passed else "FAIL", "" if passed else "the container did not hold"))
     return rows
 

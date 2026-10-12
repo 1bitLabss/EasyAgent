@@ -71,6 +71,13 @@ def main() -> None:
         from easyagent.selftest import main as selftest_main
 
         raise SystemExit(selftest_main(sys.argv[2:]))
+    if len(sys.argv) > 1 and sys.argv[1] == "eval":
+        from easyagent.evals.__main__ import main as eval_main
+
+        rest = sys.argv[2:]
+        if not rest or rest[0] not in {"run", "compare"}:
+            rest = ["run", *rest]
+        raise SystemExit(eval_main(rest))
     port = int(os.environ.get("EASYAGENT_PORT", "44721"))
     host = os.environ.get("EASYAGENT_HOST", "127.0.0.1")
     data = default_data_dir()

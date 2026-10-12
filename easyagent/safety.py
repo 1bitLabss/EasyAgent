@@ -268,14 +268,27 @@ def lesson_weakens(text: str) -> bool:
         return False
 
 
-def mark_untrusted(text: str) -> str:
+def note_untrusted(text: str) -> None:
+    """Remember text so a command copied from it waits.
+
+    This does not wrap the sentence. Inbound chat stores the plain words.
+    The fenced copy is what ``mark_untrusted`` returns for the model.
+    """
     body = text or ""
     if _MARK_START in body:
-        return body
+        return
     remembered = body[:4000]
-    if remembered.strip():
-        _UNTRUSTED.append(remembered)
-        del _UNTRUSTED[:-24]
+    if not remembered.strip():
+        return
+    _UNTRUSTED.append(remembered)
+    del _UNTRUSTED[:-24]
+
+
+def mark_untrusted(text: str) -> str:
+    body = text or ""
+    note_untrusted(body)
+    if _MARK_START in body:
+        return body
     return f"{_MARK_START} source=\"tool\">>>\n{body}\n{_MARK_END}"
 
 
@@ -2626,6 +2639,72 @@ def _is_passphrase_file(path: Path) -> bool:
         return False
 
 
+def _under_data(root: Path, target: Path) -> bool:
+    try:
+        root = root.resolve()
+        target = target.resolve()
+    except OSError:
+        pass
+    return target == root or root in target.parents
+
+
+def _work_exempt(store: Store, resolved: Path, bot_id: str | None) -> bool:
+    """Only this bot's workspace, workbench, and tmp sit outside the data-dir block."""
+    if not bot_id:
+        return False
+    try:
+        parts = resolved.resolve().relative_to(store.root.resolve()).parts
+    except (OSError, ValueError):
+        return False
+    return (
+        len(parts) >= 3
+        and parts[0] == "bots"
+        and parts[1] == bot_id
+        and parts[2] in {"workspace", "workbench", "tmp"}
+    )
+
+
+def saved_data_blocked(store: Store, resolved: Path, bot_id: str | None) -> bool:
+    """True when a path is in the data folder outside this bot's own work folders.
+
+    The folder this store opened is protected. So is EASYAGENT_DATA when it names
+    a different directory. The files tool and the checker use this same test.
+    """
+    target = Path(resolved)
+    roots = [Path(store.root)]
+    env = (os.environ.get("EASYAGENT_DATA") or "").strip()
+    if env:
+        roots.append(Path(env))
+    if not any(_under_data(root, target) for root in roots):
+        return False
+    return not _work_exempt(store, target, bot_id)
+
+
+def _foreign_bot_data(store: Store, path: Path, bot_id: str | None) -> bool:
+    """True when a file tool reaches another bot's folder inside the data directory."""
+    try:
+        resolved = path.resolve()
+        root = Path(store.root).resolve()
+    except OSError:
+        return False
+    bots = root / "bots"
+    try:
+        bots_resolved = bots.resolve()
+    except OSError:
+        bots_resolved = bots
+    if resolved != bots_resolved and not _inside(resolved, [bots_resolved]):
+        return False
+    if not bot_id:
+        return True
+    try:
+        own = store._bot_dir(bot_id).resolve()
+    except OSError:
+        return True
+    if resolved == own or _inside(resolved, [own]):
+        return False
+    return True
+
+
 def judge_files(
     action: str,
     path: Path,
@@ -2749,15 +2828,33 @@ def classify(store: Store, request, bot_id: str | None) -> Verdict:
         verdict = _verdict(ALLOW, kind or "meta", "That does not change the computer.", kind, _fp(kind, getattr(request, "body", "")[:80]))
     elif kind == "files":
         path = _file_request_path(store, getattr(request, "path", "") or ".", cwd, bot_id)
-        verdict = judge_files(
-            getattr(request, "action", ""),
-            path,
-            getattr(request, "body", "") or "",
-            roots=roots,
-            created=created,
-            mode=mode,
-            user_text=user_text,
-        )
+        action = getattr(request, "action", "") or ""
+        if _foreign_bot_data(store, path, bot_id):
+            verdict = _verdict(
+                BLOCK,
+                "bot-isolation",
+                "That is another bot's data. It stays in that bot's folder.",
+                str(path),
+                _fp("isolation", str(path)),
+            )
+        elif action in {"read", "list"} and saved_data_blocked(store, path, bot_id):
+            verdict = _verdict(
+                BLOCK,
+                "data-dir",
+                "That reads EasyAgent's saved data.",
+                str(path),
+                _fp("file", action, str(path)),
+            )
+        else:
+            verdict = judge_files(
+                getattr(request, "action", ""),
+                path,
+                getattr(request, "body", "") or "",
+                roots=roots,
+                created=created,
+                mode=mode,
+                user_text=user_text,
+            )
     elif kind in {"shell", "ssh", "windows"}:
         command = getattr(request, "command", "") or ""
         if kind == "shell":
@@ -2835,6 +2932,10 @@ def classify(store: Store, request, bot_id: str | None) -> Verdict:
         from easyagent.connectors import judge_mcp
 
         verdict = judge_mcp(request, store, bot_id)
+    elif kind == "bridge":
+        from easyagent.bridges import judge_bridge
+
+        verdict = judge_bridge(request, store, bot_id)
     elif kind == "browser":
         from easyagent.browser import judge_browser
 
@@ -2858,7 +2959,7 @@ def classify(store: Store, request, bot_id: str | None) -> Verdict:
     if verdict.tier == BLOCK and mode == "advanced" and verdict.rule in unlocks:
         verdict = _verdict(ASK, verdict.rule, verdict.why + " You unlocked this blocked rule, so it still waits for a yes.", verdict.detail, verdict.fingerprint)
     exact = (getattr(request, "command", "") or getattr(request, "path", "") or "").strip()
-    if verdict.tier == ASK and verdict.rule not in {"bot-changed", "git-hooks"} and exact in _allows(bot):
+    if verdict.tier == ASK and verdict.rule not in {"bot-changed", "git-hooks", "bridge-send"} and exact in _allows(bot):
         verdict = _verdict(ALLOW, "always", "You always allow this exact command for this bot.", verdict.detail, verdict.fingerprint)
     if kind == "browser":
         needle = (getattr(request, "path", "") or "").strip() if getattr(request, "action", "") == "open" else (getattr(request, "body", "") or "").strip()
@@ -3223,6 +3324,16 @@ async def _review_with_model(store: Store, bot_id: str | None, verdict: Verdict)
         return _verdict(ASK, "unreviewed", "The rules did not recognize that, so it waits for you.", verdict.detail, verdict.fingerprint)
 
 
+def _notify_bridge(store: Store, bot_id: str | None, card: Pending) -> None:
+    """Tell the person on their own bridge. A stranger is never the recipient."""
+    try:
+        from easyagent.bridges import schedule_card
+
+        schedule_card(store, bot_id or "", card)
+    except Exception:
+        return
+
+
 async def guard(store: Store, request, bot_id: str | None):
     """Return (request, early_result). early_result is set when the tool must not run."""
     from easyagent.tools import ToolError
@@ -3243,6 +3354,10 @@ async def guard(store: Store, request, bot_id: str | None):
             "tool": getattr(request, "command", "") or "",
             "arguments": verdict.detail,
         }
+    if getattr(request, "kind", "") == "bridge" and verdict.rule == "bridge-send":
+        from easyagent.bridges import card_proposal
+
+        proposal = card_proposal(request)
     if proposal is None and verdict.rule in {"bot-changed", "git-hooks"}:
         slot = turn_mod.current_slot()
         proposal = getattr(slot, "safety_script_proposal", None) if slot is not None else None
@@ -3260,6 +3375,7 @@ async def guard(store: Store, request, bot_id: str | None):
         _notify(verdict.why)
         _audit(store, bot_id, {"at": now_iso(), "decision": "ask", "rule": verdict.rule, "why": verdict.why, "detail": verdict.detail})
         asyncio.create_task(_settle_unattended(store, request, bot_id, card, verdict))
+        _notify_bridge(store, bot_id, card)
         raise ToolError("That needs you. A card is in the chat. This routine went on without it. If nobody answers, that counts as a denial.")
     if verdict.tier == ASK:
         exact = (getattr(request, "command", "") or getattr(request, "path", "") or "").strip()
@@ -3277,10 +3393,11 @@ async def guard(store: Store, request, bot_id: str | None):
             proposal=proposal,
         )
         # A blocked rule that was unlocked is still not offered "always".
-        if verdict.rule in {"root-delete", "disk-format", "fork-bomb", "remote-script", "firewall-off", "credential-dump", "browser-store", "guardrail-edit", "browser-pay", "browser-login", "browser-post", "browser-settings", "browser-submit", "browser-secret", "mcp-ask", "mcp-install"}:
+        if verdict.rule in {"root-delete", "disk-format", "fork-bomb", "remote-script", "firewall-off", "credential-dump", "browser-store", "guardrail-edit", "browser-pay", "browser-login", "browser-post", "browser-settings", "browser-submit", "browser-secret", "mcp-ask", "mcp-install", "bridge-send"}:
             card.offer_always = False
         _PENDING[card.id] = card
         _notify(verdict.why)
+        _notify_bridge(store, bot_id, card)
         slot = turn_mod.current_slot()
         if slot is not None:
             queue = getattr(slot, "safety_events", None)
@@ -3341,7 +3458,7 @@ def _make_card(bot_id: str | None, verdict: Verdict, exact: str, proposal: dict 
         created=time.time(),
         proposal=proposal,
     )
-    if verdict.rule in {"root-delete", "disk-format", "fork-bomb", "remote-script", "firewall-off", "credential-dump", "browser-store", "guardrail-edit", "browser-pay", "browser-login", "browser-post", "browser-settings", "browser-submit", "browser-secret", "mcp-ask", "mcp-install"}:
+    if verdict.rule in {"root-delete", "disk-format", "fork-bomb", "remote-script", "firewall-off", "credential-dump", "browser-store", "guardrail-edit", "browser-pay", "browser-login", "browser-post", "browser-settings", "browser-submit", "browser-secret", "mcp-ask", "mcp-install", "bridge-send"}:
         card.offer_always = False
     return card
 
@@ -3378,6 +3495,11 @@ async def _settle_unattended(store: Store, request, bot_id: str | None, card: Pe
             from easyagent.connectors import invoke
 
             await asyncio.to_thread(invoke, store, request, bot_id)
+            return
+        if getattr(request, "kind", "") == "bridge":
+            from easyagent.bridges import deliver
+
+            await deliver(store, request, bot_id)
             return
         if verdict.rule in {"overwrite", "overwrite-workspace", "overwrite-requested", "redirect-overwrite"}:
             try:

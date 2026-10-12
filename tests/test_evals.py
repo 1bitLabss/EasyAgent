@@ -61,6 +61,51 @@ def test_unknown_task_is_an_error():
         raise AssertionError("missing task was accepted")
 
 
+def test_debug_sequence_wants_a_failing_run_before_the_edit_and_a_passing_rerun(tmp_path):
+    from easyagent.evals.score import score_checks
+
+    fail = {"kind": "shell", "action": "", "command": "python check.py", "success": False, "result": "", "error": "FAILED"}
+    edit = {"kind": "files", "action": "write", "command": "", "success": True, "result": "wrote", "error": ""}
+    passed = {"kind": "shell", "action": "", "command": "python check.py", "success": True, "result": "ok", "error": ""}
+    other = {"kind": "shell", "action": "", "command": "echo ok", "success": True, "result": "ok", "error": ""}
+    good = score_checks(
+        [{"kind": "debug_sequence"}],
+        reply="",
+        trace=[fail, edit, passed],
+        workspace=tmp_path,
+        memory_text="",
+        grades=[],
+    )
+    assert good[0]["passed"] is True
+    early = score_checks(
+        [{"kind": "debug_sequence"}],
+        reply="",
+        trace=[edit, fail, passed],
+        workspace=tmp_path,
+        memory_text="",
+        grades=[],
+    )
+    assert early[0]["passed"] is False
+    wrong = score_checks(
+        [{"kind": "debug_sequence"}],
+        reply="",
+        trace=[fail, edit, other],
+        workspace=tmp_path,
+        memory_text="",
+        grades=[],
+    )
+    assert wrong[0]["passed"] is False
+
+
+def test_debug_off_is_a_baseline(tmp_path):
+    on = run_suite(mock=True, task_ids=["debug-nudge"], out_dir=tmp_path / "on", debug=True)
+    off = run_suite(mock=True, task_ids=["debug-nudge"], out_dir=tmp_path / "off", debug=False)
+    assert on["debug"] is True
+    assert on["tasks"][0]["passed"] is True
+    assert off["debug"] is False
+    assert off["tasks"][0]["passed"] is False
+
+
 def test_cli_mock_run(tmp_path, capsys):
     code = main(["run", "--mock", "--tasks", "quick-earth", "--out", str(tmp_path)])
     assert code == 0

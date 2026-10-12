@@ -263,15 +263,30 @@ def macos_profile(writable: list[Path], data_root: Path | None = None) -> str:
     return "\n".join(lines) + "\n"
 
 
-def landlock_available() -> bool:
+def landlock_abi() -> int:
+    """The kernel's Landlock ABI, or 0 when the syscall is missing."""
     if not sys.platform.startswith("linux"):
-        return False
+        return 0
     try:
         libc = _libc()
-        abi = libc.syscall(_NR_CREATE, None, 0, 1)
-    except OSError:
-        return False
-    return int(abi) >= 1
+        abi = int(libc.syscall(_NR_CREATE, None, 0, 1))
+    except (OSError, ValueError):
+        return 0
+    return abi if abi > 0 else 0
+
+
+def landlock_available() -> bool:
+    return landlock_abi() >= 1
+
+
+def _handled_fs(abi: int) -> int:
+    """Access bits this ABI actually supports. Newer bits make create_ruleset fail on older kernels."""
+    mask = (1 << 13) - 1
+    if abi >= 2:
+        mask |= 1 << 13
+    if abi >= 3:
+        mask |= 1 << 14
+    return mask
 
 
 def apply_landlock(
@@ -283,10 +298,11 @@ def apply_landlock(
     extra_read: list[Path] | None = None,
 ) -> None:
     """Restrict this process. Call it from the child, before the command runs."""
-    if not landlock_available():
+    abi = landlock_abi()
+    if abi < 1:
         raise OSError("Landlock is not available")
     libc = _libc()
-    handled = _ctypes().c_uint64(_HANDLED_FS)
+    handled = _ctypes().c_uint64(_handled_fs(abi))
     libc.syscall.argtypes = [_ctypes().c_long, _ctypes().c_void_p, _ctypes().c_size_t, _ctypes().c_uint32]
     ruleset = libc.syscall(_NR_CREATE, _ctypes().byref(handled), 8, 0)
     if ruleset < 0:
@@ -320,10 +336,15 @@ def apply_landlock(
 
 
 def probe_command() -> str:
-    """The script the self-test runs inside the container."""
-    return (
-        "python3 -c \""
-        "import os, pathlib, socket\n"
+    """The script the self-test runs inside the container.
+
+    The absolute interpreter is used so a venv python outside /usr still starts.
+    """
+    import shlex
+
+    exe = sys.executable or "python3"
+    script = (
+        "import os, pathlib, shutil, socket\n"
         "def read(path):\n"
         "    try:\n"
         "        return pathlib.Path(path).read_text(encoding='utf-8')\n"
@@ -332,7 +353,12 @@ def probe_command() -> str:
         "data = os.environ.get('EASYAGENT_PROBE_DATA', '')\n"
         "secret = os.environ.get('EASYAGENT_PROBE_SECRET', '')\n"
         "work = os.environ.get('EASYAGENT_PROBE_WORK', '')\n"
-        "print('IDENTITY', os.popen('id').read().strip() or 'none')\n"
+        "ident = ''\n"
+        "try:\n"
+        "    ident = os.popen(shutil.which('id') or 'id').read().strip()\n"
+        "except Exception:\n"
+        "    ident = ''\n"
+        "print('IDENTITY', ident or 'none')\n"
         "print('DATA', 'DENIED' if not read(data) else 'LEAK')\n"
         "print('SECRETS', 'DENIED' if not read(secret) else 'LEAK')\n"
         "marker = pathlib.Path(work) / 'probe.txt'\n"
@@ -354,8 +380,8 @@ def probe_command() -> str:
         "    except Exception:\n"
         "        web = 'DENIED'\n"
         "print('WEB', web)\n"
-        "\""
     )
+    return shlex.quote(exe) + " -c " + shlex.quote(script)
 
 
 def listen_for_probe() -> tuple[socket.socket, int]:
@@ -399,15 +425,51 @@ def _denied_roots(store) -> list[Path]:
     return found
 
 
+def _interpreter_roots() -> list[Path]:
+    """The running interpreter and its libraries. A venv outside /usr still has to execute."""
+    found: list[Path] = []
+    if sys.executable:
+        try:
+            found.append(Path(sys.executable).resolve().parent)
+        except OSError:
+            found.append(Path(sys.executable).parent)
+    for raw in (sys.prefix, getattr(sys, "base_prefix", ""), getattr(sys, "base_exec_prefix", "")):
+        if raw:
+            found.append(Path(raw))
+    try:
+        import sysconfig
+
+        for key in ("stdlib", "platstdlib", "purelib", "platlib"):
+            value = sysconfig.get_path(key)
+            if value:
+                found.append(Path(value))
+        lib = sysconfig.get_config_var("LIBDIR")
+        if isinstance(lib, str) and lib:
+            found.append(Path(lib))
+    except Exception:
+        pass
+    return found
+
+
 def _readable_roots() -> list[Path]:
-    found = [Path(item) for item in ("/usr", "/bin", "/sbin", "/lib", "/lib64", "/lib32", "/etc", "/proc", "/dev", "/sys", "/opt")]
-    prefix = Path(sys.prefix)
-    if prefix not in found:
-        found.append(prefix)
-    exe = Path(sys.executable).resolve().parent if sys.executable else None
-    if exe is not None:
-        found.append(exe)
-    return [path for path in found if path.exists()]
+    found = [Path(item) for item in ("/usr", "/bin", "/sbin", "/lib", "/lib64", "/lib32", "/etc", "/proc", "/dev", "/sys", "/opt", "/usr/local")]
+    found.extend(_interpreter_roots())
+    kept: list[Path] = []
+    seen: set[str] = set()
+    for path in found:
+        try:
+            if path.resolve() == Path("/"):
+                continue
+        except OSError:
+            continue
+        if not path.exists():
+            continue
+        key = str(path)
+        if key in seen:
+            continue
+        seen.add(key)
+        kept.append(path)
+    return kept
 
 
 def _split_allows(paths: list[Path], denied: list[Path]) -> list[Path]:
@@ -479,6 +541,7 @@ class _Beneath:
 
     def __new__(cls, rights: int, fd: int):
         class Beneath(_ctypes().Structure):
+            _pack_ = 1
             _fields_ = [("allowed_access", _ctypes().c_uint64), ("parent_fd", _ctypes().c_int32)]
 
         return Beneath(rights, fd)

@@ -18,6 +18,61 @@ def _trace_text(trace: list[dict], *, success: bool | None = None) -> str:
     return "\n".join(chunks)
 
 
+_FAIL_WORD = re.compile(r"(?i)\b(failed|traceback|assertionerror|exception)\b")
+_EXIT_CODE = re.compile(r"exit code (\d+)")
+_WRITE_ACTIONS = {"write", "delete", "move", "append", "edit", "mkdir", "create", "remove", "patch"}
+
+
+def _blob(item: dict) -> str:
+    return f"{item.get('result') or ''}\n{item.get('error') or ''}"
+
+
+def _run_failed(item: dict) -> bool:
+    blob = _blob(item)
+    if not item.get("success"):
+        return True
+    if _FAIL_WORD.search(blob):
+        return True
+    match = None
+    for match in _EXIT_CODE.finditer(blob):
+        pass
+    return match is not None and int(match.group(1)) != 0
+
+
+def _debug_sequence(trace: list[dict], check: dict) -> tuple[bool, str]:
+    """A failing command before the first edit, then that same command passing after it."""
+    want_proved = bool(check.get("proved", True))
+    edits = [
+        index
+        for index, item in enumerate(trace)
+        if item.get("kind") == "files"
+        and (item.get("action") or "") in _WRITE_ACTIONS
+        and item.get("success")
+    ]
+    shells = [
+        (index, item)
+        for index, item in enumerate(trace)
+        if item.get("kind") in {"shell", "windows"}
+    ]
+    if not edits:
+        return False, "no edit"
+    first = edits[0]
+    prior = [item for index, item in shells if index < first and _run_failed(item)]
+    if not prior:
+        return False, "no failing run before the edit"
+    command = " ".join(str(prior[-1].get("command") or "").split())
+    proved = any(
+        index > first
+        and " ".join(str(item.get("command") or "").split()) == command
+        and item.get("success")
+        and not _run_failed(item)
+        for index, item in shells
+    )
+    if want_proved:
+        return proved, command or "passing rerun"
+    return (not proved), "the same command did not pass" if not proved else "the same command passed"
+
+
 def _tool_ok(trace: list[dict], check: dict) -> tuple[bool, str]:
     kind = (check.get("tool") or "").strip()
     action = (check.get("action") or "").strip()
@@ -41,6 +96,7 @@ def score_checks(
     workspace: Path,
     memory_text: str,
     grades: list[dict],
+    unverified: bool = False,
 ) -> list[dict]:
     """One result per criterion, in order. llm_judge uses the next grade."""
     results = []
@@ -92,6 +148,18 @@ def score_checks(
             needle = check.get("text") or ""
             passed = needle in text and needle in _trace_text(trace, success=True)
             detail = needle
+        elif kind == "debug_sequence":
+            passed, detail = _debug_sequence(trace, check)
+        elif kind == "trace_contains":
+            needle = check.get("text") or ""
+            blob = "\n".join(
+                str(item.get("result") or "") + "\n" + str(item.get("error") or "") for item in trace
+            )
+            passed = needle in blob
+            detail = needle
+        elif kind == "unverified":
+            passed = bool(unverified) is bool(check.get("value", True))
+            detail = "unverified" if unverified else "verified"
         elif kind == "max_steps":
             limit = int(check.get("limit") or 0)
             passed = len(trace) <= limit

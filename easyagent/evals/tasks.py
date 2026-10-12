@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import sys
 from pathlib import Path
 
 _ROOT = Path(__file__).resolve().parents[2] / "evals" / "tasks"
@@ -36,10 +37,18 @@ def load_tasks(ids: list[str] | None = None) -> list[dict]:
     return [by_id[item] for item in wanted]
 
 
+def python_token() -> str:
+    """The interpreter running this process, quoted when the path has spaces."""
+    exe = sys.executable
+    if any(char in exe for char in " \t"):
+        return '"' + exe.replace('"', "") + '"'
+    return exe
+
+
 def substitute(value, workspace: str):
-    """Fill {workspace} in strings, lists, and dicts."""
+    """Fill {workspace} and {python} in strings, lists, and dicts."""
     if isinstance(value, str):
-        return value.replace("{workspace}", workspace)
+        return value.replace("{workspace}", workspace).replace("{python}", python_token())
     if isinstance(value, list):
         return [substitute(item, workspace) for item in value]
     if isinstance(value, dict):

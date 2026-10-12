@@ -556,6 +556,7 @@ class Store:
         model: str | None = None,
         max_parallel: int = 1,
         endpoint_id: str | None = None,
+        n_ctx: int | None = None,
     ) -> dict:
         record = {
             "id": self._parse_id(endpoint_id) if endpoint_id else new_id(),
@@ -567,6 +568,8 @@ class Store:
             "max_parallel": clamp_parallel(max_parallel),
             "created_at": now_iso(),
         }
+        if n_ctx is not None:
+            record["n_ctx"] = int(n_ctx)
         has_key = self._store_endpoint_key(record["id"], api_key)
         record["has_api_key"] = has_key
         with self._lock:
@@ -604,6 +607,8 @@ class Store:
         model_set: bool = False,
         max_parallel: int | None = None,
         max_parallel_set: bool = False,
+        n_ctx: int | None = None,
+        n_ctx_set: bool = False,
     ) -> dict:
         """Change one saved connection. Bot directories and chats are not opened."""
         endpoint_id = self._parse_id(endpoint_id)
@@ -627,6 +632,12 @@ class Store:
                 match["model"] = model
             if max_parallel_set and max_parallel is not None:
                 match["max_parallel"] = clamp_parallel(max_parallel)
+            if n_ctx_set:
+                if n_ctx is None:
+                    match.pop("n_ctx", None)
+                else:
+                    match["n_ctx"] = int(n_ctx)
+            match.pop("detected_n_ctx", None)
             atomic_write_json(self.endpoints_path, endpoints)
         return self._hydrate_endpoint(match)
 
@@ -834,6 +845,10 @@ class Store:
         check_revisions_set: bool = False,
         workspace: str | None = None,
         workspace_set: bool = False,
+        situation: bool | None = None,
+        situation_set: bool = False,
+        situation_title: bool | None = None,
+        situation_title_set: bool = False,
     ) -> dict:
         """Change settings. Chat files in this bot are not opened or rewritten."""
         bot = self.get_bot(bot_id)
@@ -883,6 +898,17 @@ class Store:
                 if number > 4:
                     number = 4
                 bot["check_revisions"] = number
+        if situation_set:
+            if situation:
+                bot["situation"] = True
+            else:
+                bot.pop("situation", None)
+                bot.pop("situation_title", None)
+        if situation_title_set:
+            if situation_title and bot.get("situation") is True:
+                bot["situation_title"] = True
+            else:
+                bot.pop("situation_title", None)
         if workspace_set and workspace is not None:
             from easyagent.workspace import assign_workspace
 

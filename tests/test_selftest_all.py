@@ -142,7 +142,8 @@ def test_the_gate_passes_on_a_copy_and_removes_its_bots(tmp_path, monkeypatch):
     names = _names(report)
     assert names == {
         "health", "chat", "whoami", "files", "search", "ui", "polls",
-        "routines", "secrets", "containment", "honesty", "copy",
+        "routines", "routine-attack", "web-injection", "mcp-injection", "helper-isolation", "message-injection", "debug-attack",
+        "secrets", "containment", "honesty", "copy",
     }
     assert all(item["status"] in {"PASS", "SKIP"} for item in report["checks"])
     assert all(isinstance(item["seconds"], float) for item in report["checks"])

@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.3.15-dev
+
+- An unattended routine still uses Strict. A destructive command is blocked. Anything that needs approval is held on a card and is not run. An exact Always allow grant is the only ask that can proceed, and it cannot cover a blocked wipe.
+- Web search results and browser page text are untrusted. A command copied from that text waits, and the page cannot write an Always allow grant or change the bot's mode.
+- MCP connector output is untrusted. A page cannot install a connector. A write, send, or delete on a connector waits. A command copied from connector output waits, and that output cannot write an Always allow grant.
+- A helper gets one task, a short tool list, and the same Strict checker as the parent. It cannot start another helper or a routine, use a tool outside its list, or read another bot's files. Its result is untrusted data. A wipe stays blocked.
+- Telegram and Discord answer only an allowlisted sender. The token stays in the key store. A stranger is ignored and is not written into the chat. A message to anyone else waits on a card and cannot be Always allowed. Inbound text is untrusted: it cannot grant a command, change Strict, or send on another bot's bridge. An unattended send that needs approval is held and is not sent.
+- A bridge tap approves a card only when that card belongs to the same bot. Landlock is reported only when its probe holds; a probe that does not run is not called contained. File-tool reads of the data folder match the refusal at execution. `pip install .` includes the same runtime libraries as requirements.txt. `selftest all` stops when the folder has no saved connection or the master key does not open secrets.db.
+- The chat shows how full the context window is. A window title is shared only when that bot opts in, and then only as untrusted data on the user turn. Titles are scrubbed, they are not stored in the transcript or the system prompt, and a detected window size stays in memory. Compact folds older turns without calling the model.
+- Debug mode asks for a failing run before an edit, a cause with a file:line or an output line, and the same command again before a claim that it is fixed. A bug report does not run a destructive command, and an edit is not applied until that failing run exists. The command still goes through Strict.
+
 ## 0.3.14
 
 - Upgrade from 0.3.5 or 0.3.12. On 0.3.5 a relative file path, including a bare name, resolves against the folder EasyAgent was launched from. On 0.3.12, `.` and any path that contains a slash still resolve there, so the file tool can read or write outside that bot's workspace. If you cannot upgrade yet, start the process in an empty folder that holds no data, and set `EASYAGENT_DATA` to the data folder you already use, so a relative path resolves inside that empty folder. Upgrade when you can. The empty folder leaves the command bypasses and the macOS containment bypass below in place.

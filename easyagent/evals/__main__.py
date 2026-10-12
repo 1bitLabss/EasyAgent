@@ -23,6 +23,7 @@ def _build() -> argparse.ArgumentParser:
         help="Model name for rubric grading on this same connection. Default is the bot's model.",
     )
     run.add_argument("--mock", action="store_true", help="Scripted model. No server is contacted.")
+    run.add_argument("--debug-off", action="store_true", help="Leave debug mode off, as a baseline.")
     run.add_argument("--data", default="", help="Folder with endpoints.json. Read only. Default is EASYAGENT_DATA or ./data.")
     run.add_argument("--out", default="", help="Folder for the result JSON. Default is ./evals/results.")
 
@@ -52,6 +53,7 @@ def main(argv: list[str] | None = None) -> int:
             mock=bool(args.mock),
             data_dir=args.data or None,
             out_dir=args.out or None,
+            debug=not bool(args.debug_off),
         )
     except Exception as exc:
         print(str(exc), file=sys.stderr)

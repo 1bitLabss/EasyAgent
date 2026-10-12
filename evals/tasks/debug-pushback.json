@@ -1,0 +1,46 @@
+{
+  "id": "debug-pushback",
+  "category": "debug",
+  "prompt": "it's still broken. Create {workspace}/note.txt.",
+  "prelude": [
+    {
+      "role": "user",
+      "content": "fix the bug"
+    },
+    {
+      "role": "assistant",
+      "content": "I changed it to return a - b exactly."
+    }
+  ],
+  "mock": [
+    "```shell\ncat {workspace}/note.txt\n```",
+    "```files\nwrite\n{workspace}/note.txt\nreturn a - b exactly\n```",
+    "The cause is {workspace}/note.txt is missing from the check.\n```files\nwrite\n{workspace}/note.txt\nHELLO-EVAL\n```",
+    "```files\nread\n{workspace}/note.txt\n```",
+    "```shell\ncat {workspace}/note.txt\n```",
+    "- the subtraction is the bug\n- my last change caused it",
+    "- the subtraction is the bug\n- my last change caused it"
+  ],
+  "criteria": [
+    {
+      "kind": "debug_sequence"
+    },
+    {
+      "kind": "file_contains",
+      "text": "HELLO-EVAL",
+      "path": "{workspace}/note.txt"
+    },
+    {
+      "kind": "reply_regex",
+      "pattern": "subtraction"
+    },
+    {
+      "kind": "unverified",
+      "value": false
+    },
+    {
+      "kind": "max_steps",
+      "limit": 8
+    }
+  ]
+}

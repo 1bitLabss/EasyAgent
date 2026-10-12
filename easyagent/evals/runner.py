@@ -200,6 +200,7 @@ def run_suite(
     out_dir: str | Path | None = None,
     preload_skill: dict | None = None,
     tasks: list | None = None,
+    debug: bool = True,
 ) -> dict:
     """Run tasks. Bots and chats are created in a temp folder and deleted after."""
     tasks = list(tasks) if tasks is not None else load_tasks(task_ids)
@@ -345,6 +346,10 @@ def run_suite(
                     started_task = time.perf_counter()
                     tokens_before = meter["tokens"]
                     bot = store.add_bot(name="Eval", endpoint_id=saved["id"], model=saved.get("model"))
+                    if not debug:
+                        from easyagent.honesty import save_settings
+
+                        save_settings(store, bot["id"], {"debug": False})
                     chat = store.create_chat(bot["id"])
                     setup = task.get("setup") or {}
                     for name, body in (setup.get("files") or {}).items():
@@ -357,6 +362,7 @@ def run_suite(
                     prelude = _pad(task.get("prelude") or [], int(task.get("prelude_pad") or 0))
                     _seed_chat(store, bot["id"], chat["id"], substitute(prelude, str(workspace)))
                     reply = ""
+                    unverified = False
                     errored = False
                     prompts = []
                     force_check(bool(task.get("needs_check")))
@@ -379,6 +385,7 @@ def run_suite(
                             messages = payload.get("chat", {}).get("messages") or []
                             last = messages[-1] if messages else {}
                             reply = last.get("content") or ""
+                            unverified = bool(last.get("unverified"))
                             if last.get("choices"):
                                 trace.append(
                                     {
@@ -409,6 +416,7 @@ def run_suite(
                         workspace=workspace,
                         memory_text=_memory_blob(store, bot["id"]),
                         grades=grades,
+                        unverified=unverified,
                     )
                     passed = (not errored) and bool(checks) and all(item["passed"] for item in checks)
                     if errored and not any(item["passed"] is False for item in checks):
@@ -439,6 +447,7 @@ def run_suite(
         "connection": "mock" if mock else connection,
         "judge_model": (judge_model or "").strip() or (connection_record or {}).get("model") or "",
         "mock": bool(mock),
+        "debug": bool(debug),
         "started_at": stamp,
         "elapsed_seconds": round(time.perf_counter() - started, 3),
         "summary": summary,
@@ -484,7 +493,7 @@ def format_summary(report: dict) -> str:
     rate = (summary.get("pass_rate") or 0) * 100
     lines = [
         f"Eval  {passed}/{total} passed  {rate:.1f}%",
-        f"connection {report.get('connection')}   model {report.get('judge_model') or 'the bot'}   prompt v{report.get('judge_prompt_version')}",
+        f"connection {report.get('connection')}   debug {'on' if report.get('debug', True) else 'off'}   model {report.get('judge_model') or 'the bot'}   prompt v{report.get('judge_prompt_version')}",
         f"avg steps {summary.get('avg_steps')}   avg tokens {summary.get('avg_tokens')}   avg time {summary.get('avg_seconds')}s",
         "",
         f"{'category':<16} {'passed':>6} {'total':>6}",

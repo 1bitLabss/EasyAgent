@@ -176,6 +176,15 @@ class BusyLane(Exception):
     """This connection is already in use. A background call should try later."""
 
 
+def lane_busy(endpoint_id: str) -> bool:
+    """True when this connection already holds a model call."""
+    if not endpoint_id:
+        return False
+    lane = _lane(endpoint_id)
+    with lane.lock:
+        return bool(lane.holders)
+
+
 def user_waiting() -> bool:
     """True when a chat is lined up behind the call that holds this connection."""
     info = _conn.get()

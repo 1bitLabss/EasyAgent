@@ -1540,7 +1540,7 @@ def _run_shell(store: Store, command: str) -> str:
     if mode.get("contained"):
         try:
             proc = popen_contained(store, bot_id or None, text, env, turn_mod.tool_cwd())
-        except OSError as exc:
+        except (OSError, subprocess.SubprocessError, RuntimeError, ValueError) as exc:
             from easyagent.sandbox import launch_failure
 
             raise ToolError(launch_failure(exc)) from exc

@@ -213,7 +213,7 @@ def launch_stdio(command: list[str], env: dict, cwd: str, store=None, bot_id: st
         try:
             proc = _popen_contained(store, bot_id, command, env, cwd)
             return proc, notice
-        except OSError as exc:
+        except (OSError, subprocess.SubprocessError, RuntimeError, ValueError) as exc:
             from easyagent.contain import AclError, FallbackError
             from easyagent.sandbox import launch_failure
 

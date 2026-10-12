@@ -306,6 +306,198 @@ def test_a_passed_probe_refuses_when_the_launch_fails(tmp_path, monkeypatch, pla
         selftest.reset_probe()
 
 
+def _passed_cache(selftest, mechanism: str = "bubblewrap") -> dict:
+    passed = {
+        "passed": True,
+        "mechanism": mechanism,
+        "reason": "",
+        "status": "active",
+        "rows": [("mechanism", "PASS", mechanism)],
+    }
+    selftest._CACHE = dict(passed)
+    return passed
+
+
+class _Chromium:
+    def __init__(self, path: str = "/opt/fake/chrome", error: BaseException | None = None):
+        self._path = path
+        self._error = error
+
+    @property
+    def executable_path(self):
+        if self._error is not None:
+            raise self._error
+        return self._path
+
+
+class _Playwright:
+    def __init__(self, chromium: _Chromium):
+        self.chromium = chromium
+
+
+@pytest.mark.parametrize("why", ["bwrap-gone", "exe-path-error", "unknown-mechanism"])
+def test_browser_wrap_failure_fails_closed(tmp_path, monkeypatch, why):
+    import shutil
+
+    import easyagent.browser as browser
+    import easyagent.selftest as selftest
+    from easyagent.contain import save_ledger
+
+    mechanism = "AppContainer" if why == "unknown-mechanism" else "bubblewrap"
+    store, bot = _bot(tmp_path)
+    save_ledger({"consented": True, "profile": "", "sid": "", "aces": [], "platform": "test"})
+    _passed_cache(selftest, mechanism)
+    real = shutil.which
+    if why == "bwrap-gone":
+        monkeypatch.setattr(browser.shutil, "which", lambda name, *args, **kwargs: None if name == "bwrap" else real(name, *args, **kwargs))
+    chromium = _Chromium(error=RuntimeError("no chromium")) if why == "exe-path-error" else _Chromium()
+    try:
+        kwargs = browser._launch_kwargs(_Playwright(chromium), store, bot["id"], tmp_path / "prof", True)
+    except OSError:
+        assert selftest._CACHE is None
+        return
+    assert "executable_path" in kwargs
+    selftest.reset_probe()
+
+
+def test_windows_refuses_the_browser_while_containment_is_on(tmp_path, monkeypatch):
+    import easyagent.browser as browser
+    import easyagent.selftest as selftest
+    from easyagent.contain import save_ledger
+    from easyagent.tools import ToolError
+
+    monkeypatch.setattr(sys, "platform", "win32")
+    store, bot = _bot(tmp_path)
+    save_ledger({"consented": True, "profile": "", "sid": "", "aces": [], "platform": "test"})
+    _passed_cache(selftest, "appcontainer")
+
+    def launched(*_args, **_kwargs):
+        raise AssertionError("chromium launched")
+
+    chromium = _Chromium()
+    chromium.launch_persistent_context = launched
+    with pytest.raises(OSError, match="not run") as caught:
+        browser._launch_kwargs(_Playwright(chromium), store, bot["id"], tmp_path / "prof", True)
+    text = str(caught.value)
+    assert selftest._CACHE is None
+    assert "AppContainer" in text
+    assert "browser" in text.lower()
+    assert "selftest contain" in text
+    assert "contain --undo" in text
+    assert "Remove containment" in text
+    assert "file guards" not in text
+    _passed_cache(selftest, "appcontainer")
+    with pytest.raises(ToolError, match="contain --undo") as shown:
+        browser._session(_Playwright(chromium), {}, store, bot["id"])
+    assert "no display" not in str(shown.value).lower()
+    assert "Remove containment" in str(shown.value)
+
+
+def test_a_missing_chromium_refusal_is_not_a_headless_hint(tmp_path, monkeypatch):
+    import shutil
+
+    import easyagent.browser as browser
+    import easyagent.selftest as selftest
+    from easyagent.contain import save_ledger
+    from easyagent.tools import ToolError
+
+    store, bot = _bot(tmp_path)
+    save_ledger({"consented": True, "profile": "", "sid": "", "aces": [], "platform": "test"})
+    _passed_cache(selftest)
+    real = shutil.which
+    monkeypatch.setattr(browser.shutil, "which", lambda name, *args, **kwargs: None if name == "bwrap" else real(name, *args, **kwargs))
+    chromium = _Chromium(error=RuntimeError("chromium is missing"))
+    with pytest.raises(ToolError, match="contain --undo") as caught:
+        browser._session(_Playwright(chromium), {}, store, bot["id"])
+    text = str(caught.value)
+    assert "no display" not in text.lower()
+    assert "selftest contain" in text
+    assert "Remove containment" in text
+    assert "file guards" not in text
+    assert selftest._CACHE is None
+
+
+def test_the_browser_stays_open_when_containment_is_off(tmp_path):
+    import easyagent.browser as browser
+
+    store, bot = _bot(tmp_path)
+    kwargs = browser._launch_kwargs(_Playwright(_Chromium()), store, bot["id"], tmp_path / "prof", True)
+    assert "executable_path" not in kwargs
+
+
+def test_a_landlock_browser_stays_wrapped(tmp_path):
+    import easyagent.browser as browser
+    import easyagent.selftest as selftest
+    from easyagent.contain import save_ledger
+
+    store, bot = _bot(tmp_path)
+    save_ledger({"consented": True, "profile": "", "sid": "", "aces": [], "platform": "test"})
+    _passed_cache(selftest, "landlock")
+    try:
+        kwargs = browser._launch_kwargs(_Playwright(_Chromium()), store, bot["id"], tmp_path / "prof", True)
+    finally:
+        selftest.reset_probe()
+    assert kwargs["executable_path"].endswith("browser-launch.py")
+
+
+@pytest.mark.parametrize(
+    "exc",
+    [
+        subprocess.TimeoutExpired("bwrap", 5),
+        subprocess.SubprocessError("Exception occurred in preexec_fn."),
+        RuntimeError("profile setup failed"),
+        ValueError("bad profile path"),
+    ],
+    ids=["timeout", "preexec", "profile-runtime", "profile-value"],
+)
+def test_a_non_os_launch_error_clears_the_probe(tmp_path, monkeypatch, exc):
+    import easyagent.selftest as selftest
+    from easyagent import turn as turn_mod
+    from easyagent.contain import save_ledger
+    from easyagent.mcpclient import launch_stdio
+    from easyagent.tools import ToolError, _run_shell
+
+    monkeypatch.setattr("easyagent.psast.data_decision", lambda *_args, **_kwargs: "allow")
+    store, bot = _bot(tmp_path)
+    save_ledger({"consented": True, "profile": "", "sid": "", "aces": [], "platform": "test"})
+    passed = _passed_cache(selftest)
+
+    def boom(*_args, **_kwargs):
+        raise exc
+
+    def unsandboxed(*_args, **_kwargs):
+        raise AssertionError("unsandboxed")
+
+    monkeypatch.setattr("easyagent.sandbox.popen_contained", boom)
+    monkeypatch.setattr("easyagent.mcpclient._popen_contained", boom)
+    monkeypatch.setattr(subprocess, "Popen", unsandboxed)
+    slot = turn_mod.slot_for(store, "chat-non-os-refuse")
+    slot.bot_id = bot["id"]
+    slot.store = store
+    slot.cwd = str(tmp_path)
+    turn_mod._slot.set(slot)
+    try:
+        with pytest.raises(ToolError, match="not run") as caught:
+            _run_shell(store, "echo still-ran")
+        assert selftest._CACHE is None
+        text = str(caught.value)
+        assert "file guards" not in text
+        assert "selftest contain" in text
+        assert "contain --undo" in text
+        assert "Remove containment" in text
+        selftest._CACHE = dict(passed)
+        with pytest.raises(OSError, match="not run") as connector:
+            launch_stdio(["server"], {}, str(tmp_path), store, bot["id"])
+        assert selftest._CACHE is None
+        notice = str(connector.value)
+        assert "file guards" not in notice
+        assert "selftest contain" in notice
+        assert "contain --undo" in notice
+    finally:
+        turn_mod._slot.set(None)
+        selftest.reset_probe()
+
+
 def test_macos_profile_denies_the_data_dir_and_keychain():
     data = Path("/tmp/easyagent-data")
     work = data / "bots" / "ada" / "workspace"

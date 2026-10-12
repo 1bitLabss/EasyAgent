@@ -611,7 +611,12 @@ def _containment_notice(store: Store, bot_id: str) -> str:
 
 
 def _launch_kwargs(playwright, store: Store, bot_id: str, folder: Path, headless: bool) -> dict:
-    """Chromium uses the same container as the shell when containment is on."""
+    """Chromium uses the same container as the shell when containment is on.
+
+    A wrapper that cannot be built refuses the launch. On Windows the browser
+    is not started while containment is on; there is no tested AppContainer
+    wrapper for Chromium.
+    """
     args = ["--disable-dev-shm-usage"]
     kwargs = {
         "headless": headless,
@@ -619,24 +624,26 @@ def _launch_kwargs(playwright, store: Store, bot_id: str, folder: Path, headless
         "accept_downloads": True,
         "args": args,
     }
-    from easyagent.sandbox import shell_mode
+    from easyagent.sandbox import launch_failure, shell_mode
 
     mode = shell_mode(store)
     if mode.get("refuse"):
         raise OSError(mode.get("reason") or "The restricted-token fallback did not start. The command was not run.")
     if not mode.get("contained"):
         return kwargs
+    if sys.platform == "win32":
+        raise OSError(
+            launch_failure(
+                "Chromium is not wrapped in the AppContainer. Turn containment off to use the browser"
+            )
+        )
     try:
         real = str(playwright.chromium.executable_path)
-    except Exception:
-        return kwargs
+    except Exception as exc:
+        raise OSError(launch_failure(exc)) from exc
     wrapper = _write_containment_wrapper(store, bot_id, real, folder)
     if not wrapper:
-        _WRAP_NOTE[bot_id] = (
-            "OS containment is unavailable: this browser could not be wrapped in the container. "
-            "This browser used the file guards."
-        )
-        return kwargs
+        raise OSError(launch_failure("This browser could not be wrapped in the container"))
     _WRAP_NOTE.pop(bot_id, None)
     args.extend(["--no-sandbox", "--disable-setuid-sandbox"])
     kwargs["executable_path"] = wrapper
@@ -747,12 +754,15 @@ def _session(playwright, sessions: dict, store: Store, bot_id: str) -> dict:
     if current:
         _close_session(sessions, bot_id)
     folder = profile_dir(store, bot_id)
-    launch = _launch_kwargs(playwright, store, bot_id, folder, headless)
     try:
+        launch = _launch_kwargs(playwright, store, bot_id, folder, headless)
         context = playwright.chromium.launch_persistent_context(str(folder), **launch)
     except Exception as exc:
         message = str(exc)
-        if "display" in message.lower() or "x server" in message.lower() or "missing" in message.lower():
+        low = message.lower()
+        if "not run" in low and ("selftest contain" in low or "contain --undo" in low):
+            raise ToolError(message) from exc
+        if "display" in low or "x server" in low or "missing" in low:
             raise ToolError(
                 "This computer has no display, so the browser window could not open. "
                 "Turn on headless in this bot's settings, or start EasyAgent with EASYAGENT_BROWSER_HEADLESS=1."

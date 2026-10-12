@@ -191,42 +191,63 @@ def test_shell_stays_on_the_file_guards_until_consent(tmp_path, monkeypatch):
     assert "bwrap" not in str(seen["args"])
 
 
-def test_a_failed_probe_keeps_the_file_guards_and_says_so(tmp_path, monkeypatch):
+def _failed_probe(monkeypatch):
     from easyagent import selftest
-    from easyagent import turn as turn_mod
-    from easyagent.tools import _run_shell
 
-    store, bot = _bot(tmp_path)
-    from easyagent.contain import save_ledger
-
-    save_ledger({"consented": True, "profile": "", "sid": "", "aces": [], "platform": "test"})
     monkeypatch.setattr(
         selftest,
         "cached_probe",
         lambda: {"passed": False, "reason": "probe failed", "mechanism": "none", "status": "unavailable", "rows": []},
     )
 
-    class Proc:
-        returncode = 0
 
-        def communicate(self, timeout=None):
-            return "still-ran", ""
+@pytest.mark.parametrize(
+    ("platform", "fix"),
+    [("linux", "bubblewrap"), ("darwin", "sandbox-exec"), ("win32", "AppContainer")],
+)
+def test_a_failed_probe_refuses_the_command(tmp_path, monkeypatch, platform, fix):
+    from easyagent import turn as turn_mod
+    from easyagent.contain import save_ledger
+    from easyagent.mcpclient import launch_stdio
+    from easyagent.tools import ToolError, _run_shell
 
-    monkeypatch.setattr(subprocess, "Popen", lambda *args, **kwargs: Proc())
-    slot = turn_mod.slot_for(store, "chat-fallback")
+    monkeypatch.setattr(sys, "platform", platform)
+    store, bot = _bot(tmp_path)
+    save_ledger({"consented": True, "profile": "", "sid": "", "aces": [], "platform": "test"})
+    _failed_probe(monkeypatch)
+
+    def unsandboxed(*_args, **_kwargs):
+        raise AssertionError("unsandboxed")
+
+    monkeypatch.setattr(subprocess, "Popen", unsandboxed)
+    slot = turn_mod.slot_for(store, "chat-probe-refuse")
     slot.bot_id = bot["id"]
     slot.store = store
     slot.cwd = str(tmp_path)
     turn_mod._slot.set(slot)
     try:
-        heard = _run_shell(store, "echo still-ran")
+        with pytest.raises(ToolError, match="not run") as caught:
+            _run_shell(store, "echo still-ran")
+        with pytest.raises(OSError, match="not run"):
+            launch_stdio(["server"], {}, str(tmp_path), store, bot["id"])
     finally:
         turn_mod._slot.set(None)
-    assert heard.startswith("OS containment is unavailable:")
-    assert "file guards" in heard
-    assert "still-ran" in heard
-    assert shell_mode(store)["label"].startswith("unavailable:")
-    assert public_status(store, bot["id"])["active"] is False
+    text = str(caught.value)
+    assert "still-ran" not in text
+    assert "probe failed" in text
+    assert "selftest contain" in text
+    assert fix in text
+    assert "contain --undo" in text
+    assert "Remove containment" in text
+    assert "file guards" not in text
+    mode = shell_mode(store)
+    assert mode["refuse"] is True
+    assert mode["status"] == "unavailable"
+    assert mode["notice"] == text
+    status = public_status(store, bot["id"])
+    assert status["active"] is False
+    assert status["reason"] == text
+    assert "contain --undo" in status["undo"]
 
 
 def test_macos_profile_denies_the_data_dir_and_keychain():

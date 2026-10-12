@@ -51,11 +51,40 @@ def fallback_refuse_reason(report: dict) -> str:
     return ""
 
 
-def shell_mode(store) -> dict:
-    """How the next shell runs. Off until consent. Unavailable keeps the file guards.
+def probe_refuse_reason(report: dict) -> str:
+    """Why a command is refused when containment is on and the probe failed."""
+    detail = (report.get("reason") or "the self-test did not pass").strip().rstrip(".")
+    if sys.platform == "win32":
+        fix = (
+            "Run python -m easyagent selftest contain to see which check failed. "
+            "Repair the AppContainer profile if that check failed. "
+            "The restricted token is the fallback, and it has to pass the same checks."
+        )
+    elif sys.platform == "darwin":
+        fix = (
+            "Run python -m easyagent selftest contain to see which check failed. "
+            "Repair sandbox-exec if that tool is missing or the profile did not hold."
+        )
+    else:
+        fix = (
+            "Run python -m easyagent selftest contain to see which check failed. "
+            "Install bubblewrap if it is missing. Landlock is the fallback when bubblewrap is not there, "
+            "and it has to pass the same checks."
+        )
+    return (
+        f"OS containment is on, but its check failed: {detail}. The command was not run. "
+        f"{fix} "
+        "To turn containment off, run python -m easyagent contain --undo, "
+        "or choose Remove containment in Settings."
+    )
 
-    A restricted token that failed to start on an interactive session refuses the
-    command instead. That failure is not hidden behind the file guards.
+
+def shell_mode(store) -> dict:
+    """How the next shell runs. Off until consent.
+
+    A failed probe refuses the command on Windows, Linux, and macOS. The notice
+    names the failure, how to see it, and how to turn containment off. A
+    restricted token that failed to start uses its own refusal.
     """
     from easyagent.contain import consented
 
@@ -85,15 +114,15 @@ def shell_mode(store) -> dict:
             "mechanism": "none",
             "refuse": True,
         }
-    reason = report.get("reason") or "the self-test did not pass"
-    notice = f"OS containment is unavailable: {reason}. This command used the file guards."
+    reason = probe_refuse_reason(report)
     return {
         "contained": False,
         "status": "unavailable",
         "label": f"unavailable: {reason}",
-        "notice": notice,
+        "notice": reason,
         "reason": reason,
         "mechanism": "none",
+        "refuse": True,
     }
 
 

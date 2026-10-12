@@ -24,4 +24,5 @@ jobs:
       - name: Pytest
         run: python -m pytest -q
       - name: Containment self-test
+        if: always()
         run: python -m easyagent selftest contain

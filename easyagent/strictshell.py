@@ -1711,19 +1711,86 @@ def _diff_text(name: str, before: str, after: str) -> str:
     return diff
 
 
-def _short_name(path: Path, cwd: Path) -> str:
-    """The path shown on the card: forward slashes, relative to the resolved cwd.
+def _spell_from_entries(text: str) -> str | None:
+    """Rebuild an absolute POSIX path from directory entries.
 
-    ``relative_to`` keeps backslashes on Windows, and it misses when one side is
-    ``/var`` and the other is ``/private/var``, or when APFS spells the same
-    folder ``/T/`` and ``/t/``. The canonical key has already folded those.
+    ``realpath`` on macOS keeps the case you passed in. APFS still opens
+    ``makefile`` when the entry is ``Makefile``. The walk prefers an exact
+    entry and otherwise the one ``casefold`` match.
     """
+    if not text.startswith("/"):
+        return None
+    current = Path("/")
+    built: list[str] = []
+    for part in text.split("/"):
+        if not part or part == ".":
+            continue
+        if part == "..":
+            if not built:
+                return None
+            built.pop()
+            current = Path("/" + "/".join(built)) if built else Path("/")
+            continue
+        try:
+            names = os.listdir(current)
+        except OSError:
+            return None
+        chosen = None
+        folded = part.casefold()
+        for name in names:
+            if name == part:
+                chosen = name
+                break
+            if chosen is None and name.casefold() == folded:
+                chosen = name
+        if chosen is None:
+            return None
+        built.append(chosen)
+        current = current / chosen
+    if not built:
+        return "/"
+    return "/" + "/".join(built)
+
+
+def _on_disk_text(path: Path) -> str:
+    """Forward slashes and the directory entry's spelling.
+
+    Windows ``resolve`` returns the final path in the entry's case. macOS does
+    not, so the entry walk supplies it. This string is for the card. Matching
+    stays on the canonical key.
+    """
+    raw = _strip_extended(os.fspath(path))
+    try:
+        text = _strip_extended(os.fspath(Path(raw).resolve())).replace("\\", "/")
+    except (OSError, ValueError, RuntimeError):
+        text = raw.replace("\\", "/")
+    if os.name == "nt":
+        return text
+    if sys.platform == "darwin" or not Path(text).exists():
+        spelled = _spell_from_entries(text)
+        if spelled:
+            return spelled
+    return text
+
+
+def _short_name(path: Path, cwd: Path) -> str:
+    """The card path: on-disk spelling, relative to the cwd, forward slashes.
+
+    The canonical key decides whether the file is inside the cwd, and how many
+    trailing parts that relative path has. Those parts are taken from the
+    directory entry, so a folded key cannot print ``makefile`` for ``Makefile``.
+    A file outside the cwd stays the full path. The last name alone is not a path.
+    """
+    shown = _on_disk_text(path)
     file_key = _canonical_key(path) or _fold_text(os.fspath(path))
     root_key = _canonical_key(cwd) or _fold_text(os.fspath(cwd))
     if file_key and root_key and _key_under(file_key, root_key) and file_key != root_key:
-        return file_key[len(root_key):].lstrip("/")
-    name = path.name.replace("\\", "/")
-    return name or file_key
+        extra = file_key[len(root_key):].lstrip("/")
+        count = len([part for part in extra.split("/") if part])
+        parts = [part for part in shown.split("/") if part and part != "."]
+        if count and len(parts) >= count:
+            return "/".join(parts[-count:])
+    return shown
 
 
 def _change_summary(items: list[tuple[Path, str, str]], cwd: Path) -> str:

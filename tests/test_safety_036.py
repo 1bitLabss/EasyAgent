@@ -2718,13 +2718,27 @@ def test_card_path_is_relative_to_the_resolved_cwd(tmp_path, monkeypatch):
     assert strictshell._short_name(file, linked) == "src/foo.py"
     assert "\\" not in strictshell._short_name(linked / "src" / "foo.py", linked)
 
+    outside = tmp_path / "elsewhere" / "foo.py"
+    outside.parent.mkdir()
+    outside.write_text("print(1)\n", encoding="utf-8")
+    full = strictshell._short_name(outside, linked)
+    assert full.endswith("elsewhere/foo.py")
+    assert full != "foo.py"
+    assert "\\" not in full
+
     monkeypatch.setattr(strictshell.sys, "platform", "darwin")
     folder = tmp_path / "Work"
     (folder / "src").mkdir(parents=True)
     shown = folder / "src" / "foo.py"
     shown.write_text("print(1)\n", encoding="utf-8")
-    other = Path(str(folder)[: str(folder).rfind("/Work")] + "/work")
+    other = folder.parent / "work"
     assert strictshell._short_name(shown, other) == "src/foo.py"
+    make = folder / "sub" / "Makefile"
+    make.parent.mkdir()
+    make.write_text("all:\n", encoding="utf-8")
+    folded = strictshell._canonical_key(make)
+    assert folded is not None and folded.endswith("/makefile")
+    assert strictshell._short_name(Path(folded), other) == "sub/Makefile"
 
 
 def test_requested_overwrite_follows_the_resolved_path(tmp_path, monkeypatch):

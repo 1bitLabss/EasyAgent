@@ -2302,7 +2302,7 @@ def test_strict_exec_always_is_one_tool_and_one_workspace(tmp_path):
 
     from easyagent.app import create_app, public_bot
     from easyagent.safety import attend, unattended, unattended_blocked_target
-    from easyagent.strictshell import allow_exec_always, clear_exec_session, remove_exec_always
+    from easyagent.strictshell import _canonical_key, allow_exec_always, clear_exec_session, remove_exec_always
     from easyagent.workspace import bot_workspace
 
     store, bot = _bot(tmp_path, mode="strict")
@@ -2340,7 +2340,7 @@ def test_strict_exec_always_is_one_tool_and_one_workspace(tmp_path):
         saved = store.get_bot(bot["id"])["safety_exec_always"]
         assert len(saved) == 1
         assert saved[0]["tool"] == "pytest"
-        assert Path(saved[0]["root"]) == workspace.resolve()
+        assert saved[0]["root"] == _canonical_key(workspace)
         assert saved[0]["label"] == f"pytest in {workspace.name}"
         assert classify(store, ToolRequest(kind="shell", command="pytest"), bot["id"]).tier == "allow"
         assert classify(store, ToolRequest(kind="shell", command="python -m pytest"), bot["id"]).tier == "allow"
@@ -2650,6 +2650,106 @@ def test_apfs_case_spellings_share_one_record_key(tmp_path, monkeypatch):
     lower = workspace / "sub" / "foo.py"
     assert strictshell._canonical_key(upper) == strictshell._canonical_key(lower)
     assert strictshell._canonical_key(upper) == strictshell._canonical_key(upper).casefold()
+
+
+def test_exec_always_uses_one_canonical_key_across_case(tmp_path, monkeypatch):
+    """A grant saved as /T/ covers a lookup spelled /t/. Rules, records, and matching share that key."""
+    import easyagent.strictshell as strictshell
+    from easyagent.strictshell import allow_exec_always, clear_exec_session
+
+    monkeypatch.setattr(strictshell.sys, "platform", "darwin")
+    store, bot = _bot(tmp_path, mode="strict")
+    workspace = _bind_workspace(store, bot)
+    try:
+        foo = workspace / "src" / "foo.py"
+        _track(store, bot, foo, "print('bot-case')\n")
+        real = str(workspace)
+        flipped = ""
+        for index, char in enumerate(real):
+            if char.isalpha():
+                flipped = real[:index] + char.swapcase() + real[index + 1:]
+                break
+        assert flipped and flipped != real
+        assert strictshell._canonical_key(workspace) == strictshell._canonical_key(flipped)
+        assert strictshell._canonical_key(foo) == strictshell._canonical_key(Path(flipped) / "src" / "foo.py")
+        records = store.get_bot(bot["id"])["safety_scripts"]
+        assert strictshell._canonical_key(foo) in records
+
+        assert allow_exec_always(store, bot["id"], "pytest", Path(flipped)) is True
+        saved = store.get_bot(bot["id"])["safety_exec_always"]
+        assert saved[0]["root"] == strictshell._canonical_key(workspace)
+        assert saved[0]["root"] == strictshell._canonical_key(flipped)
+        from easyagent import turn as turn_mod
+
+        turn_mod.current_slot().cwd = real
+        held = classify(store, ToolRequest(kind="shell", command="pytest"), bot["id"])
+        assert held.tier == "allow", (held.tier, held.rule)
+        turn_mod.current_slot().cwd = flipped
+        also = classify(store, ToolRequest(kind="shell", command="pytest"), bot["id"])
+        assert also.tier == "allow", (also.tier, also.rule)
+
+        clear_exec_session(bot["id"])
+        from easyagent.strictshell import remove_exec_always
+
+        remove_exec_always(store, bot["id"], saved[0]["id"])
+        other = tmp_path / "Elsewhere"
+        other.mkdir()
+        assert allow_exec_always(store, bot["id"], "pytest", other) is True
+        turn_mod.current_slot().cwd = real
+        missed = classify(store, ToolRequest(kind="shell", command="pytest"), bot["id"])
+        assert missed.tier == "ask" and missed.rule == "bot-changed"
+    finally:
+        clear_exec_session()
+        from easyagent import turn as turn_mod
+
+        turn_mod._slot.set(None)
+
+
+def test_card_path_is_relative_to_the_resolved_cwd(tmp_path, monkeypatch):
+    """The card shows src/foo.py, not a backslash path and not only the basename."""
+    import easyagent.strictshell as strictshell
+
+    private = tmp_path / "private" / "var" / "work"
+    (private / "src").mkdir(parents=True)
+    (tmp_path / "var").symlink_to(tmp_path / "private" / "var", target_is_directory=True)
+    linked = tmp_path / "var" / "work"
+    file = private / "src" / "foo.py"
+    file.write_text("print(1)\n", encoding="utf-8")
+    assert strictshell._short_name(file, linked) == "src/foo.py"
+    assert "\\" not in strictshell._short_name(linked / "src" / "foo.py", linked)
+
+    monkeypatch.setattr(strictshell.sys, "platform", "darwin")
+    folder = tmp_path / "Work"
+    (folder / "src").mkdir(parents=True)
+    shown = folder / "src" / "foo.py"
+    shown.write_text("print(1)\n", encoding="utf-8")
+    other = Path(str(folder)[: str(folder).rfind("/Work")] + "/work")
+    assert strictshell._short_name(shown, other) == "src/foo.py"
+
+
+def test_requested_overwrite_follows_the_resolved_path(tmp_path, monkeypatch):
+    """Naming /var/.../status.txt still requests the write of the resolved /private/var file."""
+    from easyagent.safety import _requested_write
+    import easyagent.strictshell as strictshell
+
+    private = tmp_path / "private" / "var" / "task"
+    private.mkdir(parents=True)
+    (tmp_path / "var").symlink_to(tmp_path / "private" / "var", target_is_directory=True)
+    target = private / "status.txt"
+    target.write_text("The status is RED-OLD.\n", encoding="utf-8")
+    named = tmp_path / "var" / "task" / "status.txt"
+    text = f"In {named} replace RED-OLD with GREEN-NEW. Keep the rest of the sentence."
+    assert _requested_write(target.resolve(), text)
+    assert not _requested_write(target.resolve(), "What is the status of the build?")
+
+    monkeypatch.setattr(strictshell.sys, "platform", "darwin")
+    folder = tmp_path / "Task"
+    folder.mkdir()
+    case_file = folder / "status.txt"
+    case_file.write_text("The status is RED-OLD.\n", encoding="utf-8")
+    flipped = Path(str(case_file).replace("/Task/", "/task/"))
+    asked = f"In {flipped} replace RED-OLD with GREEN-NEW."
+    assert _requested_write(case_file.resolve(), asked)
 
 
 @pytest.mark.skipif(os.name != "posix" or os.uname().sysname != "Darwin", reason="APFS opens either case")

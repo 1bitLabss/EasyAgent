@@ -211,6 +211,31 @@ def bwrap_argv(store, bot_id: str | None, command: str, cwd: str, *, web: bool =
     return argv
 
 
+def _sandbox_paths(path: Path) -> list[str]:
+    """Spellings sandbox-exec may compare: the path as given, and the resolved path.
+
+    ``/var`` is ``/private/var`` on macOS. A subpath rule written with only one of
+    those does not match the path the process actually opens. APFS also keeps
+    ``/T/`` and ``/t/`` as one folder, and the filter is case-sensitive.
+    """
+    names: list[str] = []
+
+    def add(text: str) -> None:
+        if text and text not in names:
+            names.append(text)
+
+    raw = os.fspath(path)
+    add(raw)
+    try:
+        resolved = os.fspath(Path(raw).resolve())
+    except OSError:
+        resolved = ""
+    add(resolved)
+    if sys.platform == "darwin" and resolved:
+        add(resolved.casefold())
+    return names
+
+
 def macos_profile(writable: list[Path], data_root: Path | None = None) -> str:
     """sandbox-exec profile. The data directory, ~/.easyagent, Keychains, and securityd are denied."""
     from easyagent.secrets import keychain_paths
@@ -222,14 +247,17 @@ def macos_profile(writable: list[Path], data_root: Path | None = None) -> str:
         '(deny file-read* (regex #"(?i)(cookies|login data|logins\\.json|key4\\.db|Keychains|secrets\\.db)"))',
     ]
     if data_root is not None:
-        lines.append(f'(deny file-read* (subpath "{data_root}"))')
-        lines.append(f'(deny file-write* (subpath "{data_root}"))')
+        for name in _sandbox_paths(data_root):
+            lines.append(f'(deny file-read* (subpath "{name}"))')
+            lines.append(f'(deny file-write* (subpath "{name}"))')
     for path in writable:
-        lines.append(f'(allow file-read* (subpath "{path}"))')
-        lines.append(f'(allow file-write* (subpath "{path}"))')
+        for name in _sandbox_paths(path):
+            lines.append(f'(allow file-read* (subpath "{name}"))')
+            lines.append(f'(allow file-write* (subpath "{name}"))')
     for path in keychain_paths():
-        lines.append(f'(deny file-read* (subpath "{path}"))')
-        lines.append(f'(deny file-write* (subpath "{path}"))')
+        for name in _sandbox_paths(path):
+            lines.append(f'(deny file-read* (subpath "{name}"))')
+            lines.append(f'(deny file-write* (subpath "{name}"))')
     lines.append('(deny mach-lookup (global-name "com.apple.securityd"))')
     lines.append('(deny mach-lookup (global-name "com.apple.SecurityServer"))')
     return "\n".join(lines) + "\n"

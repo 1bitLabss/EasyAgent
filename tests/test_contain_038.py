@@ -3,6 +3,7 @@
 import asyncio
 import os
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -238,12 +239,29 @@ def test_macos_profile_denies_the_data_dir_and_keychain():
     assert str(work) in text
 
 
+def test_macos_profile_denies_the_resolved_data_dir(tmp_path):
+    """A /var symlink and its /private/var target are both denied, and the workspace is allowed."""
+    private = tmp_path / "private" / "var" / "data"
+    (private / "bots" / "ada" / "workspace").mkdir(parents=True)
+    (tmp_path / "var").symlink_to(tmp_path / "private" / "var", target_is_directory=True)
+    data = tmp_path / "var" / "data"
+    work = data / "bots" / "ada" / "workspace"
+    text = macos_profile([work], data)
+    assert str(data) in text
+    assert str(data.resolve()) in text
+    assert str(work) in text
+    assert str(work.resolve()) in text
+    assert text.index(f'(deny file-write* (subpath "{data.resolve()}"))') < text.index(
+        f'(allow file-write* (subpath "{work.resolve()}"))'
+    )
+
+
 def test_landlock_holds_when_bubblewrap_is_missing(monkeypatch):
     import shutil
 
     from easyagent.selftest import _linux_rows
 
-    if os.name == "nt":
+    if sys.platform != "linux":
         pytest.skip("Landlock is a Linux fallback")
     real = shutil.which
 
@@ -263,8 +281,8 @@ def test_the_real_container_hides_the_data_dir(tmp_path):
     from easyagent.selftest import _linux_rows
     from easyagent.tools import _run_shell
 
-    if os.name == "nt":
-        pytest.skip("the Windows probe runs on the laptop")
+    if sys.platform != "linux":
+        pytest.skip("bubblewrap and Landlock run on Linux")
     rows = _linux_rows()
     table = {name: (status, detail) for name, status, detail in rows}
     assert table["RESULT"][0] == "PASS", rows

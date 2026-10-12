@@ -2572,19 +2572,48 @@ def _persistence_path(path: Path) -> bool:
     return bool(_PERSIST_PATH.search(str(path).replace("\\", "/")))
 
 
+def _same_canonical(left: Path, right: Path) -> bool:
+    """True when both paths are the same file after symlink and case folding."""
+    from easyagent.strictshell import _canonical_key
+
+    left_key = _canonical_key(left)
+    right_key = _canonical_key(right)
+    if left_key and right_key:
+        return left_key == right_key
+    return os.path.normcase(str(left)) == os.path.normcase(str(right))
+
+
+def _named_paths(text: str) -> list[Path]:
+    found: list[Path] = []
+    for match in re.finditer(r"(?:[A-Za-z]:[\\/]|/)[^\s\"'`<>]+", text or ""):
+        raw = match.group(0).rstrip(".,);:")
+        if len(raw) >= 2:
+            found.append(Path(raw))
+    return found
+
+
 def _requested_write(path: Path, user_text: str) -> bool:
-    """The person named this file, or its folder, and asked for it to be written."""
+    """The person named this file, or its folder, and asked for it to be written.
+
+    The name in the sentence and the path we are about to write can differ by a
+    symlink (``/var`` and ``/private/var``) or by APFS case. Those still name one file.
+    """
     text = (user_text or "").replace("\\", "/")
     if not _ASKED_WRITE.search(text):
         return False
     target = str(path).replace("\\", "/")
     if len(target) >= 4 and target in text:
         return True
+    for named in _named_paths(text):
+        if _same_canonical(named, path):
+            return True
     parent = path.parent
     parent_text = str(parent).replace("\\", "/")
     if _generic_root(parent) or len(parent_text) < 8:
         return False
-    return parent_text in text
+    if parent_text in text:
+        return True
+    return any(_same_canonical(named, parent) for named in _named_paths(text))
 
 
 def _is_passphrase_file(path: Path) -> bool:

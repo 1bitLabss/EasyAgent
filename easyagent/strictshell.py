@@ -1712,10 +1712,18 @@ def _diff_text(name: str, before: str, after: str) -> str:
 
 
 def _short_name(path: Path, cwd: Path) -> str:
-    try:
-        return str(path.resolve().relative_to(cwd.resolve()))
-    except (OSError, ValueError):
-        return path.name
+    """The path shown on the card: forward slashes, relative to the resolved cwd.
+
+    ``relative_to`` keeps backslashes on Windows, and it misses when one side is
+    ``/var`` and the other is ``/private/var``, or when APFS spells the same
+    folder ``/T/`` and ``/t/``. The canonical key has already folded those.
+    """
+    file_key = _canonical_key(path) or _fold_text(os.fspath(path))
+    root_key = _canonical_key(cwd) or _fold_text(os.fspath(cwd))
+    if file_key and root_key and _key_under(file_key, root_key) and file_key != root_key:
+        return file_key[len(root_key):].lstrip("/")
+    name = path.name.replace("\\", "/")
+    return name or file_key
 
 
 def _change_summary(items: list[tuple[Path, str, str]], cwd: Path) -> str:

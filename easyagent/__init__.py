@@ -1,3 +1,3 @@
 """AI agents, made easy."""
 
-__version__ = "0.3.14.1"
+__version__ = "0.3.15"

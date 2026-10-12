@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.3.14.1
+## 0.3.15
 
 - A claim that a failure is pre-existing reruns the command only when that command actually ran. The rerun goes through Strict, approval, and containment. A skill check during idle replay does the same: a command that is not allowed is not run.
 

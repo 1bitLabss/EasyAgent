@@ -1,7 +1,6 @@
 """Honesty checks use a scripted fake model. No live endpoint."""
 
 import asyncio
-import subprocess
 import sys
 from pathlib import Path
 
@@ -194,36 +193,75 @@ def test_an_apology_without_a_new_action_is_flagged():
 
 
 def test_a_pre_existing_claim_reruns_the_failing_command_on_the_snapshot(tmp_path):
-    target = tmp_path / "note.txt"
+    from easyagent import turn as turn_mod
+    from easyagent.workspace import bot_workspace
+
+    store, bot = _bot(tmp_path)
+    work = bot_workspace(store, bot["id"], create=True)
+    target = work / "note.txt"
     target.write_text("old", encoding="utf-8")
-    script = tmp_path / "check_old.py"
+    script = work / "check_old.py"
     script.write_text(
         "import pathlib, sys\n"
         f"text = pathlib.Path({str(target)!r}).read_text(encoding='utf-8')\n"
-        "sys.exit(0 if text == 'old' else 1)\n"
+        "sys.exit(0 if text == 'old' else 1)\n",
+        encoding="utf-8",
     )
-    command = f"{sys.executable} {script}"
+    command = f"{Path(sys.executable).name} {script.name}"
 
     def run(call):
         if call.kind == "files":
             Path(call.path).write_text(call.body, encoding="utf-8")
             return "wrote"
-        proc = subprocess.run(call.command, shell=True, capture_output=True, text=True)
-        out = ((proc.stdout or "") + (proc.stderr or "")).strip()
-        return f"{out}\nexit code {proc.returncode}".strip()
+        return "exit code 1"
 
-    result = _turn(
-        [
-            f'TOOL files action=write path="{target}" body=new',
-            f'TOOL shell command="{command}"',
-            "The failure is pre-existing.",
-        ],
-        "why did that fail",
-        run,
-    )
+    async def go():
+        slot = turn_mod.bind(store, "honesty-snapshot", bot["id"])
+        slot.cwd = str(work)
+        return await run_scripted(
+            [
+                f'TOOL files action=write path="{target}" body=new',
+                f'TOOL shell command="{command}"',
+                "The failure is pre-existing.",
+            ],
+            "why did that fail",
+            run,
+            store=store,
+            bot_id=bot["id"],
+        )
+
+    result = asyncio.run(go())
     assert "Checked the state before this turn's changes:" in result["text"]
     assert "exit code 0" in result["text"]
     assert target.read_text(encoding="utf-8") == "new"
+
+
+def test_a_command_that_did_not_run_is_not_rerun(tmp_path):
+    from easyagent import honesty, turn as turn_mod
+    from easyagent.tools import ToolError, ToolRequest, execute
+    from easyagent.workspace import bot_workspace
+
+    store, bot = _bot(tmp_path)
+    work = bot_workspace(store, bot["id"], create=True)
+    target = work / "note.txt"
+    marker = work / "PWNED"
+
+    async def go():
+        honesty.begin(store, bot["id"])
+        slot = turn_mod.bind(store, "honesty-block", bot["id"])
+        slot.cwd = str(work)
+        await execute(store, ToolRequest(kind="files", action="write", path=str(target), body="new"), bot["id"])
+        command = f"{sys.executable} -c \"open(r'{marker}', 'w').write('x')\""
+        try:
+            await execute(store, ToolRequest(kind="shell", command=command), bot["id"])
+        except ToolError:
+            pass
+        outcome = await honesty.settle("The failure is pre-existing.")
+        return outcome.text
+
+    text = asyncio.run(go())
+    assert not marker.exists()
+    assert "Checked the state before this turn's changes:" not in text
 
 
 def test_a_third_identical_failure_is_blocked():

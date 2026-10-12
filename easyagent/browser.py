@@ -537,8 +537,17 @@ def install_browser() -> dict:
     return install_status()
 
 
+def _containment_on() -> bool:
+    from easyagent.sandbox import shell_mode
+
+    return shell_mode(None).get("status") != "off"
+
+
 def ensure_chromium() -> None:
-    """Install the Playwright library and Chromium the first time a browser opens."""
+    """Install the Playwright library and Chromium the first time a browser opens.
+
+    When containment is on, Chromium is not launched to probe the install.
+    """
     global _READY
     with _READY_LOCK:
         if _READY:
@@ -548,6 +557,13 @@ def ensure_chromium() -> None:
         except ImportError:
             subprocess.check_call([sys.executable, "-m", "pip", "install", "playwright>=1.40"])
             from playwright.sync_api import sync_playwright
+        if _containment_on():
+            if not chromium_present():
+                subprocess.check_call([sys.executable, "-m", "playwright", "install", "chromium"])
+            if not chromium_present():
+                raise RuntimeError("Chromium is not installed. The browser was not started outside containment.")
+            _READY = True
+            return
         with sync_playwright() as playwright:
             try:
                 browser = playwright.chromium.launch(headless=True)

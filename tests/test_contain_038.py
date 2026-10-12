@@ -425,11 +425,12 @@ def test_the_browser_stays_open_when_containment_is_off(tmp_path):
     assert "executable_path" not in kwargs
 
 
-def test_a_landlock_browser_stays_wrapped(tmp_path):
+def test_a_landlock_browser_stays_wrapped(tmp_path, monkeypatch):
     import easyagent.browser as browser
     import easyagent.selftest as selftest
     from easyagent.contain import save_ledger
 
+    monkeypatch.setattr(sys, "platform", "linux")
     store, bot = _bot(tmp_path)
     save_ledger({"consented": True, "profile": "", "sid": "", "aces": [], "platform": "test"})
     _passed_cache(selftest, "landlock")

@@ -287,6 +287,49 @@ def test_the_data_dir_and_file_scheme_are_blocked(tmp_path):
     assert plain.tier == "block"
 
 
+def test_chromium_is_not_launched_when_containment_is_on(tmp_path, monkeypatch):
+    import easyagent.browser as browser
+    from easyagent.contain import save_ledger
+
+    browser._READY = False
+    binary = tmp_path / "chrome"
+    binary.write_text("x", encoding="utf-8")
+    save_ledger({"consented": True, "profile": "", "sid": "", "aces": [], "platform": "test"})
+    monkeypatch.setattr(
+        "easyagent.selftest.cached_probe",
+        lambda: {"passed": True, "mechanism": "bubblewrap", "reason": "", "rows": []},
+    )
+    launched = {"n": 0}
+
+    class _Browser:
+        def close(self):
+            return None
+
+    class _Chromium:
+        executable_path = str(binary)
+
+        def launch(self, **_kwargs):
+            launched["n"] += 1
+            return _Browser()
+
+    class _Playwright:
+        chromium = _Chromium()
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+    monkeypatch.setattr("playwright.sync_api.sync_playwright", lambda: _Playwright())
+    try:
+        browser.ensure_chromium()
+        assert launched["n"] == 0
+        assert browser._READY is True
+    finally:
+        browser._READY = False
+
+
 def test_install_status_does_not_download_and_startup_does_not_install():
     import inspect
 

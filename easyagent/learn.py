@@ -13,7 +13,6 @@ import json
 import os
 import re
 import shlex
-import subprocess
 import tempfile
 from pathlib import Path
 
@@ -452,24 +451,31 @@ def merge_text(body: str, extra: str, cap: int = BODY_CAP) -> str | None:
     return nxt
 
 
-def run_check(check: dict, *, cwd: Path) -> tuple[bool, str]:
-    """Run the candidate's own check. The model's opinion is not consulted."""
+def _file_check(check: dict, cwd: Path) -> tuple[bool, str]:
+    raw = str(check.get("path") or "")
+    path = (cwd / raw).resolve()
+    if cwd.resolve() not in path.parents and path != cwd.resolve():
+        return False, "The file check left the workspace."
+    exists = path.is_file()
+    if check.get("exists") is False:
+        return (not exists, "The file is still there." if exists else "The file is absent.")
+    if not exists:
+        return False, "The file is not there."
+    contains = str(check.get("contains") or "")
+    if contains and contains not in path.read_text(encoding="utf-8", errors="replace"):
+        return False, "The file does not contain the expected text."
+    return True, "The file check passed."
+
+
+async def run_check(store: Store, bot: dict, check: dict, *, cwd: Path) -> tuple[bool, str]:
+    """Run the candidate's check through Strict and containment.
+
+    A command that is not allowed does not run. Idle replay does not approve it.
+    """
     kind = (check or {}).get("kind")
     cwd.mkdir(parents=True, exist_ok=True)
     if kind == "file":
-        raw = str(check.get("path") or "")
-        path = (cwd / raw).resolve()
-        if cwd.resolve() not in path.parents and path != cwd.resolve():
-            return False, "The file check left the workspace."
-        exists = path.is_file()
-        if check.get("exists") is False:
-            return (not exists, "The file is still there." if exists else "The file is absent.")
-        if not exists:
-            return False, "The file is not there."
-        contains = str(check.get("contains") or "")
-        if contains and contains not in path.read_text(encoding="utf-8", errors="replace"):
-            return False, "The file does not contain the expected text."
-        return True, "The file check passed."
+        return _file_check(check, cwd)
     command = str((check or {}).get("command") or "")
     try:
         argv = shlex.split(command)
@@ -477,18 +483,36 @@ def run_check(check: dict, *, cwd: Path) -> tuple[bool, str]:
         return False, "The command does not parse."
     if not argv:
         return False, "The command was empty."
+    from easyagent import turn as turn_mod
+    from easyagent.safety import ALLOW, classify
+    from easyagent.tools import ToolError, ToolRequest, _run_shell
+
+    previous_slot = turn_mod.current_slot()
+    slot = previous_slot
+    if slot is None:
+        slot = turn_mod.bind(store, "learn-check", bot.get("id") or "")
+    previous_cwd = slot.cwd
+    slot.cwd = str(cwd)
     try:
-        proc = subprocess.run(
-            argv,
-            cwd=str(cwd),
-            capture_output=True,
-            text=True,
-            timeout=8,
-            check=False,
-        )
-    except (OSError, subprocess.TimeoutExpired) as exc:
-        return False, f"The command did not finish: {exc}"
-    output = (proc.stdout or "") + (proc.stderr or "")
+        verdict = classify(store, ToolRequest(kind="shell", command=command), bot.get("id"))
+        if verdict.tier != ALLOW:
+            why = (verdict.why or "That check is not a command that can run on its own.").rstrip(".")
+            if "not run" not in why.lower():
+                why += ". It was not run."
+            return False, why
+        try:
+            output = _run_shell(store, command)
+            code = 0
+        except ToolError as exc:
+            output = str(exc)
+            if re.search(r"(?i)\bnot run\b", output):
+                return False, output
+            match = re.search(r"exit code (\d+)", output)
+            code = int(match.group(1)) if match else 1
+    finally:
+        slot.cwd = previous_cwd
+        if previous_slot is None:
+            turn_mod._slot.set(None)
     if kind == "regex":
         pattern = str(check.get("pattern") or "")
         try:
@@ -503,8 +527,8 @@ def run_check(check: dict, *, cwd: Path) -> tuple[bool, str]:
         expected_code = int(expected if expected is not None else 0)
     except (TypeError, ValueError):
         expected_code = 0
-    if proc.returncode != expected_code:
-        return False, f"The command exited {proc.returncode}, expected {expected_code}."
+    if code != expected_code:
+        return False, f"The command exited {code}, expected {expected_code}."
     return True, "The command check passed."
 
 
@@ -800,7 +824,7 @@ async def replay_candidate(store: Store, bot: dict, candidate: dict, *, runs: in
         return _update_candidate(store, candidate)
     _raise_if_idle_broken(store)
     with tempfile.TemporaryDirectory(prefix="easyagent-check-") as temp_name:
-        ok, detail = run_check(candidate.get("check") or {}, cwd=Path(temp_name))
+        ok, detail = await run_check(store, bot, candidate.get("check") or {}, cwd=Path(temp_name))
     if not ok:
         print("heuristic learn: the check failed, so the candidate stays off the live skills", flush=True)
         candidate["status"] = "rejected"

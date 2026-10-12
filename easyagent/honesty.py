@@ -9,7 +9,6 @@ from __future__ import annotations
 import json
 import os
 import re
-import subprocess
 import time
 from contextvars import ContextVar
 from dataclasses import dataclass, field
@@ -170,6 +169,7 @@ class Trace:
     model_calls: int = 0
     last_fail_command: str = ""
     last_fail_cwd: str = ""
+    shell_ran: str = ""
     lesson_prefix: str = ""
     mistakes: list | None = None
     clock: object = time.monotonic
@@ -374,6 +374,25 @@ def output_failed(text: str) -> bool:
     if match is None:
         return False
     return int(match.group(1)) != 0
+
+
+def note_shell_started(command: str) -> None:
+    """The shell process exists. A refusal before this does not count as a run."""
+    trace = current()
+    if trace is None:
+        return
+    trace.shell_ran = command or ""
+
+
+def _shell_executed(trace: Trace, command: str, output: str) -> bool:
+    """True when this shell command started. A block, a hold, or a refused container did not."""
+    wanted = " ".join((command or "").split())
+    ran = " ".join((trace.shell_ran or "").split())
+    if ran and ran == wanted:
+        return True
+    if re.search(r"(?i)\b(?:was not run|not run|did not run|was not started)\b", output or ""):
+        return False
+    return output_failed(output or "")
 
 
 def _cwd() -> str:
@@ -654,10 +673,12 @@ def after_tool(request, output: str, *, ok: bool) -> str:
         }
     )
     trace.last_progress = float(trace.clock())
+    executed = kind == "shell" and bool(command) and _shell_executed(trace, command, raw)
+    trace.shell_ran = ""
     if failed:
         sig = _signature(request)
         trace.fail_counts[sig] = trace.fail_counts.get(sig, 0) + 1
-        if kind == "shell" and command:
+        if executed:
             trace.last_fail_command = command
             trace.last_fail_cwd = _cwd()
     edit = is_edit(request)
@@ -894,30 +915,42 @@ def _restore_bytes(saved: dict[str, bytes | None]) -> None:
             continue
 
 
-def _rerun(command: str, cwd: str) -> str:
-    from easyagent.tools import _shell_invocation
+async def _rerun(trace: Trace, command: str, cwd: str) -> str:
+    """Rerun through Strict, approval, and containment. Files stay put until it is allowed to run."""
+    from easyagent import turn as turn_mod
+    from easyagent.safety import guard
+    from easyagent.tools import ToolError, ToolRequest, _run_shell
 
-    argv, use_shell = _shell_invocation(command)
+    if trace.store is None:
+        return "The command was not run."
+    slot = turn_mod.current_slot()
+    previous_cwd = slot.cwd if slot is not None else None
+    if slot is None:
+        slot = turn_mod.bind(trace.store, "honesty-rerun", trace.bot_id or "")
+    if cwd:
+        slot.cwd = cwd
     try:
-        proc = subprocess.run(
-            argv,
-            shell=use_shell,
-            capture_output=True,
-            text=True,
-            cwd=cwd or None,
-            timeout=20,
-        )
-    except (OSError, subprocess.TimeoutExpired) as exc:
-        return f"the command could not be run again ({exc})"
-    out = ((proc.stdout or "") + (proc.stderr or "")).strip()
-    if not out:
-        out = f"exit code {proc.returncode}"
-    else:
-        out = f"{out}\nexit code {proc.returncode}"
-    return out[:500]
+        request = ToolRequest(kind="shell", command=command)
+        try:
+            _request, early = await guard(trace.store, request, trace.bot_id or None)
+        except ToolError as exc:
+            return str(exc)
+        if early is not None:
+            return str(early)
+        saved = _swap_snapshot(trace.snapshot)
+        try:
+            try:
+                return _run_shell(trace.store, command)
+            except ToolError as exc:
+                return str(exc)
+        finally:
+            _restore_bytes(saved)
+    finally:
+        if previous_cwd is not None:
+            slot.cwd = previous_cwd
 
 
-def _excuse_note(trace: Trace, text: str) -> str:
+async def _excuse_note(trace: Trace, text: str) -> str:
     if trace.excuse_checked:
         return trace.excuse_note or ""
     trace.excuse_checked = True
@@ -928,17 +961,13 @@ def _excuse_note(trace: Trace, text: str) -> str:
         return ""
     if not trace.last_fail_command or not trace.snapshot:
         return ""
-    saved = _swap_snapshot(trace.snapshot)
-    try:
-        result = _rerun(trace.last_fail_command, trace.last_fail_cwd)
-    finally:
-        _restore_bytes(saved)
+    result = await _rerun(trace, trace.last_fail_command, trace.last_fail_cwd)
     note = f"Checked the state before this turn's changes: {result}"
     trace.excuse_note = note
     return note
 
 
-def settle(text: str, *, allow_model: bool = False) -> Outcome:
+async def settle(text: str, *, allow_model: bool = False) -> Outcome:
     trace = current()
     raw = text or ""
     if trace is None:
@@ -983,7 +1012,7 @@ def settle(text: str, *, allow_model: bool = False) -> Outcome:
     if hedged and not backing and not proof and not needs_verify:
         unverified = True
     pieces = [rewritten.rstrip()]
-    excuse = _excuse_note(trace, rewritten)
+    excuse = await _excuse_note(trace, rewritten)
     if excuse:
         pieces.append(excuse)
     if trace.investigate and trace.settings.get("pushback", True):
@@ -1136,14 +1165,14 @@ async def run_scripted(
             touch()
         if jump_seconds:
             trace.last_progress -= float(jump_seconds)
-        outcome = settle(prose, allow_model=trace.model_calls == 0 and bool(queue))
+        outcome = await settle(prose, allow_model=trace.model_calls == 0 and bool(queue))
         if outcome.needs_verify and queue:
             trace.model_calls += 1
             extra = queue.pop(0)
             calls, _extra_prose = parse_script(extra)
             for call in calls:
                 await _run_call(tools, call, outputs)
-            outcome = settle(prose, allow_model=False)
+            outcome = await settle(prose, allow_model=False)
         trace.outcome = outcome
         return {
             "text": outcome.text,

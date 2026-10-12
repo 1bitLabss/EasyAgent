@@ -1541,12 +1541,9 @@ def _run_shell(store: Store, command: str) -> str:
         try:
             proc = popen_contained(store, bot_id or None, text, env, turn_mod.tool_cwd())
         except OSError as exc:
-            from easyagent.contain import AclError, FallbackError
+            from easyagent.sandbox import launch_failure
 
-            if isinstance(exc, (AclError, FallbackError)):
-                raise ToolError(str(exc)) from exc
-            notice = f"OS containment is unavailable: {exc}. This command used the file guards."
-            proc = None
+            raise ToolError(launch_failure(exc)) from exc
     if proc is None:
         argv, use_shell = _shell_invocation(text)
         try:
@@ -1564,6 +1561,9 @@ def _run_shell(store: Store, command: str) -> str:
             raise ToolError(f"Could not run that command. {exc}") from exc
     turn_mod.attach_proc(proc)
     try:
+        if turn_mod.cancelled():
+            turn_mod.stop_process(proc)
+            raise turn_mod.TurnCancelled()
         try:
             stdout, stderr = proc.communicate(timeout=_COMMAND_TIMEOUT)
         except subprocess.TimeoutExpired as exc:

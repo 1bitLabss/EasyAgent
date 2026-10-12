@@ -51,6 +51,27 @@ def fallback_refuse_reason(report: dict) -> str:
     return ""
 
 
+def launch_failure(exc: BaseException) -> str:
+    """Containment is on and the container did not start. Drop the cached check and refuse.
+
+    The next command runs the check again instead of trusting a pass from before
+    this launch failed.
+    """
+    from easyagent.selftest import reset_probe
+
+    reset_probe()
+    text = " ".join(str(exc).split()) or "the container did not start"
+    if "not run" not in text.lower():
+        text = text.rstrip(".") + ". The command was not run."
+    if "selftest contain" not in text:
+        text += (
+            " Run python -m easyagent selftest contain to see which check failed."
+            " To turn containment off, run python -m easyagent contain --undo,"
+            " or choose Remove containment in Settings."
+        )
+    return text
+
+
 def probe_refuse_reason(report: dict) -> str:
     """Why a command is refused when containment is on and the probe failed."""
     detail = (report.get("reason") or "the self-test did not pass").strip().rstrip(".")

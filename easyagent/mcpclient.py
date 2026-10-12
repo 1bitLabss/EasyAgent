@@ -200,7 +200,7 @@ def _popen_contained(store, bot_id, command: list[str], env: dict, cwd: str):
 
 
 def launch_stdio(command: list[str], env: dict, cwd: str, store=None, bot_id: str | None = None):
-    """Binary stdio pipes. Containment when it is on. A failed container falls back with a notice."""
+    """Binary stdio pipes. Containment when it is on. A failed container is not started outside it."""
     notice = ""
     mode = {"contained": False}
     if store is not None:
@@ -215,10 +215,12 @@ def launch_stdio(command: list[str], env: dict, cwd: str, store=None, bot_id: st
             return proc, notice
         except OSError as exc:
             from easyagent.contain import AclError, FallbackError
+            from easyagent.sandbox import launch_failure
 
+            message = launch_failure(exc)
             if isinstance(exc, (AclError, FallbackError)):
                 raise
-            notice = f"OS containment is unavailable: {exc}. This connector used the file guards."
+            raise OSError(message) from exc
     proc = subprocess.Popen(
         command,
         stdin=subprocess.PIPE,

@@ -4479,6 +4479,7 @@ def test_an_old_release_after_search_is_not_the_latest(tmp_path, monkeypatch):
 def test_a_running_command_stops_when_the_turn_is_cancelled(tmp_path):
     """A command still running is killed when the person sends again."""
     import asyncio
+    import time
 
     from easyagent import turn as turn_mod
     from easyagent.store import Store
@@ -4488,11 +4489,17 @@ def test_a_running_command_stops_when_the_turn_is_cancelled(tmp_path):
     store.ensure()
 
     async def run():
-        turn_mod.bind(store, "chat-1")
+        slot = turn_mod.bind(store, "chat-1")
         task = asyncio.create_task(asyncio.to_thread(_run_shell, store, "sleep 30"))
-        await asyncio.sleep(0.3)
+        # Windows parses the command with PowerShell before the real process exists.
+        # Wait for that process, then stop it, instead of guessing 0.3 seconds.
+        deadline = time.monotonic() + 12
+        while slot.proc is None and time.monotonic() < deadline:
+            if task.done():
+                break
+            await asyncio.sleep(0.05)
         turn_mod.interrupt(store, "chat-1")
         with pytest.raises(turn_mod.TurnCancelled):
-            await asyncio.wait_for(task, timeout=3)
+            await asyncio.wait_for(task, timeout=12)
 
     asyncio.run(run())

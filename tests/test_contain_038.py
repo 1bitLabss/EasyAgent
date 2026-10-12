@@ -212,6 +212,8 @@ def test_a_failed_probe_refuses_the_command(tmp_path, monkeypatch, platform, fix
     from easyagent.tools import ToolError, _run_shell
 
     monkeypatch.setattr(sys, "platform", platform)
+    # The Windows checker starts PowerShell to parse the command. That is not the launch.
+    monkeypatch.setattr("easyagent.psast.data_decision", lambda *_args, **_kwargs: "allow")
     store, bot = _bot(tmp_path)
     save_ledger({"consented": True, "profile": "", "sid": "", "aces": [], "platform": "test"})
     _failed_probe(monkeypatch)
@@ -248,6 +250,60 @@ def test_a_failed_probe_refuses_the_command(tmp_path, monkeypatch, platform, fix
     assert status["active"] is False
     assert status["reason"] == text
     assert "contain --undo" in status["undo"]
+
+
+@pytest.mark.parametrize("platform", ["linux", "darwin", "win32"])
+def test_a_passed_probe_refuses_when_the_launch_fails(tmp_path, monkeypatch, platform):
+    import easyagent.selftest as selftest
+    from easyagent import turn as turn_mod
+    from easyagent.contain import save_ledger
+    from easyagent.mcpclient import launch_stdio
+    from easyagent.tools import ToolError, _run_shell
+
+    monkeypatch.setattr(sys, "platform", platform)
+    monkeypatch.setattr("easyagent.psast.data_decision", lambda *_args, **_kwargs: "allow")
+    store, bot = _bot(tmp_path)
+    save_ledger({"consented": True, "profile": "", "sid": "", "aces": [], "platform": "test"})
+    passed = {
+        "passed": True,
+        "mechanism": "bubblewrap",
+        "reason": "",
+        "status": "active",
+        "rows": [("mechanism", "PASS", "bubblewrap")],
+    }
+    selftest._CACHE = dict(passed)
+
+    def boom(*_args, **_kwargs):
+        raise OSError("bubblewrap is not installed and Landlock is not available")
+
+    def unsandboxed(*_args, **_kwargs):
+        raise AssertionError("unsandboxed")
+
+    monkeypatch.setattr("easyagent.sandbox.popen_contained", boom)
+    monkeypatch.setattr("easyagent.mcpclient._popen_contained", boom)
+    monkeypatch.setattr(subprocess, "Popen", unsandboxed)
+    slot = turn_mod.slot_for(store, "chat-launch-refuse")
+    slot.bot_id = bot["id"]
+    slot.store = store
+    slot.cwd = str(tmp_path)
+    turn_mod._slot.set(slot)
+    try:
+        with pytest.raises(ToolError, match="not run") as caught:
+            _run_shell(store, "echo still-ran")
+        assert selftest._CACHE is None
+        text = str(caught.value)
+        assert "file guards" not in text
+        assert "selftest contain" in text
+        assert "contain --undo" in text
+        selftest._CACHE = dict(passed)
+        with pytest.raises(OSError, match="not run") as connector:
+            launch_stdio(["server"], {}, str(tmp_path), store, bot["id"])
+        assert selftest._CACHE is None
+        assert "file guards" not in str(connector.value)
+        assert "selftest contain" in str(connector.value)
+    finally:
+        turn_mod._slot.set(None)
+        selftest.reset_probe()
 
 
 def test_macos_profile_denies_the_data_dir_and_keychain():
@@ -1367,6 +1423,7 @@ def test_a_broken_restricted_fallback_does_not_run_unsandboxed(tmp_path, monkeyp
     def unsandboxed(*_args, **_kwargs):
         raise AssertionError("unsandboxed")
 
+    monkeypatch.setattr("easyagent.psast.data_decision", lambda *_args, **_kwargs: "allow")
     monkeypatch.setattr(subprocess, "Popen", unsandboxed)
     slot = turn_mod.slot_for(store, "chat-fallback-refuse")
     slot.bot_id = bot["id"]

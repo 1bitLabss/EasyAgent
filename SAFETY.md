@@ -64,7 +64,7 @@ Strict is the default for a new bot, and for a bot saved before this version. A 
 
 Off-limits paths stay blocked in every mode. The approval card can offer "Always allow this command for this bot". That saves an exact match for this bot only. A different command still waits. Always allow on a test or build card is a different save: one tool in one workspace. Block rules and off-limits paths still apply on top of it.
 
-The classifier lowers risk. It does not contain a command. OS containment (bubblewrap, Landlock, or the Windows restricted token) is what limits the damage when a command runs. Containment stays off until you turn it on. Until then the file guards and these rules are the check, and a command that is allowed does run on the machine. After you turn containment on, a failed check refuses the command on Windows, Linux, and macOS instead of running it outside the container. The reply names `python -m easyagent selftest contain` and `python -m easyagent contain --undo`.
+The classifier lowers risk. It does not contain a command. OS containment (bubblewrap, Landlock, or the Windows restricted token) is what limits the damage when a command runs. Containment stays off until you turn it on. Until then the file guards and these rules are the check, and a command that is allowed does run on the machine. After you turn containment on, a failed check refuses the command on Windows, Linux, and macOS instead of running it outside the container. A container that fails to start does the same, and the saved check is cleared. The reply names `python -m easyagent selftest contain` and `python -m easyagent contain --undo`.
 
 ## Untrusted text
 

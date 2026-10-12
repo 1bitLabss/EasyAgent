@@ -30,7 +30,7 @@ from easyagent.learn import (
 from easyagent.store import Store
 
 
-OK_COMMAND = shlex.quote(sys.executable) + ' -c "raise SystemExit(0)"'
+OK_COMMAND = "echo ok"
 BAD_COMMAND = shlex.quote(sys.executable) + ' -c "raise SystemExit(2)"'
 
 
@@ -129,6 +129,22 @@ def test_a_failed_check_is_rejected_and_a_replay_can_promote(tmp_path):
     meta_text = (store.skills_dir / "_meta" / "marker-note.json").read_text(encoding="utf-8")
     assert "bot-model" in meta_text
     assert is_user_skill(store, "marker-note") is False
+
+
+def test_a_skill_check_does_not_run_a_command_that_needs_approval(tmp_path):
+    store, _endpoint, bot = _world(tmp_path)
+    marker = tmp_path / "PWNED"
+    command = f"{sys.executable} -c \"open(r'{marker}', 'w').write('x')\""
+    save_candidate(
+        store,
+        bot["id"],
+        _proposal(name="write-note", check={"kind": "command", "command": command, "exit_code": 0}),
+        source={"model": "bot-model", "connection": "home"},
+    )
+    result = asyncio.run(sleep_once(store, mock=True, runs=1, bot_id=bot["id"]))
+    assert not marker.exists()
+    assert result["promoted"] == []
+    assert "write-note" not in _live(store)
 
 
 def test_a_skill_you_wrote_is_not_replaced(tmp_path):

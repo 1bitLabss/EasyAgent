@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.3.14.1
+
+- A claim that a failure is pre-existing reruns the command only when that command actually ran. The rerun goes through Strict, approval, and containment. A skill check during idle replay does the same: a command that is not allowed is not run.
+
 ## 0.3.14
 
 - Upgrade from 0.3.5 or 0.3.12. On 0.3.5 a relative file path, including a bare name, resolves against the folder EasyAgent was launched from. On 0.3.12, `.` and any path that contains a slash still resolve there, so the file tool can read or write outside that bot's workspace. If you cannot upgrade yet, start the process in an empty folder that holds no data, and set `EASYAGENT_DATA` to the data folder you already use, so a relative path resolves inside that empty folder. Upgrade when you can. The empty folder leaves the command bypasses and the macOS containment bypass below in place.

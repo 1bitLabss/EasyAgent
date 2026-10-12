@@ -1516,6 +1516,9 @@ def _run_shell(store: Store, command: str) -> str:
             )
         except OSError as exc:
             raise ToolError(f"Could not run that command. {exc}") from exc
+    from easyagent.honesty import note_shell_started
+
+    note_shell_started(original)
     turn_mod.attach_proc(proc)
     try:
         try:
@@ -7527,7 +7530,7 @@ async def finish_honesty(
     if trace is None:
         return final or ""
     allow = honesty.live_model_allowed() and trace.model_calls == 0
-    outcome = honesty.settle(final or "", allow_model=allow)
+    outcome = await honesty.settle(final or "", allow_model=allow)
     if outcome.needs_verify:
         trace.model_calls += 1
         try:
@@ -7550,7 +7553,7 @@ async def finish_honesty(
                 await execute(store, found[0], bot_id)
             except ToolError:
                 pass
-        outcome = honesty.settle(final or "", allow_model=False)
+        outcome = await honesty.settle(final or "", allow_model=False)
     trace.outcome = outcome
     return outcome.text
 

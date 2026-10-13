@@ -283,13 +283,18 @@ jobs:
         run: |
           mkdir -p "$RUNNER_TEMP/virtual_file.log"
           export SSLKEYLOGFILE="$RUNNER_TEMP/virtual_file.log" EASYAGENT_PORT=45114
-          dbus-run-session -- xvfb-run -a easyagent-desktop > "$RUNNER_TEMP/app.out" 2>&1 &
+          # The headless window exits after opening the page and takes the server with it,
+          # so start the installed bundled runtime the way the launcher does.
+          py=$(find "$HOME/.local/share/labs.1bit.easyagent/runtime" -path '*/python/bin/python3' | head -n 1)
+          test -n "$py"
+          EASYAGENT_RUNTIME=bundled PYTHONNOUSERSITE=1 EASYAGENT_TRAY=0 \
+            EASYAGENT_DATA="$HOME/.local/share/labs.1bit.easyagent/data" "$py" -m easyagent > "$RUNNER_TEMP/app.out" 2>&1 &
           set +e
           python3 scripts/chat_smoke.py --app http://127.0.0.1:45114 --wait 240
           code=$?
           set -e
-          tail -n 30 "$HOME/.local/share/labs.1bit.easyagent/logs/server.log" || true
-          pkill -f easyagent-desktop || true; pkill -f '[-]m easyagent' || true
+          tail -n 30 "$RUNNER_TEMP/app.out" || true
+          pkill -f '[-]m easyagent' || true
           sleep 3
           test "$code" -eq 0
       - name: Run the AppImage

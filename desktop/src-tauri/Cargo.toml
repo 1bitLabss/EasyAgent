@@ -1,6 +1,6 @@
 [package]
 name = "easyagent-desktop"
-version = "0.3.16-dev"
+version = "0.3.16"
 description = "AI agents, made easy."
 authors = ["Nathan / 1bitLabs"]
 edition = "2021"

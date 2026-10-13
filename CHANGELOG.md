@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.3.19
+
+- Chat works when antivirus sets SSLKEYLOGFILE. Bitdefender points it at an unwritable file on its virtual disk (`\\?\Volume{…}\virtual_file.log`). Python's ssl module opens that file whenever an HTTP client is created, even for an `http://` connection, so every reply stopped with "Permission denied". EasyAgent and its desktop launcher now drop an inherited SSLKEYLOGFILE, so TLS session keys are never written by accident. Set EASYAGENT_ALLOW_SSLKEYLOGFILE=1 to keep one for debugging. The installer smoke tests on Windows, macOS, and Linux now send a chat to a stub model with an unwritable SSLKEYLOGFILE and require a real reply.
+
 ## 0.3.18
 
 - Add a bot works with only a name. With no connection saved yet, the form showed "Name must be 1–80 characters." because it tried to create an unnamed connection. The form now defaults to "No connection yet", the server accepts a bot without a connection, and chatting with it says to pick a connection instead of failing. A new connection with an empty name names the connection field in its error.

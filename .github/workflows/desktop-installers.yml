@@ -141,6 +141,9 @@ jobs:
     runs-on: windows-latest
     timeout-minutes: 30
     steps:
+      - uses: actions/checkout@v4
+        with:
+          sparse-checkout: scripts
       - uses: actions/download-artifact@v4
         with:
           name: easyagent-windows
@@ -162,6 +165,22 @@ jobs:
           Get-Content $result
           $json = Get-Content $result -Raw | ConvertFrom-Json
           if (-not $json.ok) { throw 'NSIS install smoke test failed' }
+      - name: Chat gate (NSIS install, stub model, inherited unwritable SSLKEYLOGFILE)
+        shell: pwsh
+        run: |
+          # Bitdefender sets SSLKEYLOGFILE to a path the user cannot write; before 0.3.19 that stopped every chat.
+          $blocked = Join-Path $env:RUNNER_TEMP 'virtual_file.log'
+          New-Item -ItemType Directory -Force $blocked | Out-Null
+          $env:SSLKEYLOGFILE = $blocked
+          $env:EASYAGENT_PORT = '45111'
+          $app = Join-Path $env:LOCALAPPDATA 'EasyAgent\easyagent-desktop.exe'
+          $proc = Start-Process -FilePath $app -PassThru
+          python scripts/chat_smoke.py --app http://127.0.0.1:45111 --wait 240
+          $code = $LASTEXITCODE
+          $log = Join-Path $env:LOCALAPPDATA 'labs.1bit.easyagent\logs\server.log'
+          if (Test-Path $log) { Get-Content $log -Tail 30 }
+          Get-Process easyagent-desktop, python -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
+          if ($code -ne 0) { throw 'chat gate failed: no real assistant reply' }
       - name: Install the MSI and run the installed app
         shell: pwsh
         run: |
@@ -196,6 +215,9 @@ jobs:
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 30
     steps:
+      - uses: actions/checkout@v4
+        with:
+          sparse-checkout: scripts
       - uses: actions/download-artifact@v4
         with:
           name: easyagent-macos
@@ -218,12 +240,27 @@ jobs:
           cat "$RUNNER_TEMP/dmg.json"
           test "$code" -eq 0
           python3 -c "import json,sys; sys.exit(0 if json.load(open(sys.argv[1]))['ok'] else 1)" "$RUNNER_TEMP/dmg.json"
+      - name: Chat gate (stub model, inherited unwritable SSLKEYLOGFILE)
+        run: |
+          mkdir -p "$RUNNER_TEMP/virtual_file.log"
+          export SSLKEYLOGFILE="$RUNNER_TEMP/virtual_file.log" EASYAGENT_PORT=45113
+          /Applications/EasyAgent.app/Contents/MacOS/easyagent-desktop > "$RUNNER_TEMP/app.out" 2>&1 &
+          set +e
+          python3 scripts/chat_smoke.py --app http://127.0.0.1:45113 --wait 240
+          code=$?
+          set -e
+          tail -n 30 "$HOME/Library/Logs/labs.1bit.easyagent/server.log" || true
+          pkill -f easyagent-desktop || true; pkill -f 'easyagent' || true
+          test "$code" -eq 0
 
   smoke-linux:
     needs: [linux]
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
+      - uses: actions/checkout@v4
+        with:
+          sparse-checkout: scripts
       - uses: actions/download-artifact@v4
         with:
           name: easyagent-linux
@@ -242,6 +279,19 @@ jobs:
           cat "$RUNNER_TEMP/deb.json"
           test "$code" -eq 0
           python3 -c "import json,sys; sys.exit(0 if json.load(open(sys.argv[1]))['ok'] else 1)" "$RUNNER_TEMP/deb.json"
+      - name: Chat gate (deb install, stub model, inherited unwritable SSLKEYLOGFILE)
+        run: |
+          mkdir -p "$RUNNER_TEMP/virtual_file.log"
+          export SSLKEYLOGFILE="$RUNNER_TEMP/virtual_file.log" EASYAGENT_PORT=45114
+          dbus-run-session -- xvfb-run -a easyagent-desktop > "$RUNNER_TEMP/app.out" 2>&1 &
+          set +e
+          python3 scripts/chat_smoke.py --app http://127.0.0.1:45114 --wait 240
+          code=$?
+          set -e
+          tail -n 30 "$HOME/.local/share/labs.1bit.easyagent/logs/server.log" || true
+          pkill -f easyagent-desktop || true; pkill -f '[-]m easyagent' || true
+          sleep 3
+          test "$code" -eq 0
       - name: Run the AppImage
         run: |
           rm -rf "$HOME/.local/share/labs.1bit.easyagent"

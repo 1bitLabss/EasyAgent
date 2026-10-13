@@ -2807,6 +2807,34 @@ def _allows(bot: dict | None) -> set[str]:
     return {str(item) for item in raw if item}
 
 
+
+_OWN_HOSTS = r"(?:localhost|127(?:\.\d{1,3}){0,3}|0(?:\.0){0,3}|\[?(?:0*:)*:?0*1\]?|\[?::ffff:127(?:\.\d{1,3}){3}\]?|2130706433|0x7f(?:[0-9a-f]{6})?)"
+
+
+def own_server_ports() -> set[str]:
+    ports = {"44721"}
+    raw = (os.environ.get("EASYAGENT_PORT") or "").strip()
+    if raw.isdigit():
+        ports.add(str(int(raw)))
+    return ports
+
+
+def own_server_target(text: str) -> bool:
+    """True when a tool would talk to this EasyAgent server itself.
+
+    Its API answers approval cards, saves Always allow, and changes bot settings,
+    and its page has the same buttons. A bot never reaches it: not with a shell
+    command, the fetch tool, or its browser. Only this server's port is matched,
+    so a bot's own dev server on another port still works.
+    """
+    if not text:
+        return False
+    ports = "|".join(sorted(re.escape(port) for port in own_server_ports()))
+    if re.search(rf"(?i)://[^/\s'\"<>]*:(?:{ports})(?![0-9])", text):
+        return True
+    return bool(re.search(rf"(?i)(?<![\w.-]){_OWN_HOSTS}\s*:\s*(?:{ports})(?![0-9])", text))
+
+
 def classify(store: Store, request, bot_id: str | None) -> Verdict:
     bot = None
     if bot_id:
@@ -2824,6 +2852,18 @@ def classify(store: Store, request, bot_id: str | None) -> Verdict:
     created = _created()
     remote = getattr(request, "kind", "") in {"ssh", "windows"}
     kind = getattr(request, "kind", "")
+    if kind in {"shell", "fetch", "research", "browser"}:
+        reach = " ".join(
+            str(getattr(request, field, "") or "") for field in ("command", "path", "body", "url")
+        )
+        if own_server_target(reach):
+            return _verdict(
+                BLOCK,
+                "own-server",
+                "That reaches EasyAgent itself, where approvals and settings live. A bot cannot answer its own card or change its own rules. It was not run.",
+                reach[:500],
+                _fp("own-server", reach[:180]),
+            )
     if kind in {"search", "fetch", "research", "question", "finish", "plan", "react", "memory", "history", "project"}:
         verdict = _verdict(ALLOW, kind or "meta", "That does not change the computer.", kind, _fp(kind, getattr(request, "body", "")[:80]))
     elif kind == "files":
@@ -3145,10 +3185,18 @@ def _public_card(card: Pending) -> dict:
     }
 
 
-def resolve_card(card_id: str, decision: str) -> Pending | None:
+# A card for one of these is never offered, and never takes, a lasting grant:
+# blocked rules that were unlocked, browser actions, connectors, and bridge sends.
+_NEVER_ALWAYS = frozenset({"root-delete", "disk-format", "fork-bomb", "remote-script", "firewall-off", "credential-dump", "browser-store", "guardrail-edit", "browser-pay", "browser-login", "browser-post", "browser-settings", "browser-submit", "browser-secret", "mcp-ask", "mcp-install", "bridge-send"}) | {"own-server", "bot-isolation", "data-dir"}
+
+
+def resolve_card(card_id: str, decision: str, bot_id: str | None = None) -> Pending | None:
     card = _PENDING.get(card_id)
     if card is None or card.event.is_set():
         return card
+    if bot_id is not None and card.bot_id != bot_id:
+        # Another bot's card is not answered through this bot.
+        return None
     if decision not in {"approve", "deny", "always", "done", "session", "exec-always"}:
         decision = "deny"
     if decision == "done" and (card.proposal or {}).get("kind") != "takeover":
@@ -3159,6 +3207,13 @@ def resolve_card(card_id: str, decision: str) -> Pending | None:
         proposal = card.proposal or {}
         if proposal.get("kind") != "script-diff" or not proposal.get("exec_always"):
             decision = "deny"
+    if decision == "session":
+        # Allow for this session is offered only on a script-diff card that says so.
+        proposal = card.proposal or {}
+        if proposal.get("kind") != "script-diff" or not proposal.get("session"):
+            decision = "deny"
+    if decision in {"always", "exec-always", "session"} and (card.rule in _NEVER_ALWAYS or card.tier == BLOCK):
+        decision = "deny"
     card.decision = decision
     card.event.set()
     if (card.proposal or {}).get("kind") == "mcp-install":
@@ -3393,7 +3448,7 @@ async def guard(store: Store, request, bot_id: str | None):
             proposal=proposal,
         )
         # A blocked rule that was unlocked is still not offered "always".
-        if verdict.rule in {"root-delete", "disk-format", "fork-bomb", "remote-script", "firewall-off", "credential-dump", "browser-store", "guardrail-edit", "browser-pay", "browser-login", "browser-post", "browser-settings", "browser-submit", "browser-secret", "mcp-ask", "mcp-install", "bridge-send"}:
+        if verdict.rule in _NEVER_ALWAYS:
             card.offer_always = False
         _PENDING[card.id] = card
         _notify(verdict.why)
@@ -3458,7 +3513,7 @@ def _make_card(bot_id: str | None, verdict: Verdict, exact: str, proposal: dict 
         created=time.time(),
         proposal=proposal,
     )
-    if verdict.rule in {"root-delete", "disk-format", "fork-bomb", "remote-script", "firewall-off", "credential-dump", "browser-store", "guardrail-edit", "browser-pay", "browser-login", "browser-post", "browser-settings", "browser-submit", "browser-secret", "mcp-ask", "mcp-install", "bridge-send"}:
+    if verdict.rule in _NEVER_ALWAYS:
         card.offer_always = False
     return card
 
@@ -3515,10 +3570,12 @@ async def _settle_unattended(store: Store, request, bot_id: str | None, card: Pe
         return
 
 
-def note_takeover(card_id: str) -> Pending | None:
+def note_takeover(card_id: str, bot_id: str | None = None) -> Pending | None:
     """The person is using the browser window. The card stays up until Done."""
     card = _PENDING.get(card_id)
     if card is None or card.event.is_set():
+        return None
+    if bot_id is not None and card.bot_id != bot_id:
         return None
     if (card.proposal or {}).get("kind") != "takeover":
         return None

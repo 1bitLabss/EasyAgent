@@ -347,7 +347,7 @@ class ConfirmIn(BaseModel):
 class BotIn(BaseModel):
     model_config = ConfigDict(extra="ignore")
     name: str
-    endpoint_id: str
+    endpoint_id: str | None = None
     model: str | None = None
     context_tokens: int | None = None
 
@@ -787,7 +787,7 @@ def create_app(data_dir: str | Path | None = None) -> FastAPI:
     @app.post("/api/endpoints")
     def create_endpoint(body: EndpointIn):
         record = store.add_endpoint(
-            name=clean_name(body.name, "Name"),
+            name=clean_name(body.name, "Connection name"),
             base_url=clean_base_url(body.base_url),
             api_key=(body.api_key or "").strip() or None,
             model=clean_model(body.model),
@@ -911,12 +911,12 @@ def create_app(data_dir: str | Path | None = None) -> FastAPI:
             from easyagent.browser import focus
             from easyagent.safety import note_takeover
 
-            card = note_takeover(card_id)
+            card = note_takeover(card_id, bot_id)
             if card is None or card.bot_id != bot_id:
                 raise HTTPException(404, "That approval card is not waiting.")
             focus(store, bot_id)
             return {"ok": True, "decision": "takeover"}
-        card = resolve_card(card_id, body.decision)
+        card = resolve_card(card_id, body.decision, bot_id)
         if card is None or card.bot_id != bot_id:
             raise HTTPException(404, "That approval card is not waiting.")
         return {"ok": True, "decision": card.decision}
@@ -1147,7 +1147,10 @@ def create_app(data_dir: str | Path | None = None) -> FastAPI:
         from easyagent.strictshell import allow_git_repo
 
         if (body.git_allow or "").strip():
-            bot = allow_git_repo(store, bot_id, body.git_allow)
+            try:
+                bot = allow_git_repo(store, bot_id, body.git_allow)
+            except StoreError as exc:
+                raise HTTPException(exc.status, exc.message) from exc
             return public_bot(store, bot)
         if (body.exec_remove or "").strip():
             from easyagent.strictshell import remove_exec_always
@@ -2267,6 +2270,11 @@ def _require_endpoint(store: Store, bot_id: str) -> dict:
     except StoreError:
         endpoint = None
     if endpoint is None:
+        if not str(bot.get("endpoint_id") or "").strip():
+            raise HTTPException(
+                status_code=409,
+                detail="This bot has no connection yet. Pick one in its settings. The chat was not changed.",
+            )
         raise HTTPException(
             status_code=409,
             detail="This bot's endpoint is missing. Choose another endpoint. The chat was not changed.",

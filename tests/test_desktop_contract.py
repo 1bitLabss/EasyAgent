@@ -49,6 +49,12 @@ def test_desktop_shell_loads_the_server_and_polls_unread_slowly():
     assert "startup_state" in splash
     assert "retry_start" in splash
     assert 'id="log"' in splash
+    # The approved mascot, not a hand-drawn SVG, on the startup and error page.
+    assert "<svg" not in splash
+    assert 'src="mascot.png"' in splash and 'srcset="mascot.webp"' in splash
+    for name in ("mascot.png", "mascot.webp"):
+        art = ROOT / "desktop" / "ui" / name
+        assert art.is_file() and 0 < art.stat().st_size < 50_000
 
 
 def test_every_installer_carries_the_python_runtime():
@@ -64,4 +70,6 @@ def test_every_installer_carries_the_python_runtime():
     workflow = (ROOT / ".github" / "workflows" / "desktop-installers.yml").read_text(encoding="utf-8")
     assert workflow.count("scripts/build_desktop_runtime.py") >= 4
     assert "--smoke-test" in workflow
-    assert "needs: [windows, macos, linux, smoke-windows, smoke-macos, smoke-linux]" in workflow
+    assert "needs: [ui-fresh, windows, macos, linux, smoke-windows, smoke-macos, smoke-linux]" in workflow
+    assert "scripts/check_ui_fresh.sh" in workflow
+    assert "scripts/check_ui_fresh.sh" in (ROOT / ".github" / "workflows" / "ui-fresh.yml").read_text(encoding="utf-8")

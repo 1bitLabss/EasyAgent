@@ -30,6 +30,13 @@ export type Approval = {
   } | null;
 };
 
+export const NEVER_ALWAYS = new Set([
+  "root-delete", "disk-format", "fork-bomb", "remote-script", "firewall-off", "credential-dump",
+  "browser-store", "guardrail-edit", "browser-pay", "browser-login", "browser-post", "browser-settings",
+  "browser-submit", "browser-secret", "mcp-ask", "mcp-install", "bridge-send", "own-server",
+  "bot-isolation", "data-dir",
+]);
+
 export function ApprovalCard({ botId, botName, active }: { botId: string; botName: string; active: boolean }) {
   const seen = useRef<string>("");
   const [hidden, setHidden] = useState(() => typeof document !== "undefined" && document.hidden);
@@ -70,6 +77,9 @@ export function ApprovalCard({ botId, botName, active }: { botId: string; botNam
     await queryClient.invalidateQueries({ queryKey: ["bots"] });
   }
 
+  // A lasting grant is never offered for a blocked rule, a bridge send, a browser
+  // action, a connector, or EasyAgent's own server. The server refuses those too.
+  const lasting = card.tier !== "block" && !NEVER_ALWAYS.has(card.rule);
   const takeover = card.proposal?.kind === "takeover";
   const install = card.proposal?.kind === "mcp-install" || card.rule === "mcp-install";
   const connector = card.proposal?.kind === "mcp" || card.rule === "mcp-ask";
@@ -111,7 +121,7 @@ export function ApprovalCard({ botId, botName, active }: { botId: string; botNam
             <Button type="button" onClick={() => void decide("done")}>Done</Button>
             <Button type="button" variant="danger" onClick={() => void decide("deny")}>Deny</Button>
           </>
-        ) : card.proposal?.kind === "script-diff" && card.proposal.session ? (
+        ) : lasting && card.proposal?.kind === "script-diff" && card.proposal.session ? (
           <>
             <Button type="button" data-testid="approve-once" onClick={() => void decide("approve")}>Allow once</Button>
             <Button type="button" variant="outline" data-testid="approve-session" onClick={() => void decide("session")}>Allow for this session</Button>
@@ -124,7 +134,7 @@ export function ApprovalCard({ botId, botName, active }: { botId: string; botNam
           <>
             <Button type="button" onClick={() => void decide("approve")}>Approve once</Button>
             <Button type="button" variant="danger" onClick={() => void decide("deny")}>Deny</Button>
-            {card.offer_always ? (
+            {lasting && card.offer_always ? (
               <Button type="button" variant="outline" onClick={() => void decide("always")}>Always allow this command for this bot</Button>
             ) : null}
           </>

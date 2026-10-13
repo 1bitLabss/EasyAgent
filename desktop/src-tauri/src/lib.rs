@@ -285,6 +285,8 @@ fn finish_smoke(app: &tauri::AppHandle, port: u16, log: &std::path::Path, starte
         report["page_bytes"] = page.into();
         report["script"] = script.into();
         report["script_bytes"] = js.into();
+        // A new user's first step: add a bot with a name and no connection.
+        report["added_bot"] = host::smoke_add_bot(port, "Smoke Test Bot")?.into();
         // The window itself must reach the server page.
         let window = app.get_webview_window("main").ok_or("no main window")?;
         let start = std::time::Instant::now();

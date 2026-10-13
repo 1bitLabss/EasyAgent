@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.3.18
+
+- Add a bot works with only a name. With no connection saved yet, the form showed "Name must be 1–80 characters." because it tried to create an unnamed connection. The form now defaults to "No connection yet", the server accepts a bot without a connection, and chatting with it says to pick a connection instead of failing. A new connection with an empty name names the connection field in its error.
+- The shipped web UI is rebuilt from the current source, including the approval screen. Allow for this session and Always allow appear only where the server offers them, and never for a blocked rule, a bridge send, a browser action, a connector, or EasyAgent's own server.
+- Lasting grants stay scoped. Always allow is saved per bot, tool, and workspace folder. The server refuses an Always, session, or exec-always answer on a blocked card or a never-always rule, refuses an answer to another bot's card, and accepts "Always allow this repo" only for a repo that bot was shown a note for.
+- A bot cannot reach EasyAgent's own server through a command, a fetch, or the browser, so it cannot answer its own approval card or change its own settings. Its bot.json stays off limits.
+- The bot list no longer sticks on "Loading bots…" when the window believes it is offline. Requests to the local server always run.
+- The startup and error page shows the EasyAgent mascot.
+- CI fails if the shipped UI is not a fresh build of web/src. The installer smoke test on each clean runner now also adds a bot with a name and no connection through the API.
+
 ## 0.3.17
 
 - The desktop installers now carry their own Python. A fresh install on a computer without Python showed a blank window with only "AI agents, made easy." because nothing started the server. The window now unpacks the bundled runtime into the per-user app folder on first start, starts EasyAgent, waits for it to answer, and then opens it.

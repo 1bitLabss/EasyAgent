@@ -5,7 +5,10 @@ import { useApp } from "@/store";
 
 export const queryClient = new QueryClient({
   defaultOptions: {
-    queries: { retry: false, staleTime: 1500, refetchOnWindowFocus: true },
+    // EasyAgent is a local server. navigator.onLine can be false with no network at all
+    // (headless, offline laptop) and must not pause requests to it.
+    queries: { retry: false, staleTime: 1500, refetchOnWindowFocus: true, networkMode: "always" },
+    mutations: { networkMode: "always" },
   },
 });
 

@@ -516,6 +516,9 @@ class Store:
         return data
 
     def get_endpoint(self, endpoint_id: str) -> dict | None:
+        if not (endpoint_id or "").strip():
+            # A bot added before any connection exists has none yet.
+            return None
         endpoint_id = self._parse_id(endpoint_id)
         for endpoint in self.list_endpoints():
             if endpoint.get("id") == endpoint_id:
@@ -797,13 +800,17 @@ class Store:
         self,
         *,
         name: str,
-        endpoint_id: str,
+        endpoint_id: str | None,
         model: str | None,
         context_tokens: int | None = None,
     ) -> dict:
-        endpoint_id = self._parse_id(endpoint_id)
-        if self.get_endpoint(endpoint_id) is None:
-            raise StoreError("Pick a saved connection.", 400)
+        # A bot may start without a connection. It is told to pick one before it answers.
+        if (endpoint_id or "").strip():
+            endpoint_id = self._parse_id(endpoint_id)
+            if self.get_endpoint(endpoint_id) is None:
+                raise StoreError("Pick a saved connection.", 400)
+        else:
+            endpoint_id = ""
         bot_id = new_id()
         record = {
             "id": bot_id,

@@ -476,6 +476,41 @@ pub fn http_get(port: u16, path: &str, timeout: Duration) -> Result<RawResponse,
     parse_http(&bytes)
 }
 
+pub fn http_post_json(port: u16, path: &str, json: &str, timeout: Duration) -> Result<RawResponse, String> {
+    let address = SocketAddr::from(([127, 0, 0, 1], port));
+    let mut stream = TcpStream::connect_timeout(&address, timeout).map_err(|err| err.to_string())?;
+    stream.set_read_timeout(Some(timeout)).ok();
+    stream.set_write_timeout(Some(timeout)).ok();
+    let request = format!(
+        "POST {path} HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nOrigin: http://127.0.0.1:{port}\r\nConnection: close\r\nContent-Type: application/json\r\nAccept: application/json\r\nContent-Length: {}\r\n\r\n{json}",
+        json.len()
+    );
+    stream.write_all(request.as_bytes()).map_err(|err| err.to_string())?;
+    let mut bytes = Vec::new();
+    stream.read_to_end(&mut bytes).ok();
+    parse_http(&bytes)
+}
+
+/// Add a bot with a name and no connection, the first thing a new user does.
+/// Used by the install smoke test against a throwaway data dir.
+pub fn smoke_add_bot(port: u16, name: &str) -> Result<String, String> {
+    let body = serde_json::json!({"name": name}).to_string();
+    let added = http_post_json(port, "/api/bots", &body, Duration::from_secs(10))?;
+    if added.status != 200 {
+        return Err(format!("POST /api/bots returned {}: {}", added.status, added.body));
+    }
+    let bot: serde_json::Value = serde_json::from_str(&added.body).map_err(|err| format!("POST /api/bots gave {err}: {}", added.body))?;
+    let id = bot["id"].as_str().unwrap_or_default().to_string();
+    if id.is_empty() || bot["name"].as_str() != Some(name) {
+        return Err(format!("POST /api/bots gave {}", added.body));
+    }
+    let listed = http_get(port, "/api/bots", Duration::from_secs(10))?;
+    if listed.status != 200 || !listed.body.contains(&id) {
+        return Err(format!("GET /api/bots did not list the new bot: {} {}", listed.status, listed.body));
+    }
+    Ok(id)
+}
+
 fn parse_http(bytes: &[u8]) -> Result<RawResponse, String> {
     let text = String::from_utf8_lossy(bytes);
     let (head, raw_body) = text.split_once("\r\n\r\n").unwrap_or((text.as_ref(), ""));
@@ -890,6 +925,47 @@ mod tests {
         });
         assert_eq!(probe_port(port), Probe::Other);
         assert!(decide(Probe::Other).is_err());
+    }
+
+    #[test]
+    fn the_smoke_test_adds_a_bot_with_no_connection() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let seen = std::sync::Arc::new(std::sync::Mutex::new(String::new()));
+        let record = seen.clone();
+        thread::spawn(move || {
+            for reply in [r#"{"id": "b1", "name": "Smoke Test Bot"}"#, r#"[{"id": "b1", "name": "Smoke Test Bot"}]"#] {
+                let (mut stream, _) = listener.accept().unwrap();
+                let mut buf = [0u8; 2048];
+                let n = stream.read(&mut buf).unwrap_or(0);
+                record.lock().unwrap().push_str(&String::from_utf8_lossy(&buf[..n]));
+                let head = format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", reply.len());
+                let _ = stream.write_all(head.as_bytes());
+                let _ = stream.write_all(reply.as_bytes());
+            }
+        });
+        assert_eq!(smoke_add_bot(port, "Smoke Test Bot"), Ok("b1".to_string()));
+        let sent = seen.lock().unwrap().clone();
+        assert!(sent.starts_with("POST /api/bots HTTP/1.1"));
+        assert!(sent.contains(r#"{"name":"Smoke Test Bot"}"#));
+        assert!(!sent.contains("endpoint"));
+    }
+
+    #[test]
+    fn the_smoke_test_fails_when_adding_a_bot_fails() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut buf = [0u8; 2048];
+            let _ = stream.read(&mut buf);
+            let body = r#"{"detail": "Name must be 1-80 characters."}"#;
+            let head = format!("HTTP/1.1 400 Bad Request\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", body.len());
+            let _ = stream.write_all(head.as_bytes());
+            let _ = stream.write_all(body.as_bytes());
+        });
+        let err = smoke_add_bot(port, "Smoke Test Bot").unwrap_err();
+        assert!(err.contains("400"), "{err}");
     }
 
     #[test]

@@ -1,0 +1,21 @@
+# The shipped UI in easyagent/ui must be the build of the current web/src.
+name: ui-fresh
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  ui-fresh:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: Run the UI tests
+        working-directory: web
+        run: npm ci --no-audit --no-fund && npx vitest run
+      - name: Shipped UI matches web/src
+        run: bash scripts/check_ui_fresh.sh

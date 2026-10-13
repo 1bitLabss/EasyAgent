@@ -2784,6 +2784,11 @@ def allow_git_repo(store, bot_id: str, repo: str) -> dict:
     bot, _records_map = _records(store, bot_id)
     allows = [str(item) for item in (bot.get("safety_git_allows") or []) if item]
     key = str(repo or "").strip()
+    noted = bot.get("safety_git_noted") if isinstance(bot.get("safety_git_noted"), dict) else {}
+    if key and key not in allows and key not in noted:
+        from easyagent.store import StoreError
+
+        raise StoreError("Only a repo this bot was shown a note for can be allowed. Nothing was changed.", 409)
     if key and key not in allows:
         allows.append(key)
     bot["safety_git_allows"] = allows[-100:]

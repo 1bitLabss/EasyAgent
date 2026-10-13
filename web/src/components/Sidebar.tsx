@@ -87,7 +87,7 @@ function BotTile({ bot }: { bot: Bot }) {
   );
 }
 
-function AddBotForm({ onClose }: { onClose: () => void }) {
+export function AddBotForm({ onClose }: { onClose: () => void }) {
   const endpoints = useQuery({ queryKey: ["endpoints"], queryFn: () => api<Endpoint[]>("/api/endpoints") });
   const openBot = useApp((state) => state.openBot);
   const [error, setError] = useState("");
@@ -97,6 +97,9 @@ function AddBotForm({ onClose }: { onClose: () => void }) {
     const name = String(form.get("name") || "");
     let endpointId = String(form.get("endpoint_id") || "");
     if (endpointId === "new") {
+      if (!String(form.get("conn_name") || "").trim() || !String(form.get("conn_url") || "").trim()) {
+        throw new Error("Name the new connection and give its address, or pick No connection yet.");
+      }
       const created = await api<Endpoint>("/api/endpoints", {
         method: "POST",
         json: {
@@ -113,7 +116,7 @@ function AddBotForm({ onClose }: { onClose: () => void }) {
       method: "POST",
       json: {
         name,
-        endpoint_id: endpointId,
+        endpoint_id: endpointId || null,
         model: String(form.get("model") || "") || null,
         context_tokens: Number(form.get("context_tokens") || 24000),
       },
@@ -138,7 +141,14 @@ function AddBotForm({ onClose }: { onClose: () => void }) {
         <Input name="name" required maxLength={80} placeholder="Ada" className="mt-1" />
       </label>
       <label className="block text-sm">Connection
-        <select name="endpoint_id" required className="mt-1 h-9 w-full rounded-md border border-border bg-card px-2 text-sm" defaultValue={endpoints.data?.[0]?.id || "new"}>
+        <select
+          key={endpoints.data?.[0]?.id || "none"}
+          name="endpoint_id"
+          data-testid="add-bot-connection"
+          className="mt-1 h-9 w-full rounded-md border border-border bg-card px-2 text-sm"
+          defaultValue={endpoints.data?.[0]?.id || ""}
+        >
+          <option value="">No connection yet</option>
           {(endpoints.data || []).map((endpoint) => (
             <option key={endpoint.id} value={endpoint.id}>{endpoint.name}</option>
           ))}

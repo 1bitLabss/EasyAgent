@@ -8,6 +8,7 @@
 - A bot cannot reach EasyAgent's own server through a command, a fetch, or the browser, so it cannot answer its own approval card or change its own settings. Its bot.json stays off limits.
 - The bot list no longer sticks on "Loading bots…" when the window believes it is offline. Requests to the local server always run.
 - The startup and error page shows the EasyAgent mascot.
+- Phone access works with Starlette 1.8. The relay handed each request body to the app again when it asked for more, which Starlette 1.8 rejects, so every page through the relay came back 502. The body now goes in once.
 - CI fails if the shipped UI is not a fresh build of web/src. The installer smoke test on each clean runner now also adds a bot with a name and no connection through the API.
 
 ## 0.3.17

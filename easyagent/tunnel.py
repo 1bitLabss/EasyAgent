@@ -28,8 +28,17 @@ async def call_app(app, method: str, path: str, headers: dict, body: bytes):
     response_headers: dict[str, str] = {}
     chunks: list[bytes] = []
 
+    delivered = False
+    finished = asyncio.Event()
+
     async def receive():
-        return {"type": "http.request", "body": body, "more_body": False}
+        # Like a server: the body once, then wait until the response is done.
+        nonlocal delivered
+        if not delivered:
+            delivered = True
+            return {"type": "http.request", "body": body, "more_body": False}
+        await finished.wait()
+        return {"type": "http.disconnect"}
 
     async def send(message):
         nonlocal status
@@ -59,7 +68,10 @@ async def call_app(app, method: str, path: str, headers: dict, body: bytes):
         "client": ("127.0.0.1", 0),
         "server": ("127.0.0.1", 80),
     }
-    await app(scope, receive, send)
+    try:
+        await app(scope, receive, send)
+    finally:
+        finished.set()
     return status, response_headers, b"".join(chunks)
 
 

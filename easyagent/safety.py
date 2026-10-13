@@ -3201,8 +3201,6 @@ def resolve_card(card_id: str, decision: str, bot_id: str | None = None) -> Pend
         decision = "deny"
     if decision == "done" and (card.proposal or {}).get("kind") != "takeover":
         decision = "deny"
-    if decision == "always" and not card.offer_always:
-        decision = "approve"
     if decision == "exec-always":
         proposal = card.proposal or {}
         if proposal.get("kind") != "script-diff" or not proposal.get("exec_always"):
@@ -3212,8 +3210,13 @@ def resolve_card(card_id: str, decision: str, bot_id: str | None = None) -> Pend
         proposal = card.proposal or {}
         if proposal.get("kind") != "script-diff" or not proposal.get("session"):
             decision = "deny"
+    # Before "always" is folded into a one-time approval. A card that does not
+    # offer a lasting grant must not accept one, including a blocked card and a
+    # bridge send whose button was hidden.
     if decision in {"always", "exec-always", "session"} and (card.rule in _NEVER_ALWAYS or card.tier == BLOCK):
         decision = "deny"
+    elif decision == "always" and not card.offer_always:
+        decision = "approve"
     card.decision = decision
     card.event.set()
     if (card.proposal or {}).get("kind") == "mcp-install":

@@ -1,5 +1,6 @@
 """0.3.18: add a bot with no connection, and lasting grants stay scoped and unreachable by a bot."""
 
+import json
 import time
 from pathlib import Path
 
@@ -16,6 +17,15 @@ from easyagent.tools import ToolRequest
 
 def _client(tmp_path):
     return TestClient(create_app(tmp_path))
+
+
+def store_allows(tmp_path, bot_id: str) -> dict:
+    record = json.loads((tmp_path / "bots" / bot_id / "bot.json").read_text(encoding="utf-8"))
+    return {
+        "safety_allows": list(record.get("safety_allows") or []),
+        "safety_exec_always": list(record.get("safety_exec_always") or []),
+        "safety_git_allows": list(record.get("safety_git_allows") or []),
+    }
 
 
 def test_add_bot_with_a_name_and_no_connection(tmp_path):
@@ -84,12 +94,28 @@ def test_ui_cannot_get_a_lasting_grant_for_never_always_rules(tmp_path, rule, de
 
 
 @pytest.mark.parametrize("decision", ["always", "session", "exec-always"])
-def test_ui_cannot_get_a_lasting_grant_on_a_blocked_card(tmp_path, decision):
+@pytest.mark.parametrize("offer_always", [True, False])
+def test_ui_cannot_get_a_lasting_grant_on_a_blocked_card(tmp_path, decision, offer_always):
     client = _client(tmp_path)
     bot = client.post("/api/bots", json={"name": "Ada"}).json()
-    card = _seed(bot["id"], rule="bot-changed", tier=BLOCK, proposal=dict(SCRIPT))
+    card = _seed(bot["id"], rule="bot-changed", tier=BLOCK, offer_always=offer_always, proposal=dict(SCRIPT))
     response = client.post(f"/api/bots/{bot['id']}/approvals/{card.id}", json={"decision": decision})
     assert response.json()["decision"] == "deny"
+    saved = store_allows(tmp_path, bot["id"])
+    assert saved["safety_allows"] == []
+    assert saved["safety_exec_always"] == []
+
+
+@pytest.mark.parametrize("offer_always", [True, False])
+def test_bridge_send_always_is_a_denial_not_a_one_time_approval(tmp_path, offer_always):
+    client = _client(tmp_path)
+    bot = client.post("/api/bots", json={"name": "Ada"}).json()
+    card = _seed(bot["id"], rule="bridge-send", offer_always=offer_always, proposal=dict(SCRIPT))
+    response = client.post(f"/api/bots/{bot['id']}/approvals/{card.id}", json={"decision": "always"})
+    assert response.json()["decision"] == "deny"
+    saved = store_allows(tmp_path, bot["id"])
+    assert saved["safety_allows"] == []
+    assert saved["safety_exec_always"] == []
 
 
 def test_bridge_send_card_is_never_always():
@@ -143,6 +169,38 @@ def test_repo_allow_needs_a_repo_this_bot_was_shown(tmp_path):
     bot = client.post("/api/bots", json={"name": "Ada"}).json()
     response = client.post(f"/api/bots/{bot['id']}/safety", json={"git_allow": "/anything/else"})
     assert response.status_code == 409
+
+
+def test_repo_allow_stays_on_the_bot_that_was_shown_the_note(tmp_path):
+    client = _client(tmp_path)
+    ada = client.post("/api/bots", json={"name": "Ada"}).json()
+    bob = client.post("/api/bots", json={"name": "Bob"}).json()
+    repo = "/work/checkout"
+    path = tmp_path / "bots" / ada["id"] / "bot.json"
+    record = json.loads(path.read_text(encoding="utf-8"))
+    record["safety_git_noted"] = {repo: True}
+    path.write_text(json.dumps(record), encoding="utf-8")
+    allowed = client.post(f"/api/bots/{ada['id']}/safety", json={"git_allow": repo})
+    assert allowed.status_code == 200, allowed.text
+    assert repo in store_allows(tmp_path, ada["id"])["safety_git_allows"]
+    refused = client.post(f"/api/bots/{bob['id']}/safety", json={"git_allow": repo})
+    assert refused.status_code == 409
+    assert store_allows(tmp_path, bob["id"])["safety_git_allows"] == []
+
+
+def test_bot_cannot_write_its_own_grant_file(tmp_path):
+    store = Store(tmp_path)
+    store.ensure()
+    bot = store.add_bot(name="Ada", endpoint_id=None, model=None)
+    target = store._bot_dir(bot["id"]) / "bot.json"
+    body = '{"safety_exec_always":[{"tool":"pytest","root":"/work"}],"safety_allows":["rm -rf /"]}'
+    written = classify(store, ToolRequest(kind="files", action="write", path=str(target), body=body), bot["id"])
+    assert written.tier == BLOCK
+    assert written.rule == "guardrail-edit"
+    command = f"python -c \"open(r'{target}', 'w').write('safety_exec_always')\""
+    shelled = classify(store, ToolRequest(kind="shell", command=command), bot["id"])
+    assert shelled.tier == BLOCK
+    assert "safety_exec_always" not in target.read_text(encoding="utf-8")
 
 
 @pytest.mark.parametrize(

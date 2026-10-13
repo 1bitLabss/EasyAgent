@@ -155,13 +155,17 @@ jobs:
       - name: Install the MSI and run the installed app
         shell: pwsh
         run: |
+          $uninstall = Join-Path $env:LOCALAPPDATA 'EasyAgent\uninstall.exe'
+          if (Test-Path $uninstall) { Start-Process -FilePath $uninstall -ArgumentList '/S' -Wait; Start-Sleep -Seconds 5 }
           Remove-Item -Recurse -Force (Join-Path $env:LOCALAPPDATA 'labs.1bit.easyagent') -ErrorAction SilentlyContinue
           Remove-Item -Recurse -Force (Join-Path $env:APPDATA 'labs.1bit.easyagent') -ErrorAction SilentlyContinue
           $msi = Get-ChildItem dist -Filter *.msi | Select-Object -First 1
           $install = Start-Process msiexec.exe -ArgumentList '/i', "`"$($msi.FullName)`"", '/qn', '/l*v', "`"$env:RUNNER_TEMP\msi.log`"" -Wait -PassThru
           if ($install.ExitCode -ne 0) { Get-Content "$env:RUNNER_TEMP\msi.log" -Tail 60; throw "msiexec exit $($install.ExitCode)" }
-          $app = Get-ChildItem 'C:\Program Files\EasyAgent', 'C:\Program Files (x86)\EasyAgent' -Filter easyagent-desktop.exe -Recurse -ErrorAction SilentlyContinue | Select-Object -First 1
-          if (-not $app) { throw 'MSI did not install easyagent-desktop.exe' }
+          Select-String -Path "$env:RUNNER_TEMP\msi.log" -Pattern 'Property\(S\): (INSTALLDIR|APPLICATIONFOLDER|TARGETDIR)' | Select-Object -First 5 | ForEach-Object { $_.Line }
+          $app = Get-ChildItem $env:ProgramFiles, ${env:ProgramFiles(x86)}, $env:LOCALAPPDATA -Filter easyagent-desktop.exe -Recurse -Depth 3 -ErrorAction SilentlyContinue | Select-Object -First 1
+          if (-not $app) { Get-Content "$env:RUNNER_TEMP\msi.log" -Tail 80; throw 'MSI did not install easyagent-desktop.exe' }
+          Write-Output "MSI installed $($app.FullName)"
           $result = Join-Path $env:RUNNER_TEMP 'msi.json'
           $env:EASYAGENT_PORT = '45102'
           $proc = Start-Process -FilePath $app.FullName -ArgumentList '--smoke-test', $result -PassThru

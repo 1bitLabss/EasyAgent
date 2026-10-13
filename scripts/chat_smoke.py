@@ -13,12 +13,17 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 import threading
 import time
 import urllib.error
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+# The CI step exports an unwritable SSLKEYLOGFILE for the app under test. This
+# harness must not inherit it, or urllib's own ssl context fails the same way.
+os.environ.pop("SSLKEYLOGFILE", None)
 
 REPLY = "Yes, I am connected. (chat-smoke stub)"
 MODEL = "stub-model"

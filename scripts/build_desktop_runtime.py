@@ -34,7 +34,7 @@ SHA256 = {
 # pip --platform tags, used only when the runtime cannot run on the build machine.
 PIP_PLATFORMS = {
     "aarch64-apple-darwin": ["macosx_11_0_arm64", "macosx_11_0_universal2"],
-    "x86_64-apple-darwin": ["macosx_10_13_x86_64", "macosx_11_0_x86_64", "macosx_10_9_x86_64", "macosx_10_9_universal2", "macosx_10_12_x86_64", "macosx_10_15_x86_64"],
+    "x86_64-apple-darwin": ["macosx_10_13_x86_64", "macosx_11_0_x86_64", "macosx_10_9_x86_64", "macosx_10_9_universal2", "macosx_10_12_x86_64", "macosx_10_15_x86_64", "macosx_11_0_universal2", "macosx_12_0_x86_64"],
 }
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -95,7 +95,10 @@ def main() -> int:
         subprocess.check_call([builder, "-m", "pip", "wheel", "--no-deps", "-w", str(wheels), str(ROOT)], env=env)
         wheel = next(wheels.glob("easyagent-*.whl"))
         if native:
-            subprocess.check_call([str(python), "-m", "pip", "install", "--no-warn-script-location", str(wheel)], env=env)
+            # Wheels only: nothing is compiled from source on the build machine. A
+            # dependency without a wheel for this target resolves to its newest
+            # version that has one (cryptography has no Intel Mac wheel after 48).
+            subprocess.check_call([str(python), "-m", "pip", "install", "--no-warn-script-location", "--only-binary=:all:", str(wheel)], env=env)
             subprocess.check_call([str(python), "-c", "import easyagent, easyagent.app, uvicorn, fastapi; print(easyagent.__version__)"], env=env)
         else:
             command = [

@@ -20,7 +20,11 @@
     }
     svg { width: 120px; height: auto; }
     .tagline { margin: 12px 0 4px; font-weight: 600; }
-    #status { margin: 0; color: #6f6a64; font-size: 14px; }
+    #status { margin: 0; color: #6f6a64; font-size: 14px; max-width: 520px; }
+    #failure { display: none; margin-top: 12px; max-width: 520px; text-align: left; font-size: 14px; }
+    #failure p { margin: 6px 0; }
+    #log { font-family: ui-monospace, Consolas, monospace; font-size: 12px; word-break: break-all; user-select: all; background: #ebe7df; padding: 6px 8px; }
+    #retry { margin-top: 10px; padding: 8px 18px; font: inherit; background: #1c1b19; color: #f6f4ef; border: 0; cursor: pointer; }
   </style>
 </head>
 <body>
@@ -32,11 +36,55 @@
     </svg>
     <p class="tagline">AI agents, made easy.</p>
     <p id="status">Starting EasyAgent…</p>
+    <div id="failure" role="alert">
+      <p><strong>EasyAgent did not start.</strong></p>
+      <p id="reason"></p>
+      <p>The server log is here:</p>
+      <p id="log"></p>
+      <button id="retry" type="button">Retry</button>
+    </div>
   </div>
   <script>
-    if (location.hostname !== "127.0.0.1" && location.hostname !== "localhost") {
-      location.replace("http://127.0.0.1:44721/");
-    }
+    (function () {
+      var ipc = window.__TAURI_INTERNALS__;
+      var status = document.getElementById("status");
+      var failure = document.getElementById("failure");
+      function show(state) {
+        if (state.state === "failed") {
+          status.textContent = "";
+          document.getElementById("reason").textContent = state.message || "";
+          document.getElementById("log").textContent = state.log || "";
+          failure.style.display = "block";
+        } else if (state.state === "ready") {
+          status.textContent = "Opening EasyAgent…";
+          failure.style.display = "none";
+          setTimeout(function () { location.replace(state.url); }, 1500);
+          return false;
+        } else {
+          failure.style.display = "none";
+          status.textContent = state.message || "Starting EasyAgent…";
+        }
+        return true;
+      }
+      function poll() {
+        if (!ipc) {
+          status.textContent = "Starting EasyAgent…";
+          return;
+        }
+        ipc.invoke("startup_state").then(function (state) {
+          if (show(state)) setTimeout(poll, 500);
+        }, function (err) {
+          status.textContent = "EasyAgent could not read its startup state: " + err;
+          setTimeout(poll, 2000);
+        });
+      }
+      document.getElementById("retry").addEventListener("click", function () {
+        failure.style.display = "none";
+        status.textContent = "Starting EasyAgent…";
+        ipc.invoke("retry_start").then(function () { setTimeout(poll, 300); }, function () { setTimeout(poll, 300); });
+      });
+      poll();
+    })();
   </script>
 </body>
 </html>

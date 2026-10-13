@@ -23,3 +23,6 @@ desktop/src-tauri/target/
 desktop/src-tauri/gen/
 web/test-results/
 web/playwright-report/
+desktop/src-tauri/runtime/
+build/
+*.egg-info/

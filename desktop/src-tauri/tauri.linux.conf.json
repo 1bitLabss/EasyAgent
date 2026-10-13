@@ -1,0 +1,7 @@
+{
+  "bundle": {
+    "resources": {
+      "runtime/python-x86_64-unknown-linux-gnu.tar.gz": "runtime/python-x86_64-unknown-linux-gnu.tar.gz"
+    }
+  }
+}

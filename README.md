@@ -8,7 +8,7 @@ The pixel drawing is traced from [mascot-original.jpg](assets/mascot-original.jp
 
 EasyAgent is a free local agent harness for any OpenAI-compatible model. You run it on your own computer. It gives you multiple bots, real tools, markdown memory, and a goal, plan, build, and check loop. It does not include a model, an account, or a cloud copy of your chats.
 
-Version 0.3.16. [MIT license](LICENSE). Copyright Nathan / 1bitLabs.
+Version 0.3.17. [MIT license](LICENSE). Copyright Nathan / 1bitLabs.
 
 I built this for myself, and I'm sharing it free. It is the harness I wanted on my own machine: a few bots, the model I already run, and the files on that computer.
 
@@ -237,9 +237,13 @@ The window title shows an unread count, `(3) EasyAgent`, until you open those ch
 
 ## Desktop app
 
-The desktop app is a Tauri 2 window around the same page. It is not a second product. Chats and tools still belong to the Python server. If something is already answering `GET /api/health` on port 44721, the window attaches and leaves that server running when you quit. If nothing is listening, the window starts `python -m easyagent` (`python3` on Linux and macOS) with `EASYAGENT_TRAY=0` and stops that process when the window exits. If the port is open but the response is not EasyAgent, the window stays on the startup page and does not launch another server.
+The desktop app is a Tauri 2 window around the same page. It is not a second product. Chats and tools still belong to the Python server. If something is already answering `GET /api/health` on port 44721, the window attaches and leaves that server running when you quit. If nothing is listening, the window starts `python -m easyagent` with `EASYAGENT_TRAY=0` and stops that process when the window exits. If the port is open but the response is not EasyAgent, the window says so and does not launch another server.
 
-Install the Python package from the repo root first (`pip install -r requirements.txt`), so the window can start the server. Rust 1.90 or newer and Node.js are required. `desktop/rust-toolchain.toml` pins Rust 1.90.0 when rustup is installed. `EASYAGENT_PYTHON` picks the interpreter. `EASYAGENT_CWD`, when it is an existing directory, is the server's working directory. Use the same directory, or the same `EASYAGENT_DATA`, when the window and a terminal should share chats.
+The installers carry their own Python with EasyAgent and its dependencies installed, so a computer without Python works. On first start the window unpacks that runtime into the per-user local app folder (Windows `%LOCALAPPDATA%\labs.1bit.easyagent\runtime`, macOS `~/Library/Application Support/labs.1bit.easyagent/runtime`, Linux `~/.local/share/labs.1bit.easyagent/runtime`) and uses it from then on. The server log is `logs/server.log` in the per-user app log folder. If the server does not start, the window shows the reason, the log path, and Retry. `EASYAGENT_PYTHON` picks another interpreter instead of the bundled one.
+
+The desktop app keeps its data in the per-user app-data folder (`data` under Windows `%APPDATA%\labs.1bit.easyagent`, macOS `~/Library/Application Support/labs.1bit.easyagent`, Linux `~/.local/share/labs.1bit.easyagent`). `EASYAGENT_DATA` overrides that. `EASYAGENT_CWD`, when it is an existing directory, is the server's working directory, and its `./data` is used. Use the same directory, or the same `EASYAGENT_DATA`, when the window and a terminal should share chats. The bundled Python and the install folder are refused as a bot workspace.
+
+Building the window yourself needs Rust 1.90 or newer and Node.js. `desktop/rust-toolchain.toml` pins Rust 1.90.0 when rustup is installed. [desktop/BUILD.md](desktop/BUILD.md) shows how to build the bundled runtime first.
 
 Signing keys are not in this repo. The installers this build produces are unsigned. Windows gets an NSIS installer and an MSI. macOS gets a `.dmg`; `npm run build -- --target universal-apple-darwin` from `desktop/` makes that disk image for both Apple silicon and Intel. Linux gets a `.deb` and an AppImage.
 

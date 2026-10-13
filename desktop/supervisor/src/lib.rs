@@ -1,11 +1,13 @@
 //! Decide whether the desktop window should attach to EasyAgent or start it.
 //!
-//! The FastAPI process is the app. This crate only checks `GET /api/health`
-//! and, when that is down, builds the `python -m easyagent` command.
+//! The FastAPI process is the app. This crate checks `GET /api/health` and,
+//! when that is down, builds the `python -m easyagent` command. An installed
+//! window carries its own Python runtime; this crate unpacks it into the
+//! per-user app folder on first start.
 
 use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpStream};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::Duration;
 
@@ -188,6 +190,266 @@ pub fn server_cwd() -> PathBuf {
         }
     }
     std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
+}
+
+/// The runtime archive this build of the window looks for in its resources.
+pub fn runtime_triple() -> &'static str {
+    if cfg!(all(target_os = "macos", target_arch = "aarch64")) {
+        "aarch64-apple-darwin"
+    } else if cfg!(target_os = "macos") {
+        "x86_64-apple-darwin"
+    } else if cfg!(windows) {
+        "x86_64-pc-windows-msvc"
+    } else if cfg!(target_arch = "aarch64") {
+        "aarch64-unknown-linux-gnu"
+    } else {
+        "x86_64-unknown-linux-gnu"
+    }
+}
+
+pub fn runtime_archive_name() -> String {
+    format!("python-{}.tar.gz", runtime_triple())
+}
+
+/// `python.exe` at the top on Windows, `bin/python3` elsewhere.
+pub fn runtime_python(root: &Path) -> PathBuf {
+    if cfg!(windows) {
+        root.join("python.exe")
+    } else {
+        root.join("bin").join("python3")
+    }
+}
+
+const COMPLETE: &str = ".easyagent-complete";
+
+/// Unpack `archive` (a tar.gz whose top folder is `python/`) under `base/runtime`.
+/// The folder name carries the app version and the archive size, so an upgrade
+/// unpacks a fresh copy. Unpacking goes to a temporary folder that is renamed
+/// into place, and a marker is written last, so a half-unpacked runtime is never used.
+/// Older runtimes in that same folder, which only this window creates, are removed.
+pub fn prepare_runtime(archive: &Path, base: &Path, version: &str) -> Result<PathBuf, String> {
+    let size = std::fs::metadata(archive)
+        .map_err(|err| format!("The bundled Python runtime is missing ({}): {err}", archive.display()))?
+        .len();
+    let parent = base.join("runtime");
+    let name = format!("{}-{}-{}", runtime_triple(), version, size);
+    let dest = parent.join(&name);
+    let python = runtime_python(&dest.join("python"));
+    if dest.join(COMPLETE).is_file() && python.is_file() {
+        return Ok(python);
+    }
+    std::fs::create_dir_all(&parent).map_err(|err| format!("Could not create {}: {err}", parent.display()))?;
+    let stamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    let partial = parent.join(format!(".partial-{}-{}", std::process::id(), stamp));
+    let result = (|| -> Result<(), String> {
+        std::fs::create_dir_all(&partial).map_err(|err| err.to_string())?;
+        let file = std::fs::File::open(archive).map_err(|err| err.to_string())?;
+        let mut tar = tar::Archive::new(flate2::read::GzDecoder::new(std::io::BufReader::new(file)));
+        tar.set_preserve_permissions(true);
+        tar.set_overwrite(true);
+        tar.unpack(&partial).map_err(|err| err.to_string())?;
+        if !runtime_python(&partial.join("python")).is_file() {
+            return Err("the archive has no Python interpreter".into());
+        }
+        std::fs::write(partial.join(COMPLETE), name.as_bytes()).map_err(|err| err.to_string())?;
+        if dest.exists() {
+            std::fs::remove_dir_all(&dest).map_err(|err| err.to_string())?;
+        }
+        std::fs::rename(&partial, &dest).map_err(|err| err.to_string())
+    })();
+    if let Err(err) = result {
+        let _ = std::fs::remove_dir_all(&partial);
+        return Err(format!("Could not unpack the bundled Python runtime into {}: {err}", dest.display()));
+    }
+    if let Ok(entries) = std::fs::read_dir(&parent) {
+        for entry in entries.flatten() {
+            let entry_name = entry.file_name().to_string_lossy().to_string();
+            if entry_name != name && entry_name.starts_with(runtime_triple()) {
+                let _ = std::fs::remove_dir_all(entry.path());
+            }
+        }
+    }
+    Ok(python)
+}
+
+/// Where the server runs and which data folder it uses.
+///
+/// `EASYAGENT_DATA` set: left alone. `EASYAGENT_CWD` set to a folder: the server
+/// runs there and keeps its usual `./data`. Neither: the server runs in the
+/// window's per-user app-data folder and `EASYAGENT_DATA` points at `data` inside it.
+/// No other folder's data is read or moved.
+pub fn data_plan(env_data: Option<&str>, env_cwd: Option<&str>, app_data: &Path) -> (PathBuf, Option<PathBuf>) {
+    let cwd = env_cwd
+        .map(|text| PathBuf::from(text.trim()))
+        .filter(|path| !path.as_os_str().is_empty() && path.is_dir());
+    let has_data = env_data.map(|text| !text.trim().is_empty()).unwrap_or(false);
+    match (has_data, cwd) {
+        (true, Some(dir)) => (dir, None),
+        (true, None) => (app_data.to_path_buf(), None),
+        (false, Some(dir)) => (dir, None),
+        (false, None) => (app_data.to_path_buf(), Some(app_data.join("data"))),
+    }
+}
+
+/// Which interpreter starts the server: `EASYAGENT_PYTHON`, then the bundled
+/// runtime, then `python` on PATH.
+pub fn choose_python(env_python: Option<&str>, bundled: Option<&Path>) -> (String, bool) {
+    if let Some(text) = env_python.map(str::trim).filter(|text| !text.is_empty()) {
+        return (text.to_string(), false);
+    }
+    if let Some(path) = bundled {
+        return (path.to_string_lossy().to_string(), true);
+    }
+    (python_program(), false)
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ServerLaunch {
+    pub program: String,
+    pub args: Vec<String>,
+    pub env: Vec<(String, String)>,
+    pub remove_env: Vec<String>,
+    pub cwd: PathBuf,
+}
+
+pub fn server_launch(port: u16, program: String, bundled: bool, cwd: PathBuf, data: Option<PathBuf>) -> ServerLaunch {
+    let base = server_command(port);
+    let mut env = base.env;
+    let mut remove_env = Vec::new();
+    if let Some(dir) = data {
+        env.push(("EASYAGENT_DATA".into(), dir.to_string_lossy().to_string()));
+    }
+    if let Some(dir) = std::env::current_exe().ok().and_then(|exe| exe.parent().map(Path::to_path_buf)) {
+        // The server refuses this folder as a bot workspace.
+        env.push(("EASYAGENT_INSTALL_DIR".into(), dir.to_string_lossy().to_string()));
+    }
+    if bundled {
+        // The bundled interpreter only sees its own packages, and its folder is
+        // refused as a bot workspace.
+        env.push(("EASYAGENT_RUNTIME".into(), "bundled".into()));
+        env.push(("PYTHONNOUSERSITE".into(), "1".into()));
+        remove_env.push("PYTHONPATH".into());
+        remove_env.push("PYTHONHOME".into());
+    }
+    ServerLaunch { program, args: base.args, env, remove_env, cwd }
+}
+
+/// Start the server with stdout and stderr in `log`. The previous log is kept as `.1`.
+pub fn spawn_logged(spec: &ServerLaunch, log: &Path) -> std::io::Result<std::process::Child> {
+    if let Some(dir) = log.parent() {
+        std::fs::create_dir_all(dir)?;
+    }
+    if log.exists() {
+        let _ = std::fs::rename(log, log.with_extension("log.1"));
+    }
+    let out = std::fs::File::create(log)?;
+    let err = out.try_clone()?;
+    std::fs::create_dir_all(&spec.cwd)?;
+    let mut cmd = Command::new(&spec.program);
+    cmd.args(&spec.args)
+        .current_dir(&spec.cwd)
+        .envs(spec.env.iter().cloned())
+        .stdin(Stdio::null())
+        .stdout(Stdio::from(out))
+        .stderr(Stdio::from(err));
+    for key in &spec.remove_env {
+        cmd.env_remove(key);
+    }
+    detach_console(&mut cmd);
+    process_group(&mut cmd);
+    cmd.spawn()
+}
+
+/// A window app has no console. CREATE_NO_WINDOW gives the server a console with
+/// no window, which the commands it runs share, so none of them flashes one.
+fn detach_console(cmd: &mut Command) {
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        cmd.creation_flags(0x0800_0000);
+    }
+    let _ = cmd;
+}
+
+fn process_group(cmd: &mut Command) {
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        cmd.process_group(0);
+        #[cfg(target_os = "linux")]
+        unsafe {
+            cmd.pre_exec(|| {
+                libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGTERM as libc::c_ulong);
+                if libc::getppid() == 1 {
+                    libc::raise(libc::SIGTERM);
+                }
+                Ok(())
+            });
+        }
+    }
+    let _ = cmd;
+}
+
+/// Wait for `/api/health`. Stops early when the child exits.
+pub fn wait_for_child(port: u16, child: &mut std::process::Child, timeout: Duration) -> Result<(), String> {
+    let start = std::time::Instant::now();
+    loop {
+        if probe_port(port) == Probe::EasyAgent {
+            return Ok(());
+        }
+        if let Ok(Some(status)) = child.try_wait() {
+            return Err(format!("EasyAgent stopped while starting ({status})."));
+        }
+        if start.elapsed() >= timeout {
+            return Err(format!("EasyAgent did not answer {} in {} seconds.", health_url(port), timeout.as_secs()));
+        }
+        std::thread::sleep(Duration::from_millis(250));
+    }
+}
+
+/// The first script on the server's page.
+pub fn first_script(html: &str) -> Option<String> {
+    let mut rest = html;
+    while let Some(index) = rest.find("<script") {
+        let tag_end = rest[index..].find('>').map(|end| index + end)?;
+        let tag = &rest[index..tag_end];
+        if let Some(pos) = tag.find("src=\"") {
+            let value = &tag[pos + 5..];
+            if let Some(end) = value.find('"') {
+                return Some(value[..end].to_string());
+            }
+        }
+        rest = &rest[tag_end..];
+    }
+    None
+}
+
+/// The page and its script both load. Used by the install smoke test.
+pub fn check_ui(port: u16) -> Result<(usize, String, usize), String> {
+    let page = http_get_text(port, "/", Duration::from_secs(10))?;
+    if page.status != 200 {
+        return Err(format!("GET / returned {}", page.status));
+    }
+    let script = first_script(&page.body).ok_or("the page has no script")?;
+    let js = http_get_text(port, &script, Duration::from_secs(20))?;
+    if js.status != 200 || js.body.len() < 1000 {
+        return Err(format!("GET {script} returned {} with {} bytes", js.status, js.body.len()));
+    }
+    Ok((page.body.len(), script, js.body.len()))
+}
+
+fn http_get_text(port: u16, path: &str, timeout: Duration) -> Result<RawResponse, String> {
+    let address = SocketAddr::from(([127, 0, 0, 1], port));
+    let mut stream = TcpStream::connect_timeout(&address, timeout).map_err(|err| err.to_string())?;
+    stream.set_read_timeout(Some(timeout)).ok();
+    let request = format!("GET {path} HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nConnection: close\r\nAccept: text/html,*/*\r\n\r\n");
+    stream.write_all(request.as_bytes()).map_err(|err| err.to_string())?;
+    let mut bytes = Vec::new();
+    stream.read_to_end(&mut bytes).ok();
+    parse_http(&bytes)
 }
 
 pub fn browser_command(url: &str) -> (String, Vec<String>) {
@@ -637,5 +899,121 @@ mod tests {
         drop(listener);
         assert_eq!(probe_port(port), Probe::Down);
         assert_eq!(decide(Probe::Down), Ok(Launch::Spawn));
+    }
+
+    fn tiny_runtime(dir: &Path) -> PathBuf {
+        let src = dir.join("src");
+        let python = runtime_python(&src.join("python"));
+        std::fs::create_dir_all(python.parent().unwrap()).unwrap();
+        std::fs::write(&python, b"#!/bin/sh\n").unwrap();
+        let archive = dir.join("python.tar.gz");
+        let file = std::fs::File::create(&archive).unwrap();
+        let mut builder = tar::Builder::new(flate2::write::GzEncoder::new(file, flate2::Compression::fast()));
+        builder.append_dir_all("python", src.join("python")).unwrap();
+        builder.into_inner().unwrap().finish().unwrap();
+        archive
+    }
+
+    fn scratch(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("ea-sup-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn the_runtime_is_unpacked_once_and_old_ones_are_removed() {
+        let dir = scratch("unpack");
+        let archive = tiny_runtime(&dir);
+        let base = dir.join("app");
+        let stale = base.join("runtime").join(format!("{}-0.0.1-5", runtime_triple()));
+        std::fs::create_dir_all(&stale).unwrap();
+        let unrelated = base.join("runtime").join("keep-me");
+        std::fs::create_dir_all(&unrelated).unwrap();
+        let python = prepare_runtime(&archive, &base, "9.9.9").unwrap();
+        assert!(python.is_file());
+        assert!(python.starts_with(base.join("runtime")));
+        assert!(!stale.exists());
+        assert!(unrelated.exists());
+        let again = prepare_runtime(&archive, &base, "9.9.9").unwrap();
+        assert_eq!(python, again);
+        let partials = std::fs::read_dir(base.join("runtime")).unwrap().flatten()
+            .filter(|entry| entry.file_name().to_string_lossy().starts_with(".partial")).count();
+        assert_eq!(partials, 0);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_missing_or_broken_runtime_is_an_error_not_a_blank_window() {
+        let dir = scratch("broken");
+        assert!(prepare_runtime(&dir.join("nope.tar.gz"), &dir, "1").is_err());
+        let bad = dir.join("bad.tar.gz");
+        std::fs::write(&bad, b"not a tarball").unwrap();
+        let err = prepare_runtime(&bad, &dir.join("app"), "1").unwrap_err();
+        assert!(err.contains("Could not unpack"));
+        let leftovers = std::fs::read_dir(dir.join("app").join("runtime")).unwrap().count();
+        assert_eq!(leftovers, 0);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_data_folder_defaults_to_the_app_folder_and_respects_overrides() {
+        let app = std::env::temp_dir();
+        let (cwd, data) = data_plan(None, None, &app);
+        assert_eq!(cwd, app);
+        assert_eq!(data, Some(app.join("data")));
+        let (_, data) = data_plan(Some("/somewhere"), None, &app);
+        assert_eq!(data, None);
+        let here = std::env::current_dir().unwrap();
+        let (cwd, data) = data_plan(None, Some(here.to_str().unwrap()), &app);
+        assert_eq!(cwd, here);
+        assert_eq!(data, None);
+        let (cwd, data) = data_plan(None, Some("/no/such/folder/ea"), &app);
+        assert_eq!(cwd, app);
+        assert_eq!(data, Some(app.join("data")));
+    }
+
+    #[test]
+    fn the_python_choice_prefers_the_override_then_the_bundle() {
+        let bundled = PathBuf::from("/opt/ea/python/bin/python3");
+        assert_eq!(choose_python(Some(" /usr/bin/python3.12 "), Some(&bundled)), ("/usr/bin/python3.12".to_string(), false));
+        assert_eq!(choose_python(None, Some(&bundled)).1, true);
+        assert_eq!(choose_python(Some(""), None).1, false);
+        let spec = server_launch(44721, "py".into(), true, PathBuf::from("/tmp"), Some(PathBuf::from("/tmp/data")));
+        assert_eq!(spec.args, vec!["-m", "easyagent"]);
+        assert!(spec.env.contains(&("EASYAGENT_TRAY".into(), "0".into())));
+        assert!(spec.env.contains(&("EASYAGENT_DATA".into(), "/tmp/data".into())));
+        assert!(spec.env.contains(&("PYTHONNOUSERSITE".into(), "1".into())));
+        assert!(spec.remove_env.contains(&"PYTHONPATH".to_string()));
+        assert!(spec.env.contains(&("EASYAGENT_RUNTIME".into(), "bundled".into())));
+        assert!(spec.env.iter().any(|(key, _)| key == "EASYAGENT_INSTALL_DIR"));
+        let plain = server_launch(44721, "python3".into(), false, PathBuf::from("/tmp"), None);
+        assert!(!plain.env.iter().any(|(key, _)| key == "EASYAGENT_RUNTIME" || key == "EASYAGENT_DATA"));
+        assert!(!spec.env.iter().any(|(key, _)| key == "EASYAGENT_HOST"));
+    }
+
+    #[test]
+    fn the_first_script_is_found() {
+        let html = r#"<html><head><script>var a=1;</script><script type="module" crossorigin src="/ui/assets/index-x.js"></script></head></html>"#;
+        assert_eq!(first_script(html), Some("/ui/assets/index-x.js".to_string()));
+        assert_eq!(first_script("<p>none</p>"), None);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_server_that_exits_is_reported_quickly() {
+        let dir = scratch("exit");
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        drop(listener);
+        let spec = ServerLaunch { program: "sh".into(), args: vec!["-c".into(), "echo boom; exit 3".into()], env: vec![], remove_env: vec![], cwd: dir.clone() };
+        let log = dir.join("logs").join("server.log");
+        let mut child = spawn_logged(&spec, &log).unwrap();
+        let start = std::time::Instant::now();
+        let err = wait_for_child(port, &mut child, Duration::from_secs(20)).unwrap_err();
+        assert!(err.contains("stopped"));
+        assert!(start.elapsed() < Duration::from_secs(10));
+        assert!(std::fs::read_to_string(&log).unwrap().contains("boom"));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

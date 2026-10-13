@@ -1,0 +1,8 @@
+{
+  "bundle": {
+    "resources": {
+      "runtime/python-aarch64-apple-darwin.tar.gz": "runtime/python-aarch64-apple-darwin.tar.gz",
+      "runtime/python-x86_64-apple-darwin.tar.gz": "runtime/python-x86_64-apple-darwin.tar.gz"
+    }
+  }
+}

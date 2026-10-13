@@ -1,6 +1,7 @@
 """A bot's workspace is a folder it may write in. The install is not one of them.
 
-The install directory, the data directory, and the program package are refused.
+The install directory, the data directory, the program package, and the Python
+runtime the desktop installer ships are refused.
 A bot that already points at one of those is moved to its own folder on startup.
 """
 
@@ -26,6 +27,13 @@ def _has_installer(folder: Path) -> bool:
     return bool(names & _INSTALL_NAMES)
 
 
+def bundled_runtime() -> Path | None:
+    """The Python the desktop installer ships, when this process runs on it."""
+    if os.environ.get("EASYAGENT_RUNTIME", "").strip() != "bundled":
+        return None
+    return Path(sys.prefix)
+
+
 def install_dirs() -> list[Path]:
     """Folders that hold the desktop program, next to easyagent-desktop.exe or uninstall.exe."""
     seeds: list[Path] = []
@@ -38,6 +46,10 @@ def install_dirs() -> list[Path]:
             seeds.append(Path(sys.argv[0]).resolve().parent)
         except OSError:
             seeds.append(Path(sys.argv[0]).parent)
+    # The desktop window names the folder it was installed in.
+    installed = os.environ.get("EASYAGENT_INSTALL_DIR", "").strip()
+    if installed:
+        seeds.append(Path(installed))
     local = os.environ.get("LOCALAPPDATA")
     if local:
         seeds.append(Path(local) / "EasyAgent")
@@ -102,6 +114,9 @@ def workspace_forbidden(store, path: Path) -> bool:
         if overlaps(resolved, folder):
             return True
     if overlaps(resolved, package_dir()):
+        return True
+    runtime = bundled_runtime()
+    if runtime is not None and overlaps(resolved, runtime):
         return True
     data = _resolve(store.root)
     if resolved == data or data in resolved.parents:

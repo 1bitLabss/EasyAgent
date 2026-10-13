@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.3.17
+
+- The desktop installers now carry their own Python. A fresh install on a computer without Python showed a blank window with only "AI agents, made easy." because nothing started the server. The window now unpacks the bundled runtime into the per-user app folder on first start, starts EasyAgent, waits for it to answer, and then opens it.
+- If EasyAgent cannot start, the window says why, shows the path of the server log, and offers Retry. It no longer shows a blank page.
+- The desktop app keeps its chats in the per-user app-data folder (Windows `%APPDATA%\labs.1bit.easyagent\data`, macOS `~/Library/Application Support/labs.1bit.easyagent/data`, Linux `~/.local/share/labs.1bit.easyagent/data`) unless `EASYAGENT_DATA` or `EASYAGENT_CWD` is set. No other folder's data is read or moved.
+- The bundled Python and the app's install folder are refused as a bot workspace, like the program package and the data folder. Strict, approval, and containment are unchanged.
+- The Linux app no longer stops at start on the single-instance D-Bus name.
+- CI installs each built installer on a clean Windows, macOS, and Linux runner and checks that the installed app starts EasyAgent, that `/api/health` answers, that the page and its script load, and that the window reaches the page.
+
 ## 0.3.16
 
 - An unattended routine still uses Strict. A destructive command is blocked. Anything that needs approval is held on a card and is not run. An exact Always allow grant is the only ask that can proceed, and it cannot cover a blocked wipe.

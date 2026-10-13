@@ -1,7 +1,9 @@
 {
   "identifier": "default",
   "description": "The EasyAgent window loads the local server.",
-  "windows": ["main"],
+  "windows": [
+    "main"
+  ],
   "permissions": [
     "core:default",
     "core:window:allow-minimize",
@@ -13,7 +15,9 @@
     "autostart:allow-disable",
     "autostart:allow-is-enabled",
     "allow-set-open-at-login",
-    "allow-open-at-login-enabled"
+    "allow-open-at-login-enabled",
+    "allow-startup-state",
+    "allow-retry-start"
   ],
   "remote": {
     "urls": [

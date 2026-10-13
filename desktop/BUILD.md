@@ -4,7 +4,15 @@ The phone you add to the home screen is the page itself. See the README section 
 
 The desktop app is Tauri 2. It opens the existing EasyAgent page in the system webview and adds a tray icon. The FastAPI process is still the app.
 
-Rust 1.90 or newer and Node.js are required. Tauri 2.12, which `cargo` resolves from the `2` requirement in this tree, does not compile on older rustc. `desktop/rust-toolchain.toml` pins 1.90.0 when rustup is installed. The Python package has to be installed as well when the window is the thing that starts the server: `pip install -r requirements.txt` from the repo root.
+Rust 1.90 or newer and Node.js are required. Tauri 2.12, which `cargo` resolves from the `2` requirement in this tree, does not compile on older rustc. `desktop/rust-toolchain.toml` pins 1.90.0 when rustup is installed.
+
+The installers carry a Python runtime. Build it first, from the repo root, for the target you are building (Python 3.11 or newer with pip runs the script):
+
+```bash
+python scripts/build_desktop_runtime.py --triple x86_64-unknown-linux-gnu --out desktop/src-tauri/runtime/python-x86_64-unknown-linux-gnu.tar.gz
+```
+
+The triples are `x86_64-pc-windows-msvc`, `x86_64-unknown-linux-gnu`, `aarch64-apple-darwin`, and `x86_64-apple-darwin`. The macOS build carries both Mac runtimes. The script downloads a pinned python-build-standalone CPython (checked against its sha256), installs this package and its dependencies into it, and writes one `tar.gz`. `src-tauri/tauri.<os>.conf.json` lists it as a resource. The window unpacks it into the per-user app folder on first start. A dev build without that file falls back to `EASYAGENT_PYTHON` or `python` on `PATH`; then `pip install -r requirements.txt` first.
 
 From `desktop/`:
 
@@ -14,6 +22,8 @@ cargo test -p easyagent-supervisor
 npm run dev
 npm run build
 ```
+
+`easyagent-desktop --smoke-test result.json` starts the server the way the window does, checks `/api/health`, the page and its script, waits until the window shows the page, writes the result to that file, and exits. CI runs it on each freshly installed installer.
 
 `cargo test -p easyagent-supervisor` does not need a display or WebKit. It checks attach versus start, the health JSON, the tray title, and the icon bitmap. `npm test` runs that same command. `npm run dev` opens the window. `npm run build` is `cargo tauri build` and writes installers under `desktop/target/release/bundle/`, because `desktop/` is the cargo workspace. On macOS, `npm run build -- --target universal-apple-darwin` builds one `.dmg` for both Apple silicon and Intel, under `desktop/target/universal-apple-darwin/release/bundle/dmg/`. The targets are NSIS and MSI on Windows, `.app` and `.dmg` on macOS, and `.deb`, AppImage, and `.rpm` on Linux.
 
@@ -59,9 +69,9 @@ The window remembers its size. The tray icon shows the unread count. A native no
 The README section **Desktop window** is the user-facing description. In short:
 
 - `GET /api/health` returns `{"ok": true}`: attach. Quit does not stop that process.
-- Nothing is listening: start one `python -m easyagent` with `EASYAGENT_TRAY=0` and `EASYAGENT_PORT` set, and stop that process when the window exits.
-- Something else is listening: leave it alone and keep the startup page on screen.
+- Nothing is listening: unpack the bundled runtime if needed, start one `python -m easyagent` with `EASYAGENT_TRAY=0` and `EASYAGENT_PORT` set, wait for health, then open the page. Stop that process when the window exits. If it does not start, show the reason, the log path, and Retry.
+- Something else is listening: leave it alone and show that on the startup page.
 
 ## CI
 
-`.github/workflows/desktop.yml` runs `cargo test -p easyagent-supervisor` on Ubuntu and `cargo check -p easyagent-supervisor` on macOS when the desktop crate changes. `.github/workflows/desktop-installers.yml` runs on a version tag (`v*`), builds the unsigned Windows, macOS, and Linux installers from `desktop/target`, and attaches them to a GitHub Release. The notes are the matching section of `CHANGELOG.md`. The macOS job targets `universal-apple-darwin`. Those jobs do not sign anything. Signed installers need the Windows and macOS certificates named above. If this forge does not run GitHub Actions, those files are still the commands to keep.
+`.github/workflows/desktop.yml` runs `cargo test -p easyagent-supervisor` on Ubuntu and `cargo check -p easyagent-supervisor` on macOS when the desktop crate changes. `.github/workflows/desktop-installers.yml` runs on a version tag (`v*`) or by hand, builds the runtime and the unsigned Windows, macOS, and Linux installers from `desktop/target`, installs each one on a clean runner (NSIS `/S`, MSI, the dmg copied out of the mounted image, the deb, the AppImage) and runs `--smoke-test` on the installed app. Only a tag attaches them to a GitHub Release, and only after every install check passed. The notes are the matching section of `CHANGELOG.md`. The macOS job targets `universal-apple-darwin`. Those jobs do not sign anything. Signed installers need the Windows and macOS certificates named above. If this forge does not run GitHub Actions, those files are still the commands to keep.

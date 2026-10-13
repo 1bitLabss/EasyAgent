@@ -1,6 +1,7 @@
 name: desktop
 
 on:
+  workflow_dispatch:
   push:
     paths:
       - "desktop/**"

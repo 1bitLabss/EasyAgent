@@ -318,7 +318,10 @@ pub struct ServerLaunch {
 pub fn server_launch(port: u16, program: String, bundled: bool, cwd: PathBuf, data: Option<PathBuf>) -> ServerLaunch {
     let base = server_command(port);
     let mut env = base.env;
-    let mut remove_env = Vec::new();
+    // An inherited TLS key log (some antivirus suites set SSLKEYLOGFILE for every
+    // process) makes Python's ssl module open that file on every HTTP client;
+    // an unwritable path stopped every chat. The server never logs TLS secrets.
+    let mut remove_env = vec!["SSLKEYLOGFILE".to_string()];
     if let Some(dir) = data {
         env.push(("EASYAGENT_DATA".into(), dir.to_string_lossy().to_string()));
     }
@@ -1061,6 +1064,7 @@ mod tests {
         assert!(spec.env.contains(&("EASYAGENT_DATA".into(), "/tmp/data".into())));
         assert!(spec.env.contains(&("PYTHONNOUSERSITE".into(), "1".into())));
         assert!(spec.remove_env.contains(&"PYTHONPATH".to_string()));
+        assert!(spec.remove_env.contains(&"SSLKEYLOGFILE".to_string()));
         assert!(spec.env.contains(&("EASYAGENT_RUNTIME".into(), "bundled".into())));
         assert!(spec.env.iter().any(|(key, _)| key == "EASYAGENT_INSTALL_DIR"));
         let plain = server_launch(44721, "python3".into(), false, PathBuf::from("/tmp"), None);

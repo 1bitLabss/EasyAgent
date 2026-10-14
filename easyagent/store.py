@@ -114,10 +114,15 @@ def reaction_signal(message: dict) -> str:
 
 def message_index(messages: list, *, self_id: str | None = None) -> str:
     """Recent ids, so a tapback can name one message."""
+    from easyagent.context import is_harness_message
+
+    visible = [
+        message
+        for message in (messages or [])
+        if isinstance(message, dict) and not is_harness_message(message)
+    ]
     lines = []
-    for message in (messages or [])[-12:]:
-        if not isinstance(message, dict):
-            continue
+    for message in visible[-12:]:
         mid = str(message.get("id") or "").strip()
         if not mid:
             continue

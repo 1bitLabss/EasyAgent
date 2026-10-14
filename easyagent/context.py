@@ -165,11 +165,104 @@ def clip_message(content: str, limit: int | None = None) -> str:
     return text[:keep] + TRUNCATION_NOTICE
 
 
+_LOOP_TEXT = "The bot repeated itself without making progress, so I stopped it."
+_UNSENT_REASON = "Not sent (job stopped)"
+_HARNESS_KINDS = frozenset({
+    "status",
+    "activity",
+    "pickup",
+    "resume-offer",
+    "resume-note",
+    "resume-dismissed",
+    "connection",
+})
+
+
+def is_harness_message(message: dict) -> bool:
+    """A row the app wrote for the person. It stays in the transcript and stays out of the model list.
+
+    That covers status notes, the activity row, pickup lines, Stopped lines,
+    loop-stop and resume notices, connection notices, and Not-sent markers.
+    """
+    if not isinstance(message, dict):
+        return False
+    if message.get("harness") is True:
+        return True
+    kind = message.get("kind") or ""
+    if kind in _HARNESS_KINDS:
+        return True
+    if message.get("about") == "activity" or message.get("id") == "activity":
+        return True
+    role = message.get("role") or ""
+    if role == "user" and (
+        message.get("chip") == "unsent" or message.get("refuse_reason") == _UNSENT_REASON
+    ):
+        return True
+    if role == "user":
+        return False
+    text = " ".join(str(message.get("content") or "").split())
+    if text == "Stopped." or text.startswith("Stopped:"):
+        return True
+    if text == _LOOP_TEXT or text == "Picked up your message":
+        return True
+    if text.startswith("Still on this job"):
+        return True
+    return False
+
+
+def _content_blank(content) -> bool:
+    if content is None:
+        return True
+    if isinstance(content, str):
+        return not content.strip()
+    if isinstance(content, list):
+        return len(content) == 0
+    return not str(content).strip()
+
+
+def _merge_content(left, right):
+    if _content_blank(left):
+        return right
+    if _content_blank(right):
+        return left
+    if isinstance(left, list) or isinstance(right, list):
+        def parts(value):
+            if isinstance(value, list):
+                return list(value)
+            text = value if isinstance(value, str) else str(value)
+            return [{"type": "text", "text": text}]
+
+        return [*parts(left), *parts(right)]
+    return f"{left}\n\n{right}"
+
+
+def coalesce_assistants(messages: list[dict]) -> list[dict]:
+    """Join consecutive assistant rows and drop empty ones.
+
+    A llama.cpp server rejects a list that ends with two or more assistant messages.
+    """
+    out: list[dict] = []
+    for item in messages or []:
+        if not isinstance(item, dict):
+            continue
+        if item.get("role") == "assistant":
+            if _content_blank(item.get("content")):
+                continue
+            if out and out[-1].get("role") == "assistant":
+                merged = dict(out[-1])
+                merged["content"] = _merge_content(out[-1].get("content"), item.get("content"))
+                out[-1] = merged
+                continue
+        out.append(dict(item))
+    return out
+
+
 def model_content(message: dict) -> str:
     """What the model sees for one stored message.
 
     A stored error line (for example a connection error that names an old
     server address) is not replayed. The model gets a short neutral note.
+    Harness rows are omitted before this runs.
     """
     if message.get("error"):
         return ERROR_PLACEHOLDER
@@ -248,9 +341,10 @@ def prepare_context(
 
     `context_chars` is the bot's chat budget in characters (see
     `bot_context_chars`). Omit it to use the default. Every recent message
-    goes in, newest first, until the next older one would not fit. Only the
-    messages before that point are folded into the summary. A chat that fits
-    is sent whole and nothing is compacted. The stored list is not trimmed.
+    goes in, newest first, until the next older one would not fit. Harness
+    rows (status, pickup, activity, Stopped, loop-stop, Not sent) are skipped.
+    Only the messages before that point are folded into the summary. A chat
+    that fits is sent whole and nothing is compacted. The stored list is not trimmed.
 
     `floor` keeps messages before that index folded even when they would still
     fit. Zero leaves the budget in charge.
@@ -283,12 +377,17 @@ def prepare_context(
 
     start = count
     used = 0
+    seen_real = False
     for index in range(count - 1, -1, -1):
-        cost = len(_view_text(model_content(messages[index]), per_message, single_cap))
-        if index < count - 1 and used + cost > tail_budget:
+        message = messages[index]
+        if is_harness_message(message):
+            continue
+        cost = len(_view_text(model_content(message), per_message, single_cap))
+        if seen_real and used + cost > tail_budget:
             break
         used += cost
         start = index
+        seen_real = True
 
     try:
         forced = int(floor or 0)
@@ -301,13 +400,20 @@ def prepare_context(
     if forced > start:
         start = forced
 
+    def _folded(rows: list[dict]) -> str:
+        kept = [item for item in rows if not is_harness_message(item)]
+        if not kept:
+            return ""
+        return "\n".join(_fold_line(item) for item in kept)
+
     if start == 0:
         summary = ""
     elif start > through:
-        folded = "\n".join(_fold_line(m) for m in messages[through:start])
-        summary = clamp_summary(summary, folded, summary_cap)
+        folded = _folded(messages[through:start])
+        if folded:
+            summary = clamp_summary(summary, folded, summary_cap)
     elif start < through:
-        folded = "\n".join(_fold_line(m) for m in messages[:start])
+        folded = _folded(messages[:start])
         summary = clamp_summary("", folded, summary_cap)
     elif len(summary) > summary_cap:
         summary = clamp_summary("", summary, summary_cap)
@@ -316,6 +422,7 @@ def prepare_context(
     tail = [
         {"role": m.get("role", "user"), "content": _view_text(model_content(m), per_message, single_cap)}
         for m in messages[through:]
+        if not is_harness_message(m)
     ]
     stats = _stats(messages, summary, through, tail, budget, summary_cap)
     return PreparedContext(summary, through, tail, stats)

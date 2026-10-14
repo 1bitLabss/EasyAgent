@@ -9,7 +9,13 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from easyagent.context import PreparedContext, bot_context_chars, estimate_tokens, prepare_context
+from easyagent.context import (
+    PreparedContext,
+    bot_context_chars,
+    estimate_tokens,
+    is_harness_message,
+    prepare_context,
+)
 from easyagent.recall import scan_chats
 from easyagent.retrieve import earlier_block
 from easyagent.rolling import grounded_summary
@@ -101,7 +107,12 @@ def prompt_summary(chat: dict, prepared: PreparedContext, messages: list[dict]) 
     if through <= 0 or not rolling or rolled < through:
         return summary
     cap = max(len(summary), 400)
-    grounded = grounded_summary(rolling, messages[:through], cap)
+    visible = [
+        item
+        for item in messages[:through]
+        if isinstance(item, dict) and not is_harness_message(item)
+    ]
+    grounded = grounded_summary(rolling, visible, cap)
     return grounded or summary
 
 

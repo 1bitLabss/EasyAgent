@@ -96,6 +96,8 @@ def _key(store: Store, bot_id: str) -> tuple:
 
 
 def _build(store: Store, bot_id: str, key: tuple) -> _Index:
+    from easyagent.context import is_harness_message
+
     docs: list[_Doc] = []
     try:
         listed = store.list_chats(bot_id)
@@ -108,7 +110,7 @@ def _build(store: Store, bot_id: str, key: tuple) -> _Index:
             continue
         title = chat.get("title") or "New chat"
         for index, message in enumerate(chat.get("messages") or []):
-            if not isinstance(message, dict):
+            if not isinstance(message, dict) or is_harness_message(message):
                 continue
             raw = message.get("content") or ""
             if not str(raw).strip():
@@ -315,7 +317,11 @@ def _rerank(endpoint: dict | None, query: str, hits: list[Passage]) -> list[Pass
 
 
 def _query_text(messages: list[dict]) -> str:
+    from easyagent.context import is_harness_message
+
     for message in reversed(messages or []):
+        if is_harness_message(message):
+            continue
         if message.get("role") == "user":
             return str(message.get("content") or "")
     return ""

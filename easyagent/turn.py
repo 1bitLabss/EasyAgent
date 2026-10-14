@@ -38,6 +38,7 @@ class Slot:
         self.busy = False
         self.job_started = ""
         self.follow_chain = 0
+        self.resend_id = ""
 
 
 _GUARD = threading.Lock()

@@ -38,8 +38,10 @@ from easyagent.context import (
     bot_context_tokens,
     clean_tokens,
     clip_message,
+    coalesce_assistants,
     context_window,
     estimate_tokens,
+    is_harness_message,
     prepare_context,
 )
 from easyagent.prompt import build_system
@@ -1547,6 +1549,7 @@ def create_app(data_dir: str | Path | None = None) -> FastAPI:
         except PlanError as exc:
             turn_mod.clear_busy(store, chat_id)
             raise HTTPException(400, str(exc)) from exc
+        turn_mod.slot_for(store, chat_id).resend_id = message_id
         if _wants_stream(request):
             return StreamingResponse(
                 _stream_reply_only(store, bot_id, chat_id),
@@ -1561,6 +1564,7 @@ def create_app(data_dir: str | Path | None = None) -> FastAPI:
                 done = followed or result
                 return done.get("chat") or done
         finally:
+            turn_mod.slot_for(store, chat_id).resend_id = ""
             turn_mod.clear_busy(store, chat_id)
 
     @app.post("/api/bots/{bot_id}/chats/{chat_id}/messages/{message_id}/stop-and-send")
@@ -1588,6 +1592,7 @@ def create_app(data_dir: str | Path | None = None) -> FastAPI:
         except PlanError as exc:
             turn_mod.clear_busy(store, chat_id)
             raise HTTPException(400, str(exc)) from exc
+        turn_mod.slot_for(store, chat_id).resend_id = message_id
         if _wants_stream(request):
             return StreamingResponse(
                 _stream_reply_only(store, bot_id, chat_id),
@@ -1601,6 +1606,7 @@ def create_app(data_dir: str | Path | None = None) -> FastAPI:
                 followed = await _drain_queued_json(store, bot_id, chat_id)
                 return followed or result
         finally:
+            turn_mod.slot_for(store, chat_id).resend_id = ""
             turn_mod.clear_busy(store, chat_id)
 
     @app.post("/api/bots/{bot_id}/chats/{chat_id}/resume")
@@ -2864,20 +2870,63 @@ def _turn_messages(store: Store, bot_id: str, chat: dict) -> tuple[dict, list[di
 
     desktop = attach_desktop(bot)
     note_system_tokens(estimate_tokens(len(system)))
-    source = list(chat.get("messages") or [])[view.summarized_through :]
-    if len(source) >= len(view.tail):
-        source = source[len(source) - len(view.tail) :]
-    if len(source) == len(view.tail):
-        tail = [
-            _model_message(store, bot_id, chat["id"], stored, item)
-            for stored, item in zip(source, view.tail)
-        ]
-    else:
-        tail = view.tail
-    messages = [{"role": "system", "content": system}, *tail]
+    pairs = _model_pairs(store, bot_id, chat, view)
+    slot = turn_mod.current_slot()
+    if slot is None or not slot.resend_id:
+        named = turn_mod.slot_for(store, chat.get("id") or "")
+        if named.resend_id:
+            slot = named
+    resend_id = ""
+    if slot is not None and slot.resend_id:
+        resend_id = slot.resend_id
+        slot.resend_id = ""
+    tail = _place_resend(store, bot_id, chat, pairs, resend_id)
+    messages = coalesce_assistants([{"role": "system", "content": system}, *tail])
     if desktop:
         messages = _with_window(messages, desktop)
     return endpoint, messages
+
+
+def _model_pairs(store: Store, bot_id: str, chat: dict, view) -> list[tuple]:
+    """Pair each tail row with the stored message it came from. Harness rows are already gone."""
+    stored = [
+        item
+        for item in list(chat.get("messages") or [])[view.summarized_through :]
+        if isinstance(item, dict) and not is_harness_message(item)
+    ]
+    if len(stored) >= len(view.tail):
+        stored = stored[len(stored) - len(view.tail) :]
+    if len(stored) != len(view.tail):
+        return [(None, item) for item in view.tail]
+    return [
+        (row, _model_message(store, bot_id, chat["id"], row, item))
+        for row, item in zip(stored, view.tail)
+    ]
+
+
+def _place_resend(store: Store, bot_id: str, chat: dict, pairs: list[tuple], resend_id: str) -> list[dict]:
+    """Send now and Stop and send answer the chosen line, so that line is last."""
+    if not resend_id:
+        return [item for _row, item in pairs]
+    index = next(
+        (
+            position
+            for position, (row, _item) in enumerate(pairs)
+            if isinstance(row, dict) and row.get("id") == resend_id
+        ),
+        None,
+    )
+    if index is not None:
+        chosen = pairs.pop(index)
+        pairs.append(chosen)
+        return [item for _row, item in pairs]
+    for row in chat.get("messages") or []:
+        if not isinstance(row, dict) or row.get("id") != resend_id or row.get("role") != "user":
+            continue
+        clipped = {"role": "user", "content": row.get("content") or ""}
+        pairs.append((row, _model_message(store, bot_id, chat["id"], row, clipped)))
+        break
+    return [item for _row, item in pairs]
 
 
 def _with_window(messages: list[dict], block: str) -> list[dict]:
@@ -3105,6 +3154,8 @@ def _labeled_room_messages(messages: list[dict]) -> list[dict]:
         item = {"role": message.get("role") or "user", "content": f"{name}: {text}"}
         if message.get("reaction") in {"👍", "👎", "❤️", "👀"}:
             item["reaction"] = message.get("reaction")
+        if is_harness_message(message):
+            item["harness"] = True
         labeled.append(item)
     return labeled
 
@@ -3216,11 +3267,12 @@ async def _complete_for_room_bot(store: Store, room: dict, bot_id: str) -> tuple
         bridges=_bridges_prompt(store),
     )
     _, _, clip_limit = context_window(budget)
-    tail = [
+    tail = coalesce_assistants([
         _room_tail_item(bot, message, clip_limit)
         for message in (room.get("messages") or [])[prepared.summarized_through :]
-    ]
-    messages = [{"role": "system", "content": system}, *tail]
+        if not is_harness_message(message)
+    ])
+    messages = coalesce_assistants([{"role": "system", "content": system}, *tail])
     conn = gate.bind_connection(endpoint, bot.get("name") or "")
     try:
         try:
@@ -3348,10 +3400,11 @@ async def _ack_room_reaction(store: Store, room_id: str, message: dict) -> None:
         bridges=_bridges_prompt(store),
     )
     _, _, clip_limit = context_window(budget)
-    tail = [
+    tail = coalesce_assistants([
         _room_tail_item(bot, item, clip_limit)
         for item in (room.get("messages") or [])[prepared.summarized_through :]
-    ]
+        if not is_harness_message(item)
+    ])
     note = reaction_signal(message)
     messages = [
         {"role": "system", "content": system},

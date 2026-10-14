@@ -23,15 +23,36 @@ export type Bot = {
   safety_mode?: string;
   safety_unlocks?: string[];
   safety_exec_always?: { id: string; tool: string; root: string; label: string }[];
+  busy_input?: "steer" | "follow" | string;
+  auto_resume?: boolean;
+};
+
+export type PlanStep = {
+  id: string;
+  text: string;
+  state: "todo" | "doing" | "done" | string;
+};
+
+export type Plan = {
+  title?: string;
+  steps: PlanStep[];
+  updated_at?: string;
+  dismissed?: boolean;
 };
 
 export type Run = {
   id: string;
-  status: "idle" | "running" | "stopped" | "error";
+  status: "idle" | "running" | "paused" | "stopped" | "error";
   started_at: string | null;
   last_activity_at: string | null;
   current_step: string;
   reason: string;
+  step_index?: number;
+  step_count?: number;
+  queued?: number;
+  stuck?: boolean;
+  last_activity?: string;
+  elapsed_seconds?: number;
 };
 
 export type Attachment = {
@@ -89,6 +110,7 @@ export type Chat = ChatSummary & {
   fresh_from?: number;
   context?: Record<string, number>;
   run?: Run;
+  plan?: Plan | null;
 };
 
 export type Room = {

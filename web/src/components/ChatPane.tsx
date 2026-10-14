@@ -8,7 +8,7 @@ import { Markdown } from "@/components/Markdown";
 import { ThinkingBox } from "@/components/ThinkingBox";
 import { WindowControls } from "@/components/WindowControls";
 import { moodForReaction, pokeFace } from "@/lib/mood";
-import { describeRun, faceStateFor, runTone } from "@/lib/run";
+import { describeRun, faceStateFor, runTone, workingLine } from "@/lib/run";
 import { hideWhileSending, messageHasBubble, reactionWho } from "@/lib/transcript";
 import { cn } from "@/lib/utils";
 import { keepLoadedHistory, mergeChat, sameMessage, shareChat, type MessagePage } from "@/lib/window";
@@ -161,6 +161,34 @@ const MessageRow = memo(function MessageRow({
               })}
             >
               Always allow this repo
+            </button>
+          </div>
+        ) : null}
+        {message.kind === "resume-offer" && botId && chatId ? (
+          <div className="mt-3 flex flex-wrap gap-2">
+            <button
+              type="button"
+              className="rounded-full bg-white px-3 py-1 text-sm text-foreground"
+              data-testid="resume-job"
+              onClick={() => void api<{ chat?: Chat }>(`/api/bots/${botId}/chats/${chatId}/resume`, { method: "POST" }).then((next) => {
+                const saved = next.chat;
+                if (!saved) return;
+                const prev = queryClient.getQueryData<Chat>(["chat", botId, chatId]);
+                queryClient.setQueryData(["chat", botId, chatId], mergeChat(prev, saved));
+              })}
+            >
+              Resume
+            </button>
+            <button
+              type="button"
+              className="rounded-full bg-white px-3 py-1 text-sm text-foreground"
+              data-testid="dismiss-job"
+              onClick={() => void api<Chat>(`/api/bots/${botId}/chats/${chatId}/dismiss`, { method: "POST" }).then((next) => {
+                const prev = queryClient.getQueryData<Chat>(["chat", botId, chatId]);
+                queryClient.setQueryData(["chat", botId, chatId], mergeChat(prev, next));
+              })}
+            >
+              Dismiss
             </button>
           </div>
         ) : null}
@@ -413,6 +441,8 @@ export function ChatPane() {
   const asking = (open?.messages || []).slice(-1)[0]?.choices;
   const rows = open?.messages || [];
   const steps = (live?.steps || []).filter((item) => item && item !== "Thinking" && item !== view?.words);
+  const pill = workingLine(live?.run || open?.run, now);
+  const checklist = (open?.plan?.steps || []).filter((step) => step && step.text);
 
   chooseRef.current = (choice) => {
     void submit(choice);
@@ -518,6 +548,16 @@ export function ChatPane() {
                   <p className="pixel mt-4 text-2xl">AI agents, made easy.</p>
                 </div>
               ) : null}
+              {checklist.length ? (
+                <ol data-testid="plan-checklist" className="rounded-lg border border-border bg-card px-4 py-3 text-sm">
+                  {open?.plan?.title ? <li className="mb-1 list-none font-medium">{open.plan.title}</li> : null}
+                  {checklist.map((step) => (
+                    <li key={step.id} data-state={step.state} className={step.state === "done" ? "text-muted line-through" : step.state === "doing" ? "font-medium" : ""}>
+                      {step.text}
+                    </li>
+                  ))}
+                </ol>
+              ) : null}
               {(open.window_start ?? 0) > 0 ? (
                 <button type="button" className="sys-line" onClick={() => void loadOlder()}>Earlier messages</button>
               ) : null}
@@ -539,12 +579,15 @@ export function ChatPane() {
                 </div>
               ) : null}
               {running && view ? (
-                <div className="sys-line" role="status">
+                <div className="sys-line" role="status" data-testid="chat-working-pill">
                   <p>
                     <span className={cn("h-1.5 w-1.5 rounded-full", tone === "halted" ? "bg-danger" : "bg-current")} />
-                    {view.words}
-                    {view.elapsed ? <span>{view.elapsed}</span> : null}
+                    {pill.text || view.words}
+                    {!pill.text && view.elapsed ? <span>{view.elapsed}</span> : null}
+                    {pill.stuck ? <span>No activity for a while</span> : null}
+                    {pill.queued ? <span data-testid="queued-badge">Queued</span> : null}
                   </p>
+                  {live?.aside ? <p>{live.aside}</p> : null}
                 </div>
               ) : null}
               {live && (live.phase === "stopped" || live.phase === "error") ? (

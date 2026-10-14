@@ -856,6 +856,10 @@ class Store:
         situation_set: bool = False,
         situation_title: bool | None = None,
         situation_title_set: bool = False,
+        busy_input: str | None = None,
+        busy_input_set: bool = False,
+        auto_resume: bool | None = None,
+        auto_resume_set: bool = False,
     ) -> dict:
         """Change settings. Chat files in this bot are not opened or rewritten."""
         bot = self.get_bot(bot_id)
@@ -916,6 +920,19 @@ class Store:
                 bot["situation_title"] = True
             else:
                 bot.pop("situation_title", None)
+        if busy_input_set:
+            choice = (busy_input or "steer").strip().lower()
+            if choice not in {"steer", "follow"}:
+                raise StoreError("Choose steer or follow for a message that arrives while a job is running.", 400)
+            if choice == "follow":
+                bot["busy_input"] = "follow"
+            else:
+                bot.pop("busy_input", None)
+        if auto_resume_set:
+            if auto_resume:
+                bot["auto_resume"] = True
+            else:
+                bot.pop("auto_resume", None)
         if workspace_set and workspace is not None:
             from easyagent.workspace import assign_workspace
 

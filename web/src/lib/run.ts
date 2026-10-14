@@ -57,6 +57,22 @@ export function formatElapsed(seconds: number): string {
   return `${minutes}m ${rest}s`;
 }
 
+export function workingLine(
+  run: { step_index?: number; step_count?: number; started_at?: string | null; current_step?: string; last_activity?: string; queued?: number; stuck?: boolean } | null | undefined,
+  now: number,
+): { text: string; queued: boolean; stuck: boolean } {
+  const count = run?.step_count || 0;
+  const index = run?.step_index || 0;
+  const started = Date.parse(run?.started_at || "");
+  const elapsed = Number.isNaN(started) ? "" : formatElapsed((now - started) / 1000);
+  const activity = run?.last_activity || run?.current_step || "";
+  const bits: string[] = [];
+  if (count) bits.push(index ? `Step ${index} of ${count}` : `${count} steps`);
+  if (elapsed) bits.push(elapsed);
+  if (activity) bits.push(activity);
+  return { text: bits.join(" · "), queued: (run?.queued || 0) > 0, stuck: Boolean(run?.stuck) };
+}
+
 export function describeRun(
   step: string,
   status: string,

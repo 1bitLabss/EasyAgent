@@ -311,6 +311,14 @@ NATIVE_TOOLS = [
         ["status"],
     ),
     _tool(
+        "plan",
+        "Save this chat's checklist. This does not run a command and does not start the job over. "
+        "action is read, set, step, or clear. steps is a list of short steps. "
+        "step is the step number and state is todo, doing, or done.",
+        {"action": _STRING, "title": _STRING, "steps": {"type": "array", "items": _STRING}, "step": _STRING, "state": _STRING},
+        ["action"],
+    ),
+    _tool(
         "react",
         "React to one of the person's messages. emoji is 👍, 👎, ❤️, or 👀. message_id is their message id.",
         {"emoji": _STRING, "message_id": _STRING},
@@ -454,6 +462,30 @@ def _fence_for_call(call: dict) -> str:
             status = "proven"
         note = _string_arg(args, "note", "reason", "content")
         return f"```finish\n{status}\n{note}\n```"
+    if name == "plan":
+        plan_action = action or "set"
+        if plan_action not in {"read", "set", "step", "clear"}:
+            plan_action = "set"
+        if plan_action == "read":
+            return "```plan\nread\n```"
+        if plan_action == "clear":
+            return "```plan\nclear\n```"
+        if plan_action == "step":
+            step = _string_arg(args, "step", "id")
+            state = _string_arg(args, "state") or "doing"
+            return f"```plan\nstep\n{step}\n{state}\n```"
+        rows = ["set"]
+        title = _string_arg(args, "title")
+        if title:
+            rows.append(title)
+        steps = args.get("steps") if isinstance(args.get("steps"), list) else []
+        for item in steps:
+            text = item if isinstance(item, str) else ""
+            if str(text).strip():
+                rows.append("- " + str(text).strip())
+        if len(rows) == 1 and body.strip():
+            rows.append(body.strip())
+        return "```plan\n" + "\n".join(rows) + "\n```"
     return ""
 
 

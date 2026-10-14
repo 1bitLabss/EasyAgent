@@ -222,6 +222,16 @@ class Pending:
 
 
 _PENDING: dict[str, Pending] = {}
+
+
+def clear_pending(bot_id: str | None = None) -> None:
+    """Drop open cards. Nothing is approved and no denial is written."""
+    if not bot_id:
+        _PENDING.clear()
+        return
+    for card_id, card in list(_PENDING.items()):
+        if card.bot_id == bot_id:
+            _PENDING.pop(card_id, None)
 _AUDIT_LOCK = threading.Lock()
 _UNTRUSTED: list[str] = []
 _UNTRUSTED_GUARD = asyncio.Lock()
@@ -945,6 +955,8 @@ def _is_guardrail(path: Path) -> bool:
     }:
         return True
     if name == "bot.json" and "/bots/" in text:
+        return True
+    if "/chats/" in text and (name.endswith(".queue.json") or name.endswith(".plan.json")):
         return True
     if name == "index.json" and "/trash/" in text:
         return True
@@ -2721,6 +2733,10 @@ def judge_files(
         return _verdict(BLOCK, "data-dir", "That file holds a saved secret. It was not read.", detail, fingerprint)
     if _is_guardrail(path) and action == "write":
         return _verdict(BLOCK, "guardrail-edit", "EasyAgent's own guardrails cannot be edited from a tool.", detail, fingerprint)
+    lowered = path.name.lower()
+    folder = str(path).replace("\\", "/").lower()
+    if "/chats/" in folder and (lowered.endswith(".queue.json") or lowered.endswith(".plan.json")):
+        return _verdict(BLOCK, "data-dir", "That reads EasyAgent's saved data.", detail, fingerprint)
     secret = _secret_kind(path)
     if secret == "browser":
         return _verdict(BLOCK, "browser-store", "Browser cookies and saved passwords are never read.", detail, fingerprint)

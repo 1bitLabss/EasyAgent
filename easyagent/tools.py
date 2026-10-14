@@ -547,6 +547,19 @@ def _request_from_call(data: dict) -> ToolRequest:
         if not query:
             raise ToolError("Search failed: the query was empty.")
         return ToolRequest(kind="search", body=query)
+    if name == "plan":
+        step = str(raw_args.get("step") or raw_args.get("id") or path or "").strip()
+        state = str(raw_args.get("state") or "").strip().lower()
+        title = str(raw_args.get("title") or "").strip()
+        steps = raw_args.get("steps")
+        plan_body = content
+        if action not in {"read", "set", "step", "clear"}:
+            action = "set" if (plan_body.strip() or title or isinstance(steps, list)) else "read"
+        if action == "set" and not plan_body.strip():
+            plan_body = json.dumps({"title": title, "steps": steps if isinstance(steps, list) else []})
+        if action == "step" and not plan_body.strip():
+            plan_body = json.dumps({"step": step, "state": state or "doing"})
+        return ToolRequest(kind="plan", action=action, path=step, command=state, body=plan_body)
     computer = str(raw_args.get("computer") or raw_args.get("host") or "").strip()
     if name in {"ssh", "run_ssh", "windows", "run_windows"}:
         if not command:
@@ -597,7 +610,7 @@ def _cut_off_tool(text: str) -> bool:
     ):
         if lowered.count(open_tag) > lowered.count(close_tag):
             return True
-    if re.search(r"```(?:files|shell|search|ssh|windows|project|memory|history|finish|react|routine|browser|fetch|research|mcp|bridge)\b", raw, re.IGNORECASE):
+    if re.search(r"```(?:files|shell|search|ssh|windows|project|memory|history|finish|react|routine|browser|fetch|research|mcp|bridge|plan)\b", raw, re.IGNORECASE):
         if raw.count("```") % 2 == 1:
             return True
     return False
@@ -703,6 +716,11 @@ def parse_tool(text: str) -> ToolRequest | None:
             "list and read a project file, read or file a memory topic, run a command here, search the web, "
             "and run a command on a Linux or Windows computer you saved."
         )
+    planned = _fence_request(_PLAN_FENCE, text)
+    if planned is not None:
+        from easyagent.plan import request_from_fence
+
+        return request_from_fence(planned)
     return None
 
 
@@ -938,6 +956,13 @@ def parse_tools(text: str) -> list[ToolRequest]:
     take(search_mod.FENCE_RE, _search_from_body)
     take(search_mod.FETCH_RE, _fetch_from_body)
     take(search_mod.RESEARCH_RE, _research_from_body)
+
+    def _plan_from_fence(body: str) -> ToolRequest:
+        from easyagent.plan import request_from_fence
+
+        return request_from_fence(body)
+
+    take(_PLAN_FENCE, _plan_from_fence)
     if found:
         found.sort(key=lambda item: item[0])
         return [item for _start, item in found]
@@ -970,6 +995,8 @@ def _step_excerpt(command: str, limit: int = 72) -> str:
 
 
 def status_label(request: ToolRequest) -> str:
+    if request.kind == "plan":
+        return "Updating the checklist"
     if request.kind == "question":
         return "Asking"
     if request.kind in {"files", "project", "history"} or (request.kind == "memory" and request.action == "read"):
@@ -2066,8 +2093,18 @@ async def _routine_proposal(store: Store, request: ToolRequest, bot_id: str | No
 
 
 async def execute(store: Store, request: ToolRequest, bot_id: str | None = None) -> str:
-    """Run one tool. Honesty can block it before any side effect."""
+    """Run one tool. Honesty can block it before any side effect.
+
+    The plan tool is harness state. It never reaches Strict, containment, or honesty.
+    """
     turn_mod.raise_if_cancelled()
+    if request.kind == "plan":
+        from easyagent.plan import PlanError, apply_plan
+
+        try:
+            return apply_plan(store, _caller_bot(bot_id), request)
+        except PlanError as exc:
+            raise ToolError(str(exc)) from exc
     from easyagent import honesty
 
     blocked = honesty.before_tool(request)
@@ -2170,6 +2207,8 @@ async def _run_together(
 
 def happened_line(request: ToolRequest, messages: list[dict] | None = None) -> str:
     """What the person sees: the tool ran. Not the listing or the output."""
+    if request.kind == "plan":
+        return "Updated the checklist."
     if request.kind == "files" and request.action == "list" and messages and _wants_largest(messages):
         return f"Checked file sizes in {request.path}."
     if request.kind == "files" and request.action == "list":
@@ -6314,6 +6353,10 @@ async def run_turn(
 
     while True:
         turn_mod.raise_if_cancelled()
+        if store is not None and bot_id and chat_id:
+            from easyagent.plan import steer_into
+
+            steer_into(store, bot_id, chat_id, working)
         stalled = honesty.poll()
         if stalled:
             for event in close(stalled):

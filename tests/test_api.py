@@ -1652,8 +1652,8 @@ def test_sending_again_stops_a_quiet_model_stream(tmp_path):
     asyncio.run(run())
 
 
-def test_a_second_send_cancels_the_model_request(tmp_path, monkeypatch):
-    """Sending again aborts the turn that is still waiting on the model."""
+def test_a_second_send_does_not_cancel_the_model_request(tmp_path, monkeypatch):
+    """A message during a job does not abort the turn that is still waiting on the model."""
     import httpx
 
     from easyagent import turn as turn_mod
@@ -1663,12 +1663,11 @@ def test_a_second_send_cancels_the_model_request(tmp_path, monkeypatch):
 
     async def hang(**kwargs):
         calls["n"] += 1
-        if calls["n"] == 1:
-            started.set()
-            while not turn_mod.cancelled():
-                await asyncio.sleep(0.02)
-            return
-        yield "Moved on."
+        started.set()
+        while not turn_mod.cancelled():
+            await asyncio.sleep(0.02)
+        if False:
+            yield ""
 
     monkeypatch.setattr("easyagent.llm.stream_complete", hang)
 
@@ -1698,22 +1697,26 @@ def test_a_second_send_cancels_the_model_request(tmp_path, monkeypatch):
 
             task = asyncio.create_task(first())
             await asyncio.wait_for(started.wait(), timeout=5)
+            run_id = turn_mod.slot_for(app.state.store, chat["id"]).run_id
             async with client.stream(
-                "POST", url, json={"content": "stop and do this"}, headers=headers
+                "POST", url, json={"content": "what are you doing?"}, headers=headers
             ) as response:
                 assert response.status_code == 200
                 body = (await response.aread()).decode()
+            assert "Still on this job" in body
+            assert calls["n"] == 1
+            assert turn_mod.slot_for(app.state.store, chat["id"]).run_id == run_id
+            assert not turn_mod.slot_for(app.state.store, chat["id"]).cancel.is_set()
+            stop = await client.post(f"/api/bots/{bot['id']}/chats/{chat['id']}/stop")
+            assert stop.status_code == 200
             status, first_body = await asyncio.wait_for(task, timeout=5)
             stored = (await client.get(f"/api/bots/{bot['id']}/chats/{chat['id']}")).json()
         assert status == 200
-        assert "Moved on." not in first_body
-        assert "Moved on." in body
         assert '"type": "error"' not in first_body
+        assert calls["n"] == 1
         texts = [item["content"] for item in stored["messages"]]
         assert texts[0] == "keep going"
-        assert "stop and do this" in texts
-        assert texts[-1] == "Moved on."
-        assert calls["n"] >= 2
+        assert stored["run"]["id"] != run_id or stored["run"]["status"] in {"stopped", "idle"}
 
     asyncio.run(scenario())
 

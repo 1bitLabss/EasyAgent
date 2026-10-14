@@ -1200,7 +1200,15 @@ function renderRunIndicator(messages, bot) {
   if (!run || run.status !== "running") return;
   if (state.live && (state.live.phase === "stopped" || state.live.phase === "error")) return;
   const view = describeRun(run, Date.now());
-  const tone = runTone(view.words, run.status);
+  const stepCount = run.step_count || 0;
+  const stepIndex = run.step_index || 0;
+  const bits = [];
+  if (stepCount) bits.push(stepIndex ? `Step ${stepIndex} of ${stepCount}` : `${stepCount} steps`);
+  if (view.elapsed) bits.push(view.elapsed);
+  const activity = run.last_activity || run.current_step || "";
+  if (activity) bits.push(activity);
+  const words = bits.length ? bits.join(" · ") : view.words;
+  const tone = runTone(words, run.status);
   const who = bot ? bot.name : "Working";
   messages.append(el("li", {
     class: `message pending run-indicator is-${tone}`,
@@ -1212,7 +1220,9 @@ function renderRunIndicator(messages, bot) {
     el("div", { class: "message-main run-main" }, [
       el("span", { class: "run-pulse", "aria-hidden": "true" }),
       el("p", { class: "body run-step" }, [
-        el("span", { class: "run-step-text", id: "run-step" }, [view.words]),
+        el("span", { class: "run-step-text", id: "run-step" }, [words]),
+        el("span", { class: "run-stuck" }, [run.stuck ? " No activity for a while" : ""]),
+        el("span", { class: "run-queued", "data-testid": "queued-badge" }, [run.queued ? " Queued" : ""]),
         el("span", { class: "run-dots", "aria-hidden": "true" }),
       ]),
       el("p", { class: "run-elapsed", id: "run-elapsed" }, [view.elapsed]),
@@ -1390,6 +1400,11 @@ function renderThread() {
   $("summary-text").textContent = summary || "Nothing compacted yet. The recent tail still fits in the request.";
   const messages = $("messages");
   messages.replaceChildren();
+  const plan = chat.plan;
+  if (plan && Array.isArray(plan.steps) && plan.steps.length) {
+    const items = plan.steps.map((step) => el("li", { "data-state": step.state || "todo" }, [step.text || ""]));
+    messages.append(el("ol", { "data-testid": "plan-checklist", class: "plan-checklist" }, items));
+  }
   const transcript = chat.messages || [];
   transcript.forEach((message, index) => {
     const skills = message.skills_saved || [];
@@ -1408,6 +1423,12 @@ function renderThread() {
     const open = index === transcript.length - 1 && message.role === "assistant" && !failed
       && Array.isArray(message.choices) && message.choices.length > 1;
     if (open) main.append(choiceRow(message.choices));
+    if (message.kind === "resume-offer") {
+      main.append(el("div", { class: "resume-card" }, [
+        el("button", { type: "button", "data-testid": "resume-job", onclick: () => void resumeSavedJob() }, ["Resume"]),
+        el("button", { type: "button", "data-testid": "dismiss-job", onclick: () => void dismissSavedJob() }, ["Dismiss"]),
+      ]));
+    }
     if (message.id) main.append(reactionControl(message, false));
     const speaker = message.role === "user" ? null : bot;
     const row = whoLine(who, speaker, { halted: failed });
@@ -1826,6 +1847,18 @@ function applyStreamEvent(event, stream) {
     scrollThread();
     return;
   }
+  if (event.type === "aside") {
+    const run = event.run || live.run || null;
+    if (run && isVisible(stream) && state.chat) state.chat.run = run;
+    rememberLive(stream, {
+      ...live,
+      aside: event.text || "",
+      run,
+      heardAt: Date.now(),
+    });
+    paintStream(stream, "thread");
+    return;
+  }
   if (event.type === "status") {
     const run = event.run || live.run || null;
     if (run && event.text) run.current_step = event.text;
@@ -2087,6 +2120,19 @@ async function settleOpenStream(ended, stream) {
   stream.live = state.live;
 }
 
+async function resumeSavedJob() {
+  if (!state.botId || !state.chatId) return;
+  const chat = await api(`/api/bots/${state.botId}/chats/${state.chatId}/resume`, { method: "POST" });
+  state.chat = chat.chat || chat;
+  renderThread();
+}
+
+async function dismissSavedJob() {
+  if (!state.botId || !state.chatId) return;
+  state.chat = await api(`/api/bots/${state.botId}/chats/${state.chatId}/dismiss`, { method: "POST" });
+  renderThread();
+}
+
 async function sendDraft(event) {
   event.preventDefault();
   if (!state.botId) return;
@@ -2108,6 +2154,26 @@ async function sendDraft(event) {
         state.chatId = chatId;
         if (state.chat) state.chat.id = chatId;
       }
+    }
+    const already = streams.get(streamKey(botId, chatId));
+    if (already && already.sending && !already.replaced && chatId) {
+      showOutgoing(text, already);
+      const payload = { content: text };
+      if (file) {
+        const body = new FormData();
+        body.append("file", file);
+        const headers = {};
+        const token = sharedToken();
+        if (token) headers["X-EasyAgent-Token"] = token;
+        const response = await fetch(`/api/bots/${botId}/chats/${chatId}/files`, { method: "POST", headers, body });
+        const uploaded = await response.json().catch(() => ({}));
+        if (!response.ok) throw new Error(uploaded.detail || "That file was not kept.");
+        payload.attachment_id = uploaded.id;
+        fileInput.value = "";
+      }
+      await streamPost(`/api/bots/${botId}/chats/${chatId}/messages`, payload, already);
+      if (isVisible(already)) renderThread();
+      return;
     }
     stream = beginFlight(botId, chatId);
     chatLoad += 1;

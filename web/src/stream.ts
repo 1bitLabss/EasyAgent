@@ -15,6 +15,7 @@ export type Live = {
   thoughtAt?: number;
   thoughtSeconds?: number;
   reasoningLive?: boolean;
+  aside?: string;
 };
 
 type Flight = {
@@ -126,6 +127,7 @@ function carry(live: Live, patch: Partial<Live>): Live {
     thoughtAt: patch.thoughtAt === undefined ? live.thoughtAt : patch.thoughtAt,
     thoughtSeconds: patch.thoughtSeconds === undefined ? live.thoughtSeconds : patch.thoughtSeconds,
     reasoningLive: patch.reasoningLive === undefined ? live.reasoningLive : patch.reasoningLive,
+    aside: patch.aside === undefined ? live.aside : patch.aside,
   };
 }
 
@@ -181,6 +183,11 @@ function apply(event: Record<string, unknown>, flight: Flight) {
   }
   if (event.type === "stopped") {
     finish(flight, event.chat as Chat | undefined);
+    return;
+  }
+  if (event.type === "aside") {
+    const run = (event.run as Run | undefined) || live.run;
+    remember(flight, carry(live, { aside: String(event.text || ""), run }));
     return;
   }
   if (event.type === "status") {
@@ -318,6 +325,40 @@ export function optimisticUser(botId: string, chatId: string, text: string) {
 }
 
 export async function sendMessage(botId: string, chatId: string, text: string, file?: File | null) {
+  const existing = flightFor(botId, chatId);
+  if (existing?.sending && !existing.replaced) {
+    optimisticUser(botId, chatId, text);
+    try {
+      let attachmentId: string | null = null;
+      if (file) {
+        const body = new FormData();
+        body.append("file", file);
+        const saved = await api<{ id: string }>(`/api/bots/${botId}/chats/${chatId}/files`, { method: "POST", body });
+        attachmentId = saved.id;
+      }
+      const response = await streamPost(
+        `/api/bots/${botId}/chats/${chatId}/messages`,
+        { content: text, attachment_id: attachmentId },
+        existing.control.signal,
+      );
+      const type = response.headers.get("content-type") || "";
+      if (type.includes("application/json")) {
+        const data = (await response.json()) as { reply?: string; chat?: Chat };
+        if (data.chat) {
+          const prev = queryClient.getQueryData<Chat>(["chat", botId, chatId]);
+          queryClient.setQueryData(["chat", botId, chatId], mergeChat(prev, data.chat));
+        }
+        if (existing.live) {
+          remember(existing, carry(existing.live, { aside: String(data.reply || ""), run: data.chat?.run || existing.live.run }));
+        }
+        return;
+      }
+      await readEvents(response, existing);
+    } catch (error) {
+      if (existing.replaced || (error instanceof DOMException && error.name === "AbortError")) return;
+    }
+    return;
+  }
   const flight = begin(botId, chatId);
   optimisticUser(botId, chatId, text);
   try {

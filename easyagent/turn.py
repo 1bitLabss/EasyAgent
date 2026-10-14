@@ -35,6 +35,8 @@ class Slot:
         self.env: dict[str, str] | None = None
         self.worker: asyncio.Task | None = None
         self.store = None
+        self.busy = False
+        self.job_started = ""
 
 
 _GUARD = threading.Lock()
@@ -156,6 +158,7 @@ def bind(store, chat_id: str, bot_id: str = "") -> Slot:
     slot.proc = None
     slot.reason = ""
     slot.run_id = str(uuid.uuid4())
+    slot.job_started = ""
     slot.bot_id = bot_id or slot.bot_id
     slot.chat_id = chat_id
     slot.store = store
@@ -168,7 +171,10 @@ def bind(store, chat_id: str, bot_id: str = "") -> Slot:
         except Exception:
             pass
     slot.env = os.environ.copy()
-    slot.worker = asyncio.current_task()
+    try:
+        slot.worker = asyncio.current_task()
+    except RuntimeError:
+        slot.worker = None
     if stopped:
         slot.reason = "you pressed Stop"
         slot.cancel.set()
@@ -184,6 +190,35 @@ def track_worker(task: asyncio.Task) -> None:
 
 def current_worker(store, chat_id: str) -> asyncio.Task | None:
     return slot_for(store, chat_id).worker
+
+
+def is_busy(store, chat_id: str) -> bool:
+    """True while this chat's turn is still the one that was started."""
+    slot = slot_for(store, chat_id)
+    with _GUARD:
+        worker = slot.worker
+        live = worker is not None and not worker.done()
+        return bool(slot.busy or live)
+
+
+def try_begin(store, chat_id: str) -> bool:
+    """Claim this chat for a new turn. A turn that is already running stays as it is."""
+    slot = slot_for(store, chat_id)
+    with _GUARD:
+        worker = slot.worker
+        live = worker is not None and not worker.done()
+        if slot.busy or live:
+            return False
+        slot.busy = True
+        return True
+
+
+def clear_busy(store, chat_id: str) -> None:
+    slot = slot_for(store, chat_id)
+    with _GUARD:
+        slot.busy = False
+        if slot.worker is not None and slot.worker.done():
+            slot.worker = None
 
 
 def stop_all(reason: str) -> list[asyncio.Task]:

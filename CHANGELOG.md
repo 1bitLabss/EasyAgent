@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.3.20
+
+- A chat keeps a checklist. The plan tool only updates that checklist. It does not go through Strict or containment. Steps are checked, secrets are removed, and the checklist is shown to the model as data. The chat shows the steps as they change.
+- A message during a job does not start it over. The reply comes back at once with the step, the last activity, and how long the job has been running. By default the message steers the same job. A bot can instead take it as a follow-up when the job finishes. Three messages can wait. Stop is the only way to cancel.
+- While a job is running, the chat and the sidebar show which step it is on, how long it has been running, and the last activity. A quiet job says so. A message waiting on that job shows Queued.
+- A job that was running when EasyAgent stopped can be resumed at the same step, or dismissed with the checklist kept. Starting again on its own is off until that bot opts in. Open approval cards are dropped and are not carried onto the new run.
+
 ## 0.3.19
 
 - Chat works when antivirus sets SSLKEYLOGFILE. Bitdefender points it at an unwritable file on its virtual disk (`\\?\Volume{…}\virtual_file.log`). Python's ssl module opens that file whenever an HTTP client is created, even for an `http://` connection, so every reply stopped with "Permission denied". EasyAgent and its desktop launcher now drop an inherited SSLKEYLOGFILE, so TLS session keys are never written by accident. Set EASYAGENT_ALLOW_SSLKEYLOGFILE=1 to keep one for debugging. The installer smoke tests on Windows, macOS, and Linux now send a chat to a stub model with an unwritable SSLKEYLOGFILE and require a real reply.

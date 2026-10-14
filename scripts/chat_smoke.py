@@ -27,6 +27,9 @@ os.environ.pop("SSLKEYLOGFILE", None)
 
 REPLY = "Yes, I am connected. (chat-smoke stub)"
 MODEL = "stub-model"
+HOLD = threading.Event()
+_COMPLETIONS = {"n": 0}
+_COMPLETION_LOCK = threading.Lock()
 
 
 class Stub(BaseHTTPRequestHandler):
@@ -56,6 +59,12 @@ class Stub(BaseHTTPRequestHandler):
             req = {}
         if not self.path.rstrip("/").endswith("/chat/completions"):
             self._json(404, {"error": {"message": "not found"}})
+            return
+        with _COMPLETION_LOCK:
+            _COMPLETIONS["n"] += 1
+            hold = _COMPLETIONS["n"] == 1
+        if hold and not HOLD.wait(45):
+            self._json(500, {"error": {"message": "the first completion was not released"}})
             return
         created = int(time.time())
         if req.get("stream"):
@@ -140,8 +149,62 @@ def main() -> int:
         return 1
     chat = json.loads(text)
 
-    status, body = call(app, "POST", f"/api/bots/{bot['id']}/chats/{chat['id']}/messages",
-                        {"content": "are you connected?"}, accept="text/event-stream", timeout=180)
+    box: dict = {}
+
+    def first_turn() -> None:
+        box["result"] = call(
+            app,
+            "POST",
+            f"/api/bots/{bot['id']}/chats/{chat['id']}/messages",
+            {"content": "are you connected?"},
+            accept="text/event-stream",
+            timeout=180,
+        )
+
+    worker = threading.Thread(target=first_turn)
+    worker.start()
+    run_id = ""
+    deadline = time.monotonic() + 30
+    while time.monotonic() < deadline:
+        _status, stored = call(app, "GET", f"/api/bots/{bot['id']}/chats/{chat['id']}?window=80", timeout=5)
+        try:
+            running = json.loads(stored).get("run") or {}
+        except json.JSONDecodeError:
+            running = {}
+        if running.get("status") == "running" and running.get("id"):
+            run_id = running["id"]
+            break
+        time.sleep(0.2)
+    if not run_id:
+        HOLD.set()
+        worker.join(timeout=20)
+        print("FAIL: the chat never showed a running turn")
+        return 1
+    status_code, status_body = call(
+        app,
+        "POST",
+        f"/api/bots/{bot['id']}/chats/{chat['id']}/messages",
+        {"content": "what are you doing?"},
+        timeout=20,
+    )
+    _status, during = call(app, "GET", f"/api/bots/{bot['id']}/chats/{chat['id']}?window=80", timeout=5)
+    try:
+        during_run = (json.loads(during).get("run") or {})
+    except json.JSONDecodeError:
+        during_run = {}
+    if status_code != 200 or "Still on this job" not in status_body or during_run.get("id") != run_id:
+        HOLD.set()
+        worker.join(timeout=20)
+        print(f"FAIL: status during the turn HTTP {status_code}: {status_body[:500]}")
+        print("run during question:", during_run.get("id"), "expected", run_id)
+        return 1
+    print("status during turn: Still on this job, same run", flush=True)
+    HOLD.set()
+    worker.join(timeout=60)
+    if "result" not in box:
+        print("FAIL: the first turn did not finish")
+        return 1
+    status, body = box["result"]
     print(f"messages HTTP {status}", flush=True)
     events = []
     for line in body.splitlines():

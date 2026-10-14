@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { moodForBadge, moodForReaction } from "./mood";
-import { contextNote, describeRun, faceStateFor, runTone } from "./run";
+import { contextNote, describeRun, faceStateFor, runTone, workingLine } from "./run";
 
 describe("run tone", () => {
   it("names waiting, reconnecting, tools, and a halt", () => {
@@ -33,6 +33,17 @@ describe("run tone", () => {
     expect(moodForReaction("👍")).toBe("glad");
     expect(moodForReaction("❤️")).toBe("glad");
     expect(moodForReaction("👎")).toBe("sad");
+  });
+
+  it("names the step, the elapsed time, and a queued message", () => {
+    const now = Date.parse("2026-10-08T12:01:05Z");
+    const view = workingLine(
+      { step_index: 2, step_count: 5, started_at: "2026-10-08T12:00:00Z", current_step: "Reading notes", queued: 1, stuck: true },
+      now,
+    );
+    expect(view.text).toBe("Step 2 of 5 · 1m 5s · Reading notes");
+    expect(view.queued).toBe(true);
+    expect(view.stuck).toBe(true);
   });
 
   it("describes an empty chat budget in plain words", () => {

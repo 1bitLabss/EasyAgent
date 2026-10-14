@@ -1,0 +1,24 @@
+{
+  "id": "plan-checklist",
+  "category": "plan",
+  "prompt": "Make a checklist for writing the notes, then tell me which step you are on. Do not run a command.",
+  "mock": [
+    "```plan\nNotes\n- Read the folder\n- Write the summary\n```",
+    "The checklist is saved. Step 1 is Read the folder."
+  ],
+  "criteria": [
+    {
+      "kind": "tool_called",
+      "tool": "plan",
+      "success": true
+    },
+    {
+      "kind": "reply_regex",
+      "pattern": "Read the folder"
+    },
+    {
+      "kind": "max_steps",
+      "limit": 4
+    }
+  ]
+}

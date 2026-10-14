@@ -74,6 +74,18 @@ function BotTile({ bot }: { bot: Bot }) {
           <Face color={bot.face_color} state={state} botId={bot.id} tile />
         </span>
         {count > 0 ? <span className="absolute right-1.5 top-1.5 h-2 w-2 rounded-full bg-foreground" /> : null}
+        {(() => {
+          const run = flight?.live?.run || (selected ? chat.data?.run : undefined);
+          if (run?.status !== "running") return null;
+          const index = run.step_index || 0;
+          const countSteps = run.step_count || 0;
+          const label = countSteps ? `${index || "–"}/${countSteps}` : "Working";
+          return (
+            <span data-testid="working-pill" className="absolute bottom-0.5 left-1/2 -translate-x-1/2 rounded-full bg-foreground px-1 text-[9px] leading-4 text-background">
+              {label}
+            </span>
+          );
+        })()}
       </button>
       {tip
         ? createPortal(

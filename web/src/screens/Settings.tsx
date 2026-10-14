@@ -500,6 +500,8 @@ export function SettingsScreen() {
       model: String(form.get("model") || "") || null,
       context_tokens: context,
       check_enabled: form.get("check_enabled") === "on",
+      busy_input: String(form.get("busy_input") || "steer"),
+      auto_resume: form.get("auto_resume") === "on",
     };
     if (face) body.face_color = face;
     const saved = await api<Bot>(`/api/bots/${botId}`, { method: "PATCH", json: body });
@@ -650,6 +652,16 @@ export function SettingsScreen() {
           <label className="flex items-center gap-2 text-sm">
             <input name="check_enabled" type="checkbox" defaultChecked={bot.check_enabled} />
             Check replies before sending
+          </label>
+          <label className="block text-sm">When a message arrives during a job
+            <select name="busy_input" className="mt-1 h-9 w-full rounded-md border border-border bg-card px-2" defaultValue={bot.busy_input || "steer"}>
+              <option value="steer">Steer this job</option>
+              <option value="follow">Wait, then follow up</option>
+            </select>
+          </label>
+          <label className="flex items-center gap-2 text-sm">
+            <input name="auto_resume" type="checkbox" defaultChecked={Boolean(bot.auto_resume)} />
+            Resume a job after EasyAgent restarts
           </label>
           <Note>EasyAgent uses your connected model to review and learn — no extra model needed.</Note>
           <fieldset>

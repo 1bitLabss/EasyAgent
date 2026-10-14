@@ -89,10 +89,11 @@ def test_meter_warns_at_80_and_fills_at_90_without_a_fake_call():
     gap = apply_meter({"context_tokens": 5656}, 8192, 0)
     assert gap["prompt_estimated"] == 1
     # The shell tool's description is longer on Windows, and the checklist tool
-    # is part of the schema, so the estimate moves. About 3% of this recorded
-    # prompt covers that. Dropping the tool list is still far outside the band.
+    # is part of the schema, so the estimate moves (Linux +151, Windows +224).
+    # About 4% of this recorded prompt covers that. Dropping the tool list
+    # (about 1,870 tokens) is still far outside the band.
     recorded = 7375
-    band = max(1, recorded // 33)
+    band = max(1, recorded // 25)
     assert abs(gap["prompt_tokens"] - recorded) <= band
     refused = apply_meter({"context_tokens": 10, "context_overflow": 1}, 1000, 10)
     assert refused["context_level"] == 0

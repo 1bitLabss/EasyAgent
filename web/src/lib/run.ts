@@ -16,6 +16,8 @@ export function runTone(step: string, status: string): Exclude<FaceName, "idle" 
   if (text.startsWith("Queued:") || text.startsWith("Waiting") || text.startsWith("still waiting")) return "waiting";
   if (
     text.startsWith("Running") ||
+    text.startsWith("Writing ") ||
+    text.startsWith("Reading ") ||
     text === "Looking" ||
     text === "Remembering" ||
     text === "Connecting" ||
@@ -75,6 +77,42 @@ export function workingLine(
   return { text: bits.join(" · "), queued: (run?.queued || 0) > 0, stuck: reconnecting ? false : Boolean(run?.stuck) };
 }
 
+function activityBase(step: string): string {
+  return step
+    .replace(/, \d+m \d+s(?:, .* tokens so far)?$/, "")
+    .replace(/, \d+s(?:, .* tokens so far)?$/, "");
+}
+
+function formatTokens(tokens: number): string {
+  if (tokens >= 1000) return `${(tokens / 1000).toFixed(1)}k tokens`;
+  if (tokens === 1) return "1 token";
+  return `${tokens} tokens`;
+}
+
+/** The line under the transcript while a job is running. It ticks with `now`. */
+export function activityLine(input: {
+  step?: string;
+  jobStartedAt?: string | null;
+  activityStartedAt?: string | null;
+  now: number;
+  tokens?: number;
+}): string {
+  const step = (input.step || "").trim();
+  const key = activityBase(step);
+  const model = !key || key === "Thinking" || key.startsWith("Waiting on model") || key === "Waiting";
+  const tool = /^(Running|Writing|Reading)\b/.test(key);
+  if (!model && !tool) return step || "Working";
+  const started = Date.parse(input.activityStartedAt || input.jobStartedAt || "");
+  const elapsed = formatElapsed((input.now - (Number.isNaN(started) ? input.now : started)) / 1000);
+  if (model) {
+    const tokens = input.tokens || 0;
+    if (!tokens && step.startsWith("Waiting on model,")) return step;
+    const tokenBit = tokens > 0 ? `, ${formatTokens(tokens)} so far` : "";
+    return `Waiting on model, ${elapsed}${tokenBit}`;
+  }
+  return `${key}, ${elapsed}`;
+}
+
 export function describeRun(
   step: string,
   status: string,
@@ -88,7 +126,16 @@ export function describeRun(
   const server = Date.parse(lastActivityAt || "");
   const last = Math.max(heardAt || 0, Number.isNaN(server) ? 0 : server);
   let words = step || "Thinking";
-  if (status === "running" && last && !words.startsWith("Queued:") && !words.startsWith("Model not answering")) {
+  if (
+    status === "running" &&
+    last &&
+    !words.startsWith("Queued:") &&
+    !words.startsWith("Model not answering") &&
+    !words.startsWith("Waiting on model") &&
+    !words.startsWith("Writing ") &&
+    !words.startsWith("Reading ") &&
+    !words.startsWith("Running")
+  ) {
     const quiet = Math.floor((now - last) / 1000);
     if (quiet >= 60) words = `still waiting on the model (${quiet}s)`;
   }

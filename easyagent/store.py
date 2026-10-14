@@ -414,6 +414,15 @@ def atomic_write_json(path: Path, data) -> None:
     atomic_write_text(path, json.dumps(data, indent=2, ensure_ascii=False) + "\n")
 
 
+def _busy_transcript_row(item: dict) -> bool:
+    """A message stored while a job was running. A stale live save must not drop it."""
+    if not isinstance(item, dict):
+        return False
+    if item.get("chip") in {"queued", "seen", "answered", "refused"}:
+        return True
+    return item.get("kind") in {"status", "pickup"}
+
+
 def read_json(path: Path):
     """Read a JSON file. A Windows lock is retried, the same way a replace is."""
     for attempt in range(_REPLACE_TRIES):
@@ -1173,8 +1182,24 @@ class Store:
         incoming_ids = {item.get("id") for item in incoming if isinstance(item, dict) and item.get("id")}
         missing = [item for item in disk if isinstance(item, dict) and item.get("id") and item.get("id") not in incoming_ids]
         added = [item for item in incoming if isinstance(item, dict) and item.get("id") and item.get("id") not in disk_ids]
-        # A live chat save can hold a stale list while a routine appends. Keep both.
-        if missing and added:
+        # A live chat save can hold a stale list while a busy message or a routine appends.
+        if missing and all(_busy_transcript_row(item) for item in missing):
+            by_id = {item.get("id"): item for item in incoming if isinstance(item, dict) and item.get("id")}
+            merged = []
+            for item in disk:
+                mid = item.get("id") if isinstance(item, dict) else None
+                if mid and mid in by_id and not _busy_transcript_row(item):
+                    merged.append(by_id[mid])
+                else:
+                    merged.append(item)
+            have = {item.get("id") for item in merged if isinstance(item, dict)}
+            for item in incoming:
+                mid = item.get("id") if isinstance(item, dict) else None
+                if mid and mid not in have:
+                    merged.append(item)
+                    have.add(mid)
+            chat["messages"] = merged
+        elif missing and added:
             merged = list(disk)
             have = set(disk_ids)
             for item in incoming:

@@ -8,12 +8,13 @@ import { Markdown } from "@/components/Markdown";
 import { ThinkingBox } from "@/components/ThinkingBox";
 import { WindowControls } from "@/components/WindowControls";
 import { moodForReaction, pokeFace } from "@/lib/mood";
-import { describeRun, faceStateFor, runTone, workingLine } from "@/lib/run";
+import { chipText } from "@/lib/chips";
+import { activityLine, describeRun, faceStateFor, runTone, workingLine } from "@/lib/run";
 import { hideWhileSending, messageHasBubble, reactionWho } from "@/lib/transcript";
 import { cn } from "@/lib/utils";
 import { keepLoadedHistory, mergeChat, sameMessage, shareChat, type MessagePage } from "@/lib/window";
 import { useApp } from "@/store";
-import { canResume, chatStillPolling, flightFor, retryMessage, sendMessage, settleIncoming, stopMessage } from "@/stream";
+import { canResume, chatStillPolling, flightFor, retryMessage, sendMessage, sendNow, settleIncoming, stopAndSendStored, stopMessage } from "@/stream";
 import type { Bot, Chat, ChatMessage } from "@/types";
 
 const REACTIONS = ["👍", "👎", "❤️", "👀"];
@@ -105,7 +106,15 @@ const MessageRow = memo(function MessageRow({
   const chatId = useApp((state) => state.chatId);
   const setScreen = useApp((state) => state.setScreen);
   if (hideWhileSending(message, sending)) return null;
+  if (message.kind === "status" || message.kind === "pickup") {
+    return (
+      <li className="message-row" data-kind={message.kind}>
+        <p className="sys-line" data-testid={message.kind === "pickup" ? "pickup-marker" : "status-note"}>{message.content}</p>
+      </li>
+    );
+  }
   const failed = Boolean(message.error);
+  const chip = chipText(message);
   const mine = message.role === "user";
   const showBubble = messageHasBubble(message);
   const choices = last && message.role === "assistant" && !failed && (message.choices || []).length > 1 ? message.choices || [] : [];
@@ -128,6 +137,13 @@ const MessageRow = memo(function MessageRow({
         <div className={mine ? "whitespace-pre-wrap" : ""}>
           {mine ? (message.content || "") : <Markdown text={message.content || ""} />}
         </div>
+        {chip ? <p className="mt-2 text-xs" data-testid={`chip-${message.chip}`}>{chip}</p> : null}
+        {message.chip === "refused" && message.id && botId && chatId ? (
+          <div className="mt-2 flex flex-wrap gap-2">
+            <button type="button" className="rounded-full bg-white px-3 py-1 text-sm text-foreground" data-testid="send-now" onClick={() => void sendNow(botId, chatId, message.id || "")}>Send now</button>
+            <button type="button" className="rounded-full bg-white px-3 py-1 text-sm text-foreground" data-testid="stop-and-send-message" onClick={() => void stopAndSendStored(botId, chatId, message.id || "")}>Stop and send</button>
+          </div>
+        ) : null}
         {message.skills_saved?.length ? <p className="mt-2 text-xs opacity-70">Saved skill {message.skills_saved.join(", ")}</p> : null}
         {botId && chatId ? <AttachmentView message={message} botId={botId} chatId={chatId} /> : null}
         {choices.length ? (
@@ -455,6 +471,13 @@ export function ChatPane() {
   const rows = open?.messages || [];
   const steps = (live?.steps || []).filter((item) => item && item !== "Thinking" && item !== view?.words);
   const pill = workingLine(live?.run || open?.run, now);
+  const activity = activityLine({
+    step: live?.label || open?.run?.current_step || "",
+    jobStartedAt: live?.run?.started_at || open?.run?.started_at,
+    activityStartedAt: live?.waitAt ? new Date(live.waitAt).toISOString() : (live?.run?.activity_started_at || open?.run?.activity_started_at),
+    now,
+    tokens: Math.floor((live?.chars || 0) / 4),
+  });
   const checklist = (open?.plan?.steps || []).filter((step) => step && step.text);
 
   chooseRef.current = (choice) => {
@@ -595,12 +618,10 @@ export function ChatPane() {
                 <div className="sys-line" role="status" data-testid="chat-working-pill">
                   <p>
                     <span className={cn("h-1.5 w-1.5 rounded-full", tone === "halted" ? "bg-danger" : "bg-current")} />
-                    {pill.text || view.words}
-                    {!pill.text && view.elapsed ? <span>{view.elapsed}</span> : null}
+                    <span data-testid="activity-line">{activity || pill.text || view.words}</span>
                     {pill.stuck ? <span>No activity for a while</span> : null}
                     {pill.queued ? <span data-testid="queued-badge">Queued</span> : null}
                   </p>
-                  {live?.aside ? <p>{live.aside}</p> : null}
                 </div>
               ) : null}
               {live && (live.phase === "stopped" || live.phase === "error") ? (
@@ -634,18 +655,19 @@ export function ChatPane() {
               </button>
             ) : null}
           </div>
+          {running ? <p className="mb-1 text-center text-xs text-muted">Add to the current job</p> : null}
           <div className="composer">
             <button type="button" className="mb-1 flex h-8 w-8 items-center justify-center rounded-full text-foreground" aria-label="Attach" onClick={() => fileRef.current?.click()}>
               <Plus className="h-5 w-5" />
             </button>
             <input ref={fileRef} className="hidden" type="file" onChange={(event) => setFileName(event.target.files?.[0]?.name || "")} />
-            <label className="sr-only" htmlFor="draft">Message</label>
+            <label className="sr-only" htmlFor="draft">{running ? "Add to the current job" : "Message"}</label>
             <textarea
               id="draft"
               ref={box}
               rows={1}
               value={draft}
-              placeholder={listening ? "Listening" : asking && asking.length > 1 ? "Or type an answer" : "Message"}
+              placeholder={listening ? "Listening" : running ? "Add to the current job" : asking && asking.length > 1 ? "Or type an answer" : "Message"}
               onChange={(event) => {
                 setDraft(event.target.value);
                 event.target.style.height = "auto";
@@ -661,6 +683,26 @@ export function ChatPane() {
             <button type="button" className={cn("mb-1 flex h-8 w-8 items-center justify-center rounded-full text-muted", listening && "text-foreground")} aria-label="Microphone" onClick={listen}>
               <Mic className="h-4 w-4" />
             </button>
+            {running ? (
+              <button
+                type="button"
+                className="mb-1 rounded-full px-3 text-sm"
+                data-testid="stop-and-send"
+                disabled={!draft.trim() && !fileName}
+                onClick={() => {
+                  if (!botId || !chatId) return;
+                  const text = draft.trim();
+                  const file = fileRef.current?.files?.[0] || null;
+                  if (!text && !file) return;
+                  setDraft("");
+                  setFileName("");
+                  if (fileRef.current) fileRef.current.value = "";
+                  void stopMessage(botId, chatId).then(() => sendMessage(botId, chatId, text, file));
+                }}
+              >
+                Stop and send
+              </button>
+            ) : null}
             <button type="submit" className="send-btn" aria-label="Send" disabled={!draft.trim() && !fileName}>
               <ArrowUp className="h-4 w-4" />
             </button>

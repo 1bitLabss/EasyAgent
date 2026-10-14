@@ -1519,6 +1519,56 @@ def create_app(data_dir: str | Path | None = None) -> FastAPI:
                 await asyncio.wait_for(asyncio.shield(worker), timeout=8)
         return _public_chat(store, store.get_chat(bot_id, chat_id))
 
+    @app.post("/api/bots/{bot_id}/chats/{chat_id}/messages/{message_id}/send-now")
+    async def send_message_now(bot_id: str, chat_id: str, message_id: str):
+        """Put one refused message onto the running job. The job is not restarted."""
+        store.get_chat(bot_id, chat_id)
+        from easyagent.plan import PlanError, force_enqueue
+
+        try:
+            force_enqueue(store, bot_id, chat_id, message_id)
+        except PlanError as exc:
+            raise HTTPException(400, str(exc)) from exc
+        return _public_chat(store, store.get_chat(bot_id, chat_id))
+
+    @app.post("/api/bots/{bot_id}/chats/{chat_id}/messages/{message_id}/stop-and-send")
+    async def stop_and_send_message(bot_id: str, chat_id: str, message_id: str, request: Request):
+        """Stop the job and answer this stored message. The line is not copied."""
+        store.get_chat(bot_id, chat_id)
+        _require_endpoint(store, bot_id)
+        worker = turn_mod.current_worker(store, chat_id)
+        turn_mod.interrupt(store, chat_id, "you pressed Stop")
+        from easyagent.plan import PlanError, drop_queue, release_for_send
+
+        drop_queue(store, bot_id, chat_id)
+        if worker is not None and not worker.done():
+            with suppress(asyncio.TimeoutError):
+                await asyncio.wait_for(asyncio.shield(worker), timeout=8)
+        if worker is not None and not worker.done():
+            raise HTTPException(409, "This job is still running. Stop is what cancels it.")
+        turn_mod.clear_busy(store, chat_id)
+        if not turn_mod.try_begin(store, chat_id):
+            raise HTTPException(409, "This job is still running. Stop is what cancels it.")
+        try:
+            release_for_send(store, bot_id, chat_id, message_id)
+        except PlanError as exc:
+            turn_mod.clear_busy(store, chat_id)
+            raise HTTPException(400, str(exc)) from exc
+        if _wants_stream(request):
+            return StreamingResponse(
+                _stream_reply_only(store, bot_id, chat_id),
+                media_type="text/event-stream",
+                headers={"Cache-Control": "no-store", "X-Accel-Buffering": "no"},
+            )
+        try:
+            async with chat_lock(store, chat_id):
+                turn_mod.bind(store, chat_id, bot_id=bot_id)
+                result = await _reply_json(store, bot_id, chat_id)
+                followed = await _drain_queued_json(store, bot_id, chat_id)
+                return followed or result
+        finally:
+            turn_mod.clear_busy(store, chat_id)
+
     @app.post("/api/bots/{bot_id}/chats/{chat_id}/resume")
     async def resume_chat(bot_id: str, chat_id: str, request: Request):
         """Start the same checklist again. Approvals from the stopped run are not restored."""
@@ -2555,6 +2605,8 @@ def _save_user_turn(
     message_id: str | None = None,
 ) -> dict:
     chat = store.get_chat(bot_id, chat_id)
+    if message_id and any(isinstance(item, dict) and item.get("id") == message_id for item in chat.get("messages") or []):
+        return next(item for item in chat["messages"] if item.get("id") == message_id)
     message = {"id": message_id or new_id(), "role": "user", "content": content, "created_at": now_iso()}
     if attachment:
         message["attachment"] = _public_attachment(attachment)
@@ -3325,6 +3377,8 @@ def public_run(chat: dict, store: Store | None = None) -> dict:
         "current_step": raw.get("current_step") or "",
         "reason": raw.get("reason") or "",
     }
+    if raw.get("activity_started_at"):
+        payload["activity_started_at"] = raw["activity_started_at"]
     if store is not None:
         from easyagent.plan import run_fields
 
@@ -3365,11 +3419,15 @@ def _apply_run(
         run["reason"] = ""
     run["status"] = status
     if step is not None:
+        from easyagent.plan import activity_key
+
+        if activity_key(str(run.get("current_step") or "")) != activity_key(step):
+            run["activity_started_at"] = now
         run["current_step"] = step
     if reason is not None:
         run["reason"] = reason
     run["last_activity_at"] = now
-    chat["run"] = {
+    stored = {
         "id": run.get("id") or "",
         "status": run.get("status") or "idle",
         "started_at": run.get("started_at"),
@@ -3377,6 +3435,9 @@ def _apply_run(
         "current_step": run.get("current_step") or "",
         "reason": run.get("reason") or "",
     }
+    if run.get("activity_started_at"):
+        stored["activity_started_at"] = run["activity_started_at"]
+    chat["run"] = stored
     return chat["run"]
 
 
@@ -3405,7 +3466,9 @@ def _write_live(
     """Persist the running step. A locked chat file does not stop the reply."""
     if not _due_live(store, chat_id, force=force or start):
         return None
-    try:
+    lock = getattr(store, "_lock", None)
+
+    def once() -> dict | None:
         chat = store.get_chat(bot_id, chat_id)
         run = _apply_run(chat, status=status, step=step, reason=reason, start=start)
         if thinking and thinking.strip():
@@ -3418,6 +3481,21 @@ def _write_live(
             chat["updated_at"] = now_iso()
         store.save_chat(chat)
         return public_run(chat, store)
+
+    try:
+        if lock is not None:
+            with lock:
+                return once()
+        return once()
+    except StoreError:
+        try:
+            if lock is not None:
+                with lock:
+                    return once()
+            return once()
+        except (StoreError, OSError) as exc:
+            _log.warning("Live chat save skipped: %s", exc)
+            return None
     except OSError as exc:
         _log.warning("Live chat save skipped: %s", exc)
         print(
@@ -3585,8 +3663,8 @@ async def _answer_while_busy(store: Store, bot_id: str, chat_id: str, content: s
     run_id = run.get("id") or ""
 
     async def gen():
-        message = outcome.get("message")
-        if message:
+        message = outcome.get("message") or {}
+        if message.get("id"):
             yield _raw_sse({
                 "type": "user",
                 "message": {
@@ -3594,8 +3672,19 @@ async def _answer_while_busy(store: Store, bot_id: str, chat_id: str, content: s
                     "role": "user",
                     "content": content,
                     "created_at": message.get("at"),
-                    "queued": True,
+                    "queued": message.get("chip") == "queued",
+                    "chip": message.get("chip") or "",
+                    "refuse_reason": message.get("refuse_reason") or "",
                 },
+                "run_id": run_id,
+                "bot_id": bot_id,
+                "chat_id": chat_id,
+            })
+        note = outcome.get("note") if isinstance(outcome.get("note"), dict) else None
+        if note:
+            yield _raw_sse({
+                "type": "note",
+                "message": note,
                 "run_id": run_id,
                 "bot_id": bot_id,
                 "chat_id": chat_id,
@@ -3631,14 +3720,17 @@ async def _continue_queued(store: Store, bot_id: str, chat_id: str):
             item = pop_item(store, bot_id, chat_id)
             if not item:
                 return
-            _save_user_turn(
-                store,
-                bot_id,
-                chat_id,
-                item.get("content") or "",
-                item.get("attachment"),
-                message_id=item.get("id"),
-            )
+            from easyagent.plan import claim_stored
+
+            if not claim_stored(store, bot_id, chat_id, item):
+                _save_user_turn(
+                    store,
+                    bot_id,
+                    chat_id,
+                    item.get("content") or "",
+                    item.get("attachment"),
+                    message_id=item.get("id"),
+                )
         elif not steer_into(store, bot_id, chat_id, None):
             return
         async for chunk in _stream_reply(store, bot_id, chat_id, continue_run=True, drain=False, emit_done=False):
@@ -3660,14 +3752,17 @@ async def _drain_queued_json(store: Store, bot_id: str, chat_id: str) -> dict | 
             item = pop_item(store, bot_id, chat_id)
             if not item:
                 break
-            _save_user_turn(
-                store,
-                bot_id,
-                chat_id,
-                item.get("content") or "",
-                item.get("attachment"),
-                message_id=item.get("id"),
-            )
+            from easyagent.plan import claim_stored
+
+            if not claim_stored(store, bot_id, chat_id, item):
+                _save_user_turn(
+                    store,
+                    bot_id,
+                    chat_id,
+                    item.get("content") or "",
+                    item.get("attachment"),
+                    message_id=item.get("id"),
+                )
         elif not steer_into(store, bot_id, chat_id, None):
             break
         last = await _reply_json(store, bot_id, chat_id, continue_run=True)
@@ -3832,7 +3927,7 @@ def _settle_interrupted(store: Store, bot_id: str, chat_id: str, reason: str = "
         message.pop("live", None)
         message.pop("error", None)
         changed = True
-    if messages[-1].get("role") == "user":
+    if messages[-1].get("role") == "user" or messages[-1].get("kind") in {"status", "pickup"}:
         messages.append(
             {
                 "id": new_id(),
@@ -3843,6 +3938,13 @@ def _settle_interrupted(store: Store, bot_id: str, chat_id: str, reason: str = "
         )
         changed = True
     if not changed:
+        if (chat.get("run") or {}).get("status") == "running":
+            _apply_run(chat, status="stopped", reason=reason, step="")
+            chat["updated_at"] = now_iso()
+            try:
+                _save_chat_final(store, chat)
+            except HTTPException:
+                _log.warning("Could not record that the run stopped.")
         return
     _apply_run(chat, status="stopped", reason=reason, step="")
     chat["updated_at"] = now_iso()
@@ -3880,6 +3982,7 @@ def _append_error(store: Store, bot_id: str, chat_id: str, detail: str) -> dict:
             stats = _persist_context(store, chat)
             chat["updated_at"] = now_iso()
             _apply_run(chat, status="error", reason=shown, step="")
+            _settle_chips(chat)
             _save_chat_final(store, chat)
             poke(store, "message")
             public = _public_chat(store, chat)
@@ -3899,6 +4002,7 @@ def _append_error(store: Store, bot_id: str, chat_id: str, detail: str) -> dict:
     stats = _persist_context(store, chat)
     chat["updated_at"] = now_iso()
     _apply_run(chat, status="error", reason=shown, step="")
+    _settle_chips(chat)
     _save_chat_final(store, chat)
     poke(store, "message")
     if len(chat.get("messages") or []) < before:
@@ -4160,6 +4264,12 @@ def _preview_attachment(store: Store, bot_id: str, chat_id: str, made: str, visi
     return _public_attachment({**meta, "excerpt": excerpt, "path": str(resolved)})
 
 
+def _settle_chips(chat: dict) -> None:
+    from easyagent.plan import mark_answered
+
+    mark_answered(chat)
+
+
 def _finish_reply(
     store: Store,
     bot_id: str,
@@ -4219,6 +4329,7 @@ def _finish_reply(
                 messages.pop()
         _apply_run(chat, status="idle")
         _record_turn_meter(chat, clear_overflow=True)
+        _settle_chips(chat)
         store.save_chat(chat)
         public = _public_chat(store, chat)
         return {"reply": "", "skills_saved": saved, "chat": public, "context": public["context"]}
@@ -4319,6 +4430,7 @@ def _finish_reply(
         _apply_run(chat, status="error", reason=message.get("content") or "", step="")
     else:
         _apply_run(chat, status="idle")
+    _settle_chips(chat)
     _save_chat_final(store, chat)
     poke(store, "message")
     public = _public_chat(store, chat)
@@ -4399,6 +4511,8 @@ async def _stream_reply(
         thought_saved = False
         thought_started: float | None = None
         thought_seconds = 0
+        model_mark: float | None = None
+        model_chars = 0
 
         def note_thought() -> None:
             nonlocal thought_started
@@ -4409,6 +4523,16 @@ async def _stream_reply(
             nonlocal thought_seconds
             if thought_started is not None and thought_seconds <= 0:
                 thought_seconds = max(1, int(round(time.monotonic() - thought_started)))
+
+        def model_line(extra: str) -> str:
+            nonlocal model_mark, model_chars
+            from easyagent.plan import waiting_activity
+
+            if model_mark is None:
+                model_mark = time.monotonic()
+                model_chars = 0
+            model_chars += len(extra or "")
+            return waiting_activity(time.monotonic() - model_mark, model_chars)
 
         async for kind, text in stream_with_tools(
             base_url=endpoint["base_url"],
@@ -4421,11 +4545,20 @@ async def _stream_reply(
         ):
             if kind == "stage":
                 freeze_thought()
-                _save_live_reply(store, bot_id, chat_id, text)
                 extra = text[len(sent):] if sent and text.startswith(sent) else text
                 sent = text
+                saved_run = _write_live(
+                    store,
+                    bot_id,
+                    chat_id,
+                    reply=text,
+                    step=model_line(extra),
+                    force=True,
+                )
                 if extra:
                     yield _sse({"type": "delta", "text": extra})
+                if saved_run:
+                    yield _sse({"type": "run", "run": saved_run})
                 continue
             if kind == "thinking":
                 if text:
@@ -4436,7 +4569,7 @@ async def _stream_reply(
                         bot_id,
                         chat_id,
                         thinking=thought,
-                        step="Thinking",
+                        step=model_line(text),
                         force=not thought_saved,
                     )
                     thought_saved = True
@@ -4445,6 +4578,9 @@ async def _stream_reply(
                         yield _sse({"type": "run", "run": saved_run})
                 continue
             if kind == "status":
+                if text not in {"Thinking", "Waiting on model"} and not str(text).startswith("Waiting on model"):
+                    model_mark = None
+                    model_chars = 0
                 saved_run = _write_live(store, bot_id, chat_id, step=text, force=True)
                 yield _sse({"type": "status", "text": text})
                 if saved_run:
@@ -4656,6 +4792,17 @@ async def _stream_new_message(store: Store, bot_id: str, chat_id: str, content: 
         message = _save_user_turn(store, bot_id, chat_id, content, attachment)
         # The user line goes out before the word scan. The scan runs inside the reply.
         yield _sse({"type": "user", "message": message})
+        async for chunk in _stream_reply(store, bot_id, chat_id):
+            yield chunk
+
+    async for chunk in _emit_run(store, bot_id, chat_id, produce):
+        yield chunk
+
+
+async def _stream_reply_only(store: Store, bot_id: str, chat_id: str):
+    """Answer the transcript as it is. Used when the user line is already stored."""
+
+    async def produce():
         async for chunk in _stream_reply(store, bot_id, chat_id):
             yield chunk
 

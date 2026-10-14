@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { approvalPollMs, keepLoadedHistory, mergeChat, shareChat, shareMessages, visibleRange, windowChat } from "./window";
+import { approvalPollMs, keepLoadedHistory, mergeChat, retainLocalTail, shareChat, shareMessages, visibleRange, windowChat } from "./window";
 import type { Chat, ChatMessage } from "@/types";
 
 function message(id: string, content: string): ChatMessage {
@@ -72,6 +72,27 @@ describe("mergeChat", () => {
     expect(merged.messages.map((item) => item.id)).toEqual(["old", "tail", "new"]);
     expect(merged.window_start).toBe(40);
     expect(merged.message_count).toBe(43);
+  });
+});
+
+describe("retainLocalTail", () => {
+  it("keeps a just-sent message when a poll snapshot does not have it yet", () => {
+    const prev = [message("a", "Hello"), { role: "user", content: "what are you doing?", chip: "queued" }];
+    const polled = [message("a", "Hello")];
+    const kept = retainLocalTail(prev, polled);
+    expect(kept.map((item) => item.content)).toEqual(["Hello", "what are you doing?"]);
+    const fresh = [message("a", "Hello"), { id: "b", role: "user", content: "what are you doing?", chip: "queued" }];
+    expect(retainLocalTail(prev, fresh).map((item) => item.id || item.content)).toEqual(["a", "b"]);
+    const run = { id: "r", status: "running" as const, started_at: null, last_activity_at: null, current_step: "Thinking", reason: "" };
+    const shared = shareChat(chat(prev, { run }), chat(polled, { run })) as Chat;
+    expect(shared.messages.map((item) => item.content)).toEqual(["Hello", "what are you doing?"]);
+  });
+
+  it("replaces a row when its chip changes", () => {
+    const first = [{ id: "u", role: "user", content: "hi", chip: "queued" }];
+    const seen = [{ id: "u", role: "user", content: "hi", chip: "seen", seen_step: 2 }];
+    expect(shareMessages(first, seen)[0]).toBe(seen[0]);
+    expect(shareMessages(first, seen)[0]?.chip).toBe("seen");
   });
 });
 

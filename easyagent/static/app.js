@@ -1086,6 +1086,45 @@ function stopRunWatch() {
   }
 }
 
+function keepPendingMessages(prev, incoming) {
+  const older = (prev && prev.messages) || [];
+  const next = (incoming && incoming.messages) || [];
+  const ids = new Set(next.filter((item) => item && item.id).map((item) => item.id));
+  let split = older.length;
+  for (let index = older.length - 1; index >= 0; index -= 1) {
+    if (older[index] && older[index].id && ids.has(older[index].id)) {
+      split = index + 1;
+      break;
+    }
+    if (index === 0) split = 0;
+  }
+  const tail = older.slice(split).filter((item) => {
+    if (!item || (item.id && ids.has(item.id))) return false;
+    if (!item.id && item.role === "user") {
+      return !next.some((row) => row && row.role === "user" && row.content === item.content && row.id && !older.some((old) => old && old.id === row.id));
+    }
+    return Boolean(item.id);
+  });
+  if (!tail.length || !incoming) return incoming;
+  return Object.assign({}, incoming, {
+    messages: next.concat(tail),
+    message_count: Math.max(incoming.message_count || next.length, next.length + tail.length),
+  });
+}
+
+function chipLabel(message) {
+  if (!message || !message.chip) return "";
+  if (message.chip === "queued") return "Queued";
+  if (message.chip === "seen") {
+    return message.seen_step ? `Seen by bot (folded in at step ${message.seen_step})` : "Seen by bot";
+  }
+  if (message.chip === "answered") return "Answered";
+  if (message.chip === "refused") {
+    return message.refuse_reason || "The queue is full, so that message was not added. The job was not restarted.";
+  }
+  return "";
+}
+
 function paintRun(run) {
   const view = describeRun(run, Date.now());
   const step = $("run-step");
@@ -1131,7 +1170,7 @@ function startRunWatch() {
       try {
         const chat = await api(`/api/bots/${botId}/chats/${chatId}`);
         if (state.botId !== botId || state.chatId !== chatId || state.sending) return;
-        state.chat = chat;
+        state.chat = keepPendingMessages(state.chat, chat);
         if (!chat.run || chat.run.status !== "running") {
           const stream = streamFor(botId, chatId);
           if (!stream || !stream.sending) state.live = null;
@@ -1384,6 +1423,8 @@ function syncStop() {
   const local = Boolean(stream && stream.control && stream.sending);
   const remote = Boolean(run && run.status === "running");
   stop.hidden = !(local || remote);
+  const hurry = $("stop-and-send");
+  if (hurry) hurry.hidden = stop.hidden;
 }
 
 function renderThread() {
@@ -1409,6 +1450,12 @@ function renderThread() {
   }
   const transcript = chat.messages || [];
   transcript.forEach((message, index) => {
+    if (message.kind === "status" || message.kind === "pickup") {
+      messages.append(el("li", { class: "message system" }, [
+        el("p", { class: "sys-line", "data-testid": message.kind === "pickup" ? "pickup-marker" : "status-note" }, [message.content || ""]),
+      ]));
+      return;
+    }
     const skills = message.skills_saved || [];
     const body = proseNode(message.content || "", { class: "body" });
     const failed = Boolean(message.error);
@@ -1425,6 +1472,14 @@ function renderThread() {
     const open = index === transcript.length - 1 && message.role === "assistant" && !failed
       && Array.isArray(message.choices) && message.choices.length > 1;
     if (open) main.append(choiceRow(message.choices));
+    const chip = chipLabel(message);
+    if (chip) main.append(el("p", { class: "chip", "data-testid": `chip-${message.chip}` }, [chip]));
+    if (message.chip === "refused" && message.id) {
+      main.append(el("div", {}, [
+        el("button", { type: "button", "data-testid": "send-now", onclick: () => void sendRefusedNow(message.id) }, ["Send now"]),
+        el("button", { type: "button", "data-testid": "stop-and-send-message", onclick: () => void stopAndSendStored(message.id) }, ["Stop and send"]),
+      ]));
+    }
     if (message.kind === "connection") {
       main.append(el("button", {
         type: "button",
@@ -1461,7 +1516,10 @@ function renderThread() {
   startRunWatch();
   const lastMessage = transcript[transcript.length - 1];
   const asking = lastMessage && lastMessage.role === "assistant" && Array.isArray(lastMessage.choices) && lastMessage.choices.length > 1;
-  $("draft").placeholder = asking
+  const runningNow = Boolean(currentRun() && currentRun().status === "running");
+  $("draft").placeholder = runningNow
+    ? "Add to the current job"
+    : asking
     ? "Or type an answer. Enter to send."
     : `Message ${currentBot() ? currentBot().name : ""}. Enter to send. Shift+Enter for a new line.`;
   const scroller = $("thread-scroll");
@@ -1795,10 +1853,11 @@ function showOutgoing(text, stream) {
     },
   };
   if (!isVisible(stream)) return;
+  const queued = Boolean(stream.sending);
   if (!state.chat || (state.chat.bot_id && state.chat.bot_id !== stream.botId)) {
     state.chat = { id: stream.chatId, bot_id: stream.botId, title: "New chat", messages: [], summary: "" };
   }
-  state.chat.messages = [...(state.chat.messages || []), { role: "user", content: text }];
+  state.chat.messages = [...(state.chat.messages || []), queued ? { role: "user", content: text, chip: "queued" } : { role: "user", content: text }];
   state.live = stream.live;
   renderStage();
   scrollThread();
@@ -1854,6 +1913,32 @@ function applyStreamEvent(event, stream) {
     }
     renderStage();
     scrollThread();
+    return;
+  }
+  if (event.type === "user" && event.message) {
+    if (isVisible(stream) && state.chat) {
+      const message = event.message;
+      const rows = state.chat.messages || [];
+      const known = message.id ? rows.findIndex((item) => item && item.id === message.id) : -1;
+      if (known >= 0) rows[known] = Object.assign({}, rows[known], message);
+      else {
+        const pending = rows.findIndex((item) => item && !item.id && item.role === "user" && item.content === message.content);
+        if (pending >= 0) rows[pending] = Object.assign({}, rows[pending], message);
+        else rows.push(message);
+      }
+      state.chat.messages = rows;
+    }
+    paintStream(stream, "thread");
+    return;
+  }
+  if (event.type === "note" && event.message) {
+    if (isVisible(stream) && state.chat) {
+      const message = event.message;
+      const rows = state.chat.messages || [];
+      if (!message.id || !rows.some((item) => item && item.id === message.id)) rows.push(message);
+      state.chat.messages = rows;
+    }
+    paintStream(stream, "thread");
     return;
   }
   if (event.type === "aside") {
@@ -2310,6 +2395,40 @@ async function continueRun(event) {
   if (state.sending || !state.botId || !state.chatId) return;
   $("draft").value = "Continue";
   await sendDraft(event);
+}
+
+async function sendRefusedNow(messageId) {
+  if (!state.botId || !state.chatId || !messageId) return;
+  const chat = await api(`/api/bots/${state.botId}/chats/${state.chatId}/messages/${messageId}/send-now`, { method: "POST" });
+  state.chat = chat;
+  renderThread();
+}
+
+async function stopAndSendStored(messageId) {
+  if (!state.botId || !state.chatId || !messageId) return;
+  const botId = state.botId;
+  const chatId = state.chatId;
+  await stopFlight();
+  if (state.botId !== botId || state.chatId !== chatId) return;
+  const stream = beginFlight(botId, chatId);
+  try {
+    const ended = await streamPost(`/api/bots/${botId}/chats/${chatId}/messages/${messageId}/stop-and-send`, {}, stream);
+    if (stream.replaced) return;
+    await settleOpenStream(ended, stream);
+    renderStage();
+  } catch (error) {
+    if (stream.replaced || error.name === "AbortError") return;
+    formError("thread-error", error.message || "The reply failed.");
+  }
+}
+
+async function stopAndSendDraft(event) {
+  if (event) event.preventDefault();
+  const text = $("draft").value.trim();
+  if (!text || !state.botId || !state.chatId) return;
+  await stopFlight();
+  $("draft").value = text;
+  await sendDraft({ preventDefault() {} });
 }
 
 async function stopFlight(event) {
@@ -3230,6 +3349,7 @@ function wire() {
   $("retry").addEventListener("click", retry);
   $("continue").addEventListener("click", continueRun);
   $("stop").addEventListener("click", stopFlight);
+  if ($("stop-and-send")) $("stop-and-send").addEventListener("click", stopAndSendDraft);
   $("remove-bot").addEventListener("click", confirmRemoveBot);
   $("settings-form").addEventListener("submit", saveSettings);
   if ($("learn-pause")) $("learn-pause").addEventListener("change", () => setLearnFlag("pause", $("learn-pause").checked));

@@ -1,4 +1,5 @@
 import { api, queryClient, streamPost } from "@/api";
+import { activityLine } from "@/lib/run";
 import { mergeChat } from "@/lib/window";
 import { moodForBadge, pokeFace } from "@/lib/mood";
 import { useApp } from "@/store";
@@ -16,6 +17,8 @@ export type Live = {
   thoughtSeconds?: number;
   reasoningLive?: boolean;
   aside?: string;
+  chars?: number;
+  waitAt?: number;
 };
 
 type Flight = {
@@ -128,6 +131,8 @@ function carry(live: Live, patch: Partial<Live>): Live {
     thoughtSeconds: patch.thoughtSeconds === undefined ? live.thoughtSeconds : patch.thoughtSeconds,
     reasoningLive: patch.reasoningLive === undefined ? live.reasoningLive : patch.reasoningLive,
     aside: patch.aside === undefined ? live.aside : patch.aside,
+    chars: patch.chars === undefined ? live.chars : patch.chars,
+    waitAt: patch.waitAt === undefined ? live.waitAt : patch.waitAt,
   };
 }
 
@@ -185,6 +190,14 @@ function apply(event: Record<string, unknown>, flight: Flight) {
     finish(flight, event.chat as Chat | undefined);
     return;
   }
+  if (event.type === "user" && event.message && typeof event.message === "object") {
+    placeMessage(flight, event.message as ChatMessage);
+    return;
+  }
+  if (event.type === "note" && event.message && typeof event.message === "object") {
+    placeMessage(flight, event.message as ChatMessage, { append: true });
+    return;
+  }
   if (event.type === "aside") {
     const run = (event.run as Run | undefined) || live.run;
     remember(flight, carry(live, { aside: String(event.text || ""), run }));
@@ -199,7 +212,15 @@ function apply(event: Record<string, unknown>, flight: Flight) {
     }
     const prev = live.steps || [];
     const steps = prev[prev.length - 1] === label ? prev : [...prev, label].slice(-8);
-    remember(flight, carry(live, { phase: "thinking", label, run, steps }));
+    const modelWait = label === "Thinking" || label.startsWith("Waiting on model");
+    remember(flight, carry(live, {
+      phase: "thinking",
+      label,
+      run,
+      steps,
+      chars: modelWait ? live.chars : 0,
+      waitAt: modelWait ? live.waitAt || Date.now() : Date.now(),
+    }));
     return;
   }
   if (event.type === "replay") {
@@ -221,23 +242,44 @@ function apply(event: Record<string, unknown>, flight: Flight) {
     return;
   }
   if (event.type === "thinking") {
-    const label = !live.label || live.label === "Waiting on model" ? "Thinking" : live.label;
     const chunk = String(event.text || "");
+    const chars = (live.chars || 0) + chunk.length;
+    const waitAt = live.waitAt || Date.now();
+    const label = activityLine({
+      step: "Waiting on model",
+      activityStartedAt: new Date(waitAt).toISOString(),
+      now: Date.now(),
+      tokens: Math.floor(chars / 4),
+    });
     remember(flight, carry(live, {
       phase: live.phase === "reply" ? "reply" : "thinking",
       label,
       reasoning: live.reasoning + chunk,
       reasoningLive: true,
       thoughtAt: live.thoughtAt || Date.now(),
+      chars,
+      waitAt,
     }));
     return;
   }
   if (event.type === "delta") {
+    const chunk = String(event.text || "");
+    const chars = (live.chars || 0) + chunk.length;
+    const waitAt = live.waitAt || Date.now();
+    const label = activityLine({
+      step: "Waiting on model",
+      activityStartedAt: new Date(waitAt).toISOString(),
+      now: Date.now(),
+      tokens: Math.floor(chars / 4),
+    });
     remember(flight, carry(live, {
       phase: "reply",
-      text: live.text + String(event.text || ""),
+      label,
+      text: live.text + chunk,
       reasoningLive: false,
       thoughtSeconds: freezeThought(live),
+      chars,
+      waitAt,
     }));
     return;
   }
@@ -314,8 +356,30 @@ function begin(botId: string, chatId: string) {
   return flight;
 }
 
-export function optimisticUser(botId: string, chatId: string, text: string) {
-  const message: ChatMessage = { role: "user", content: text };
+function placeMessage(flight: Flight, message: ChatMessage, options: { append?: boolean } = {}) {
+  queryClient.setQueryData<Chat>(["chat", flight.botId, flight.chatId], (chat) => {
+    if (!chat) return chat;
+    const messages = [...(chat.messages || [])];
+    const known = message.id ? messages.findIndex((item) => item.id === message.id) : -1;
+    if (known >= 0) {
+      messages[known] = { ...messages[known], ...message };
+    } else if (!options.append) {
+      const pending = messages.findIndex((item) => !item.id && item.role === "user" && item.content === message.content);
+      if (pending >= 0) messages[pending] = { ...messages[pending], ...message };
+      else messages.push(message);
+    } else {
+      messages.push(message);
+    }
+    return {
+      ...chat,
+      messages,
+      message_count: Math.max(chat.message_count ?? messages.length, messages.length),
+    };
+  });
+}
+
+export function optimisticUser(botId: string, chatId: string, text: string, chip?: ChatMessage["chip"]) {
+  const message: ChatMessage = chip ? { role: "user", content: text, chip } : { role: "user", content: text };
   queryClient.setQueryData<Chat>(["chat", botId, chatId], (chat) =>
     chat
       ? {
@@ -330,7 +394,7 @@ export function optimisticUser(botId: string, chatId: string, text: string) {
 export async function sendMessage(botId: string, chatId: string, text: string, file?: File | null) {
   const existing = flightFor(botId, chatId);
   if (existing?.sending && !existing.replaced) {
-    optimisticUser(botId, chatId, text);
+    optimisticUser(botId, chatId, text, "queued");
     try {
       let attachmentId: string | null = null;
       if (file) {
@@ -450,6 +514,42 @@ async function afterStream(flight: Flight, botId: string, chatId: string, ended:
     }
   } catch {
     /* the page can retry */
+  }
+}
+
+export async function sendNow(botId: string, chatId: string, messageId: string) {
+  const chat = await api<Chat>(`/api/bots/${botId}/chats/${chatId}/messages/${messageId}/send-now`, { method: "POST" });
+  const prev = queryClient.getQueryData<Chat>(["chat", botId, chatId]);
+  queryClient.setQueryData(["chat", botId, chatId], mergeChat(prev, chat));
+}
+
+export async function stopAndSendStored(botId: string, chatId: string, messageId: string) {
+  const flight = begin(botId, chatId);
+  try {
+    const response = await streamPost(
+      `/api/bots/${botId}/chats/${chatId}/messages/${messageId}/stop-and-send`,
+      {},
+      flight.control.signal,
+    );
+    const type = response.headers.get("content-type") || "";
+    if (type.includes("application/json")) {
+      const data = (await response.json()) as Chat & { chat?: Chat };
+      finish(flight, data.chat || data);
+      return;
+    }
+    const ended = await readEvents(response, flight);
+    await afterStream(flight, botId, chatId, ended);
+  } catch (error) {
+    if (flight.replaced || (error instanceof DOMException && error.name === "AbortError")) return;
+    remember(flight, {
+      phase: "error",
+      label: "Stopped",
+      text: error instanceof Error ? error.message : "The reply failed.",
+      reasoning: "",
+      reasoningLive: false,
+      run: flight.live?.run || null,
+      heardAt: Date.now(),
+    });
   }
 }
 

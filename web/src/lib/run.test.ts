@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { moodForBadge, moodForReaction } from "./mood";
-import { contextNote, describeRun, faceStateFor, runTone, workingLine } from "./run";
+import { activityLine, contextNote, describeRun, faceStateFor, runTone, workingLine } from "./run";
 
 describe("run tone", () => {
   it("names waiting, reconnecting, tools, and a halt", () => {
@@ -33,6 +33,25 @@ describe("run tone", () => {
     expect(moodForReaction("👍")).toBe("glad");
     expect(moodForReaction("❤️")).toBe("glad");
     expect(moodForReaction("👎")).toBe("sad");
+  });
+
+  it("names a live wait and a running command", () => {
+    const start = Date.parse("2026-10-08T12:00:00Z");
+    const now = start + (3 * 60 + 10) * 1000;
+    expect(activityLine({
+      step: "Waiting on model",
+      activityStartedAt: "2026-10-08T12:00:00Z",
+      now,
+      tokens: 1200,
+    })).toBe("Waiting on model, 3m 10s, 1.2k tokens so far");
+    expect(activityLine({
+      step: "Running npm install",
+      activityStartedAt: "2026-10-08T12:00:00Z",
+      now: start + 42_000,
+    })).toBe("Running npm install, 42s");
+    expect(activityLine({ step: "Writing index.html", activityStartedAt: "2026-10-08T12:00:00Z", now: start })).toBe("Writing index.html, 0s");
+    expect(runTone("Writing index.html", "running")).toBe("tool");
+    expect(runTone("Waiting on model, 3m 10s, 1.2k tokens so far", "running")).toBe("waiting");
   });
 
   it("names the step, the elapsed time, and a queued message", () => {

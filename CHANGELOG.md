@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.3.21
+
+- A message sent while a job is running shows up in the transcript immediately and stays there across a refresh. It is marked Queued, then Seen by bot when the job folds it in, then Answered when the reply finishes. The instant "Still on this job" note sits under that message.
+- A message that does not fit in the queue stays on screen with the reason, and offers Send now and Stop and send. Ten messages can wait. The composer stays open during a job, labelled "Add to the current job", with Stop and send next to Send.
+- While a job is working, the chat shows what it is doing, including the file it is writing, a command and how long it has been running, and how long it has been waiting on the model with the tokens so far. That clock keeps moving while tokens arrive, and the thinking text streams into the thinking box. When the job picks up a message, the transcript says "Picked up your message".
+
 ## 0.3.20
 
 - A chat keeps a checklist. The plan tool only updates that checklist. It does not go through Strict or containment. Steps are checked, secrets are removed, and the checklist is shown to the model as data. The chat shows the steps as they change.

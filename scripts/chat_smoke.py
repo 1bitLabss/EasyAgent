@@ -180,25 +180,37 @@ def main() -> int:
         worker.join(timeout=20)
         print("FAIL: the chat never showed a running turn")
         return 1
-    status_code, status_body = call(
-        app,
-        "POST",
-        f"/api/bots/{bot['id']}/chats/{chat['id']}/messages",
-        {"content": "what are you doing?"},
-        timeout=20,
-    )
+    sent = []
+    for text in ("what are you doing?", "and the second question?"):
+        status_code, status_body = call(
+            app,
+            "POST",
+            f"/api/bots/{bot['id']}/chats/{chat['id']}/messages",
+            {"content": text},
+            timeout=20,
+        )
+        sent.append((text, status_code, status_body))
     _status, during = call(app, "GET", f"/api/bots/{bot['id']}/chats/{chat['id']}?window=80", timeout=5)
     try:
-        during_run = (json.loads(during).get("run") or {})
+        during_doc = json.loads(during)
     except json.JSONDecodeError:
-        during_run = {}
-    if status_code != 200 or "Still on this job" not in status_body or during_run.get("id") != run_id:
+        during_doc = {}
+    during_run = during_doc.get("run") or {}
+    during_messages = during_doc.get("messages") or []
+    notes = [
+        item for item in during_messages
+        if item.get("kind") == "status" and "Still on this job" in str(item.get("content") or "")
+    ]
+    both_present = all(any(item.get("content") == text for item in during_messages) for text, _code, _body in sent)
+    both_ok = all(code == 200 and "Still on this job" in body for _text, code, body in sent)
+    if not both_ok or during_run.get("id") != run_id or not both_present or len(notes) < 2:
         HOLD.set()
         worker.join(timeout=20)
-        print(f"FAIL: status during the turn HTTP {status_code}: {status_body[:500]}")
+        print(f"FAIL: status during the turn: {sent!r}")
         print("run during question:", during_run.get("id"), "expected", run_id)
+        print("messages:", [item.get("content") for item in during_messages])
         return 1
-    print("status during turn: Still on this job, same run", flush=True)
+    print("status during turn: two messages kept, both with a status note, same run", flush=True)
     HOLD.set()
     worker.join(timeout=60)
     if "result" not in box:
@@ -228,12 +240,21 @@ def main() -> int:
         messages = []
     last = messages[-1] if messages else {}
     print("last message:", json.dumps({k: last.get(k) for k in ("role", "content")})[:400], flush=True)
+    folded = []
+    for text, _code, _body in sent:
+        row = next((item for item in messages if item.get("role") == "user" and item.get("content") == text), None)
+        pickup = any(
+            item.get("kind") == "pickup" and item.get("about") == (row or {}).get("id")
+            for item in messages
+        )
+        folded.append(bool(row) and row.get("chip") in {"seen", "answered"} and pickup)
     ok = (
         status == 200
         and not problems
         and "done" in kinds
         and last.get("role") == "assistant"
         and REPLY in str(last.get("content") or "")
+        and all(folded)
     )
     if not ok:
         for p in problems:

@@ -128,21 +128,25 @@ def test_mid_run_question_does_not_restart(tmp_path):
     client.close()
 
 
-def test_queue_cap_refuses_the_fourth_message(tmp_path):
+def test_queue_cap_refuses_the_eleventh_message(tmp_path):
     app, client, bot, chat = _client(tmp_path)
     store = app.state.store
     _checklist(store, bot["id"], chat["id"])
     _running(store, bot["id"], chat["id"])
     url = f"/api/bots/{bot['id']}/chats/{chat['id']}/messages"
-    for text in ("one", "two", "three"):
-        response = client.post(url, json={"content": text})
+    for number in range(10):
+        response = client.post(url, json={"content": f"note {number}"})
         assert response.status_code == 200
         assert response.json()["reply"].startswith("Still on this job.")
-    fourth = client.post(url, json={"content": "four"})
-    assert fourth.status_code == 200
-    assert "queue is full" in fourth.json()["reply"]
-    assert "not restarted" in fourth.json()["reply"]
-    assert store.get_chat(bot["id"], chat["id"])["run"]["id"] == "run-keep"
+    eleventh = client.post(url, json={"content": "eleven"})
+    assert eleventh.status_code == 200
+    assert "queue is full" in eleventh.json()["reply"]
+    assert "not restarted" in eleventh.json()["reply"]
+    stored = store.get_chat(bot["id"], chat["id"])
+    assert stored["run"]["id"] == "run-keep"
+    refused = [item for item in stored["messages"] if item.get("content") == "eleven"]
+    assert refused and refused[0].get("chip") == "refused"
+    assert "queue is full" in refused[0].get("refuse_reason", "")
     assert load_plan(store, bot["id"], chat["id"])["steps"][1]["state"] == "doing"
     client.close()
 

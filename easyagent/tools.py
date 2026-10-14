@@ -987,6 +987,11 @@ def parse_tools(text: str) -> list[ToolRequest]:
     return []
 
 
+def _file_name(path: str) -> str:
+    name = (path or "").replace("\\", "/").rstrip("/").split("/")[-1]
+    return name or "a file"
+
+
 def _step_excerpt(command: str, limit: int = 72) -> str:
     text = " ".join((command or "").split())
     if len(text) <= limit:
@@ -999,6 +1004,10 @@ def status_label(request: ToolRequest) -> str:
         return "Updating the checklist"
     if request.kind == "question":
         return "Asking"
+    if request.kind == "files" and request.action == "write":
+        return f"Writing {_file_name(request.path)}"
+    if request.kind == "files" and request.action == "read":
+        return f"Reading {_file_name(request.path)}"
     if request.kind in {"files", "project", "history"} or (request.kind == "memory" and request.action == "read"):
         return "Looking"
     if request.kind == "memory":
@@ -1007,7 +1016,7 @@ def status_label(request: ToolRequest) -> str:
         excerpt = _step_excerpt(request.command)
         if sys.platform == "win32":
             return f"Running PowerShell: {excerpt}" if excerpt else "Running PowerShell"
-        return f"Running: {excerpt}" if excerpt else "Running"
+        return f"Running {excerpt}" if excerpt else "Running"
     if request.kind == "windows":
         excerpt = _step_excerpt(request.command)
         return f"Running PowerShell: {excerpt}" if excerpt else "Running PowerShell"

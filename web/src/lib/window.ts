@@ -50,6 +50,10 @@ export function sameMessage(left: ChatMessage, right: ChatMessage): boolean {
     left.unverified === right.unverified &&
     JSON.stringify(left.receipts || []) === JSON.stringify(right.receipts || []) &&
     left.speaker_name === right.speaker_name &&
+    left.kind === right.kind &&
+    left.chip === right.chip &&
+    left.seen_step === right.seen_step &&
+    left.refuse_reason === right.refuse_reason &&
     sameList(left.choices, right.choices) &&
     sameList(left.skills_saved, right.skills_saved) &&
     (left.attachment?.id || "") === (right.attachment?.id || "") &&
@@ -73,7 +77,36 @@ export function shareMessages(prev: ChatMessage[] | undefined, incoming: ChatMes
 function sameRun(left: Chat["run"], right: Chat["run"]) {
   if (left === right) return true;
   if (!left || !right) return !left && !right;
-  return left.id === right.id && left.status === right.status && left.started_at === right.started_at && left.last_activity_at === right.last_activity_at && left.current_step === right.current_step && left.reason === right.reason;
+  return left.id === right.id && left.status === right.status && left.started_at === right.started_at && left.last_activity_at === right.last_activity_at && left.current_step === right.current_step && left.reason === right.reason && left.activity_started_at === right.activity_started_at;
+}
+
+/** Keep a just-sent row when a poll or refresh snapshot has not caught up. */
+export function retainLocalTail(prev: ChatMessage[] | undefined, incoming: ChatMessage[]): ChatMessage[] {
+  if (!prev?.length) return incoming;
+  const incomingIds = new Set(incoming.filter((message) => message.id).map((message) => message.id as string));
+  let split = prev.length;
+  for (let index = prev.length - 1; index >= 0; index -= 1) {
+    const id = prev[index]?.id;
+    if (id && incomingIds.has(id)) {
+      split = index + 1;
+      break;
+    }
+    if (index === 0) split = 0;
+  }
+  const tail = prev.slice(split).filter((message) => {
+    if (!message) return false;
+    if (message.id && incomingIds.has(message.id)) return false;
+    if (!message.id && message.role === "user") {
+      const echoed = incoming.some(
+        (item) => item.role === "user" && item.content === message.content && item.id && !prev.some((old) => old.id === item.id),
+      );
+      return !echoed;
+    }
+    if (message.id) return true;
+    return false;
+  });
+  if (!tail.length) return incoming;
+  return [...incoming, ...tail];
 }
 
 /** Keep the previous chat object when a poll repeats the transcript. */
@@ -82,7 +115,7 @@ export function shareChat(prev: unknown, incoming: unknown): unknown {
   const older = prev as Chat;
   const next = incoming as Chat;
   if (!Array.isArray(next.messages)) return incoming;
-  const messages = shareMessages(older.messages, next.messages);
+  const messages = retainLocalTail(older.messages, shareMessages(older.messages, next.messages));
   if (
     messages === older.messages &&
     older.id === next.id &&
@@ -130,11 +163,12 @@ export function mergeChat(prev: Chat | undefined, incoming: Chat): Chat {
     return windowChat({ ...incoming, messages: incomingMessages, message_count: total });
   }
   const base = [...prev.messages];
-  while (base.length && !base[base.length - 1]?.id) base.pop();
+  while (base.length && !base[base.length - 1]?.id && base[base.length - 1]?.role !== "user") base.pop();
   const prevStart = prev.window_start ?? 0;
   const loadedHistory = prevStart > 0 || base.length > TAIL;
   if (!loadedHistory) {
-    return windowChat({ ...incoming, messages: incomingMessages, message_count: total });
+    const kept = retainLocalTail(prev.messages, incomingMessages);
+    return windowChat({ ...incoming, messages: kept, message_count: Math.max(total, kept.length) });
   }
   const lastId = base[base.length - 1]?.id;
   const at = lastId ? incomingMessages.findIndex((message) => message.id === lastId) : -1;
@@ -143,10 +177,11 @@ export function mergeChat(prev: Chat | undefined, incoming: Chat): Chat {
   }
   const byId = new Map(incomingMessages.map((message) => [message.id, message]));
   const updated = base.map((message) => (message.id && byId.get(message.id)) || message);
+  const merged = retainLocalTail(base, [...updated, ...incomingMessages.slice(at + 1)]);
   return {
     ...incoming,
-    messages: [...updated, ...incomingMessages.slice(at + 1)],
-    message_count: total,
+    messages: merged,
+    message_count: Math.max(total, merged.length),
     window_start: prevStart,
   };
 }

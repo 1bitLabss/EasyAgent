@@ -53,6 +53,7 @@ export type Run = {
   stuck?: boolean;
   last_activity?: string;
   elapsed_seconds?: number;
+  activity_started_at?: string | null;
 };
 
 export type Attachment = {
@@ -92,6 +93,11 @@ export type ChatMessage = {
   kind?: string;
   git_repo?: string;
   created_at?: string;
+  chip?: "queued" | "seen" | "answered" | "refused" | string;
+  seen_step?: number;
+  refuse_reason?: string;
+  queued?: boolean;
+  about?: string;
 };
 
 export type ChatSummary = {

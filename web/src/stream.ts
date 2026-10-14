@@ -518,6 +518,39 @@ async function afterStream(flight: Flight, botId: string, chatId: string, ended:
 }
 
 export async function sendNow(botId: string, chatId: string, messageId: string) {
+  const current = queryClient.getQueryData<Chat>(["chat", botId, chatId]);
+  const row = (current?.messages || []).find((item) => item.id === messageId);
+  if (row?.chip === "unsent") {
+    const flight = begin(botId, chatId);
+    try {
+      const response = await streamPost(
+        `/api/bots/${botId}/chats/${chatId}/messages/${messageId}/send-now`,
+        {},
+        flight.control.signal,
+      );
+      const type = response.headers.get("content-type") || "";
+      if (type.includes("application/json")) {
+        const data = (await response.json()) as Chat & { chat?: Chat };
+        finish(flight, data.chat || data);
+        return;
+      }
+      const ended = await readEvents(response, flight);
+      await afterStream(flight, botId, chatId, ended);
+    } catch (error) {
+      if (flight.replaced || (error instanceof DOMException && error.name === "AbortError")) return;
+      flight.sending = false;
+      remember(flight, {
+        phase: "error",
+        label: "Stopped",
+        text: error instanceof Error ? error.message : "The reply failed.",
+        reasoning: "",
+        reasoningLive: false,
+        run: flight.live?.run || null,
+        heardAt: Date.now(),
+      });
+    }
+    return;
+  }
   const chat = await api<Chat>(`/api/bots/${botId}/chats/${chatId}/messages/${messageId}/send-now`, { method: "POST" });
   const prev = queryClient.getQueryData<Chat>(["chat", botId, chatId]);
   queryClient.setQueryData(["chat", botId, chatId], mergeChat(prev, chat));

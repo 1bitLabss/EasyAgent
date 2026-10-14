@@ -1119,6 +1119,7 @@ function chipLabel(message) {
     return message.seen_step ? `Seen by bot (folded in at step ${message.seen_step})` : "Seen by bot";
   }
   if (message.chip === "answered") return "Answered";
+  if (message.chip === "unsent") return message.refuse_reason || "Not sent (job stopped)";
   if (message.chip === "refused") {
     return message.refuse_reason || "The queue is full, so that message was not added. The job was not restarted.";
   }
@@ -1474,11 +1475,14 @@ function renderThread() {
     if (open) main.append(choiceRow(message.choices));
     const chip = chipLabel(message);
     if (chip) main.append(el("p", { class: "chip", "data-testid": `chip-${message.chip}` }, [chip]));
-    if (message.chip === "refused" && message.id) {
-      main.append(el("div", {}, [
+    if ((message.chip === "refused" || message.chip === "unsent") && message.id) {
+      const actions = [
         el("button", { type: "button", "data-testid": "send-now", onclick: () => void sendRefusedNow(message.id) }, ["Send now"]),
-        el("button", { type: "button", "data-testid": "stop-and-send-message", onclick: () => void stopAndSendStored(message.id) }, ["Stop and send"]),
-      ]));
+      ];
+      if (message.chip === "refused") {
+        actions.push(el("button", { type: "button", "data-testid": "stop-and-send-message", onclick: () => void stopAndSendStored(message.id) }, ["Stop and send"]));
+      }
+      main.append(el("div", {}, actions));
     }
     if (message.kind === "connection") {
       main.append(el("button", {
@@ -2399,8 +2403,24 @@ async function continueRun(event) {
 
 async function sendRefusedNow(messageId) {
   if (!state.botId || !state.chatId || !messageId) return;
+  const row = ((state.chat && state.chat.messages) || []).find((item) => item && item.id === messageId);
+  if (row && row.chip === "unsent") {
+    const botId = state.botId;
+    const chatId = state.chatId;
+    const stream = beginFlight(botId, chatId);
+    try {
+      const ended = await streamPost(`/api/bots/${botId}/chats/${chatId}/messages/${messageId}/send-now`, {}, stream);
+      if (stream.replaced) return;
+      await settleOpenStream(ended, stream);
+      renderStage();
+    } catch (error) {
+      if (stream.replaced || error.name === "AbortError") return;
+      formError("thread-error", error.message || "The reply failed.");
+    }
+    return;
+  }
   const chat = await api(`/api/bots/${state.botId}/chats/${state.chatId}/messages/${messageId}/send-now`, { method: "POST" });
-  state.chat = chat;
+  state.chat = chat.chat || chat;
   renderThread();
 }
 

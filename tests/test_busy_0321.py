@@ -110,6 +110,66 @@ def test_send_now_queues_a_refused_message(tmp_path):
     client.close()
 
 
+def test_stop_marks_queued_lines_not_sent_and_send_now_sends_one(tmp_path, monkeypatch):
+    app, client, bot, chat = _client(tmp_path)
+    store = app.state.store
+    _running(store, bot["id"], chat["id"])
+    url = f"/api/bots/{bot['id']}/chats/{chat['id']}/messages"
+    assert client.post(url, json={"content": "first note"}).status_code == 200
+    assert client.post(url, json={"content": "second note"}).status_code == 200
+    stopped = client.post(f"/api/bots/{bot['id']}/chats/{chat['id']}/stop")
+    assert stopped.status_code == 200
+    users = [item for item in stopped.json()["messages"] if item.get("role") == "user"]
+    assert [item["content"] for item in users] == ["first note", "second note"]
+    assert [item["chip"] for item in users] == ["unsent", "unsent"]
+    assert [item.get("refuse_reason") for item in users] == ["Not sent (job stopped)", "Not sent (job stopped)"]
+    assert all(not item.get("queued") for item in users)
+    from easyagent.plan import queued_items
+
+    assert queued_items(store, bot["id"], chat["id"]) == []
+    again = client.get(f"/api/bots/{bot['id']}/chats/{chat['id']}").json()
+    assert [item["chip"] for item in again["messages"] if item.get("role") == "user"] == ["unsent", "unsent"]
+
+    async def complete(**_kwargs):
+        return "Sent it."
+
+    monkeypatch.setattr("easyagent.llm.complete", complete)
+    sent = client.post(f"/api/bots/{bot['id']}/chats/{chat['id']}/messages/{users[0]['id']}/send-now")
+    assert sent.status_code == 200, sent.text
+    body = sent.json()
+    after = [item for item in body["messages"] if item.get("role") == "user"]
+    assert after[0]["chip"] == "answered"
+    assert after[0].get("refuse_reason") in {None, ""}
+    assert after[1]["chip"] == "unsent"
+    assert after[1]["refuse_reason"] == "Not sent (job stopped)"
+    assert any(item.get("content") == "Sent it." for item in body["messages"])
+
+    other = _client(tmp_path)
+    other_app, other_client, other_bot, other_chat = other
+    other_store = other_app.state.store
+    _running(other_store, other_bot["id"], other_chat["id"])
+    other_url = f"/api/bots/{other_bot['id']}/chats/{other_chat['id']}/messages"
+    assert other_client.post(other_url, json={"content": "keep this"}).status_code == 200
+    assert other_client.post(other_url, json={"content": "send this"}).status_code == 200
+    target = next(
+        item["id"]
+        for item in other_store.get_chat(other_bot["id"], other_chat["id"])["messages"]
+        if item.get("content") == "send this"
+    )
+    hurried = other_client.post(
+        f"/api/bots/{other_bot['id']}/chats/{other_chat['id']}/messages/{target}/stop-and-send"
+    )
+    assert hurried.status_code == 200, hurried.text
+    hurried_users = [item for item in hurried.json()["chat"]["messages"] if item.get("role") == "user"]
+    by_text = {item["content"]: item for item in hurried_users}
+    assert by_text["keep this"]["chip"] == "unsent"
+    assert by_text["keep this"]["refuse_reason"] == "Not sent (job stopped)"
+    assert by_text["send this"]["chip"] == "answered"
+    assert any(item.get("content") == "Sent it." for item in hurried.json()["chat"]["messages"])
+    client.close()
+    other_client.close()
+
+
 def test_waiting_activity_names_tokens_and_clears_the_stuck_flag(tmp_path):
     assert waiting_activity(190, 4800) == "Waiting on model, 3m 10s, 1.2k tokens so far"
     assert status_label(ToolRequest(kind="files", action="write", path="index.html")) == "Writing index.html"

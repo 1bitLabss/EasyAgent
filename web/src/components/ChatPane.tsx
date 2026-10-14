@@ -138,10 +138,12 @@ const MessageRow = memo(function MessageRow({
           {mine ? (message.content || "") : <Markdown text={message.content || ""} />}
         </div>
         {chip ? <p className="mt-2 text-xs" data-testid={`chip-${message.chip}`}>{chip}</p> : null}
-        {message.chip === "refused" && message.id && botId && chatId ? (
+        {(message.chip === "refused" || message.chip === "unsent") && message.id && botId && chatId ? (
           <div className="mt-2 flex flex-wrap gap-2">
             <button type="button" className="rounded-full bg-white px-3 py-1 text-sm text-foreground" data-testid="send-now" onClick={() => void sendNow(botId, chatId, message.id || "")}>Send now</button>
-            <button type="button" className="rounded-full bg-white px-3 py-1 text-sm text-foreground" data-testid="stop-and-send-message" onClick={() => void stopAndSendStored(botId, chatId, message.id || "")}>Stop and send</button>
+            {message.chip === "refused" ? (
+              <button type="button" className="rounded-full bg-white px-3 py-1 text-sm text-foreground" data-testid="stop-and-send-message" onClick={() => void stopAndSendStored(botId, chatId, message.id || "")}>Stop and send</button>
+            ) : null}
           </div>
         ) : null}
         {message.skills_saved?.length ? <p className="mt-2 text-xs opacity-70">Saved skill {message.skills_saved.join(", ")}</p> : null}

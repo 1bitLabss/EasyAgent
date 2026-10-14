@@ -482,6 +482,41 @@ def _pickup_row(about: str) -> dict:
 
 
 REFUSE_REASON = "The queue is full, so that message was not added. The job was not restarted."
+UNSENT_REASON = "Not sent (job stopped)"
+
+
+def park_queued(chat: dict) -> int:
+    """A stopped job is not still waiting on those lines. Each can be sent on its own."""
+    changed = 0
+    for message in chat.get("messages") or []:
+        if not isinstance(message, dict) or message.get("role") != "user":
+            continue
+        if message.get("chip") != "queued":
+            continue
+        message["chip"] = "unsent"
+        message["refuse_reason"] = UNSENT_REASON
+        message.pop("queued", None)
+        changed += 1
+    return changed
+
+
+def mark_unsent(store: Store, bot_id: str, chat_id: str) -> int:
+    """Persist that queued lines were not sent, and drop the queue file."""
+    lock = getattr(store, "_lock", None)
+    if lock is not None:
+        with lock:
+            return _mark_unsent(store, bot_id, chat_id)
+    return _mark_unsent(store, bot_id, chat_id)
+
+
+def _mark_unsent(store: Store, bot_id: str, chat_id: str) -> int:
+    chat = store.get_chat(bot_id, chat_id)
+    changed = park_queued(chat)
+    drop_queue(store, bot_id, chat_id)
+    if changed:
+        chat["updated_at"] = now_iso()
+        store.save_chat(chat)
+    return changed
 
 
 def enqueue(store: Store, bot_id: str, chat_id: str, content: str, attachment: dict | None = None) -> dict:

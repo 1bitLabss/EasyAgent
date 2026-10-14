@@ -9,5 +9,6 @@ describe("chipText", () => {
     expect(chipText({ chip: "refused", refuse_reason: "The queue is full, so that message was not added. The job was not restarted." })).toBe(
       "The queue is full, so that message was not added. The job was not restarted.",
     );
+    expect(chipText({ chip: "unsent" })).toBe("Not sent (job stopped)");
   });
 });

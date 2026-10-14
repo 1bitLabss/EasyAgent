@@ -423,7 +423,7 @@ def _busy_transcript_row(item: dict) -> bool:
     """A message stored while a job was running. A stale live save must not drop it."""
     if not isinstance(item, dict) or _transient_activity_row(item):
         return False
-    if item.get("chip") in {"queued", "seen", "answered", "refused"}:
+    if item.get("chip") in {"queued", "seen", "answered", "refused", "unsent"}:
         return True
     return item.get("kind") in {"status", "pickup"}
 

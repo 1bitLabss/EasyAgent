@@ -1511,25 +1511,57 @@ def create_app(data_dir: str | Path | None = None) -> FastAPI:
         store.get_chat(bot_id, chat_id)
         worker = turn_mod.current_worker(store, chat_id)
         turn_mod.interrupt(store, chat_id, "you pressed Stop")
-        from easyagent.plan import drop_queue
+        from easyagent.plan import drop_queue, mark_unsent
 
         drop_queue(store, bot_id, chat_id)
         if worker is not None and not worker.done():
             with suppress(asyncio.TimeoutError):
                 await asyncio.wait_for(asyncio.shield(worker), timeout=8)
+        if worker is None or worker.done():
+            turn_mod.clear_busy(store, chat_id)
+            turn_mod.slot_for(store, chat_id).user_stop = False
+            mark_unsent(store, bot_id, chat_id)
         return _public_chat(store, store.get_chat(bot_id, chat_id))
 
     @app.post("/api/bots/{bot_id}/chats/{chat_id}/messages/{message_id}/send-now")
-    async def send_message_now(bot_id: str, chat_id: str, message_id: str):
-        """Put one refused message onto the running job. The job is not restarted."""
+    async def send_message_now(bot_id: str, chat_id: str, message_id: str, request: Request):
+        """A running job takes the line without restarting. An idle chat sends it."""
         store.get_chat(bot_id, chat_id)
-        from easyagent.plan import PlanError, force_enqueue
+        from easyagent.plan import PlanError, force_enqueue, release_for_send
 
+        if turn_mod.is_busy(store, chat_id):
+            try:
+                force_enqueue(store, bot_id, chat_id, message_id)
+            except PlanError as exc:
+                raise HTTPException(400, str(exc)) from exc
+            return _public_chat(store, store.get_chat(bot_id, chat_id))
+        _require_endpoint(store, bot_id)
+        if not turn_mod.try_begin(store, chat_id):
+            try:
+                force_enqueue(store, bot_id, chat_id, message_id)
+            except PlanError as exc:
+                raise HTTPException(400, str(exc)) from exc
+            return _public_chat(store, store.get_chat(bot_id, chat_id))
         try:
-            force_enqueue(store, bot_id, chat_id, message_id)
+            release_for_send(store, bot_id, chat_id, message_id)
         except PlanError as exc:
+            turn_mod.clear_busy(store, chat_id)
             raise HTTPException(400, str(exc)) from exc
-        return _public_chat(store, store.get_chat(bot_id, chat_id))
+        if _wants_stream(request):
+            return StreamingResponse(
+                _stream_reply_only(store, bot_id, chat_id),
+                media_type="text/event-stream",
+                headers={"Cache-Control": "no-store", "X-Accel-Buffering": "no"},
+            )
+        try:
+            async with chat_lock(store, chat_id):
+                turn_mod.bind(store, chat_id, bot_id=bot_id)
+                result = await _reply_json(store, bot_id, chat_id)
+                followed = await _drain_queued_json(store, bot_id, chat_id)
+                done = followed or result
+                return done.get("chat") or done
+        finally:
+            turn_mod.clear_busy(store, chat_id)
 
     @app.post("/api/bots/{bot_id}/chats/{chat_id}/messages/{message_id}/stop-and-send")
     async def stop_and_send_message(bot_id: str, chat_id: str, message_id: str, request: Request):
@@ -1538,7 +1570,7 @@ def create_app(data_dir: str | Path | None = None) -> FastAPI:
         _require_endpoint(store, bot_id)
         worker = turn_mod.current_worker(store, chat_id)
         turn_mod.interrupt(store, chat_id, "you pressed Stop")
-        from easyagent.plan import PlanError, drop_queue, release_for_send
+        from easyagent.plan import PlanError, drop_queue, mark_unsent, release_for_send
 
         drop_queue(store, bot_id, chat_id)
         if worker is not None and not worker.done():
@@ -1547,6 +1579,8 @@ def create_app(data_dir: str | Path | None = None) -> FastAPI:
         if worker is not None and not worker.done():
             raise HTTPException(409, "This job is still running. Stop is what cancels it.")
         turn_mod.clear_busy(store, chat_id)
+        turn_mod.slot_for(store, chat_id).user_stop = False
+        mark_unsent(store, bot_id, chat_id)
         if not turn_mod.try_begin(store, chat_id):
             raise HTTPException(409, "This job is still running. Stop is what cancels it.")
         try:
@@ -4029,6 +4063,10 @@ def _settle_interrupted(store: Store, bot_id: str, chat_id: str, reason: str = "
         chat = store.get_chat(bot_id, chat_id)
     except StoreError:
         return
+    if "you pressed Stop" in (reason or ""):
+        from easyagent.plan import park_queued
+
+        park_queued(chat)
     _drop_activity(chat)
     messages = chat.setdefault("messages", [])
     if not messages:

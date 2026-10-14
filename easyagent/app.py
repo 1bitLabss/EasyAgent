@@ -21,6 +21,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from easyagent import __version__
 from easyagent import gate
 from easyagent import llm
+from easyagent import retry
 from easyagent import turn as turn_mod
 from easyagent.access import contained_file, is_lan, is_local, is_shell, presented_token, refusal_html
 from easyagent.phone import (
@@ -3852,16 +3853,29 @@ def _settle_interrupted(store: Store, bot_id: str, chat_id: str, reason: str = "
 
 
 def _append_error(store: Store, bot_id: str, chat_id: str, detail: str) -> dict:
-    """Keep every stored turn and append the error. The transcript is not shortened."""
+    """Keep every stored turn and append the error. The transcript is not shortened.
+
+    A connection failure replaces whatever the model already wrote. The harness
+    reports that failure. The model does not.
+    """
     chat = store.get_chat(bot_id, chat_id)
     before = len(chat.get("messages") or [])
-    shown = _stopped_text(redact(store, detail))
+    cleaned = " ".join((redact(store, detail) or "").split())
+    harness = retry.is_unreachable_message(cleaned)
+    shown = cleaned if harness else _stopped_text(cleaned)
+
+    def _stamp(message: dict) -> None:
+        message["content"] = shown
+        message["error"] = True
+        message.pop("live", None)
+        if harness:
+            message["kind"] = "connection"
+
     if chat.get("messages") and chat["messages"][-1].get("live"):
         last = chat["messages"][-1]
         last.pop("live", None)
-        if not (last.get("content") or "").strip():
-            last["content"] = shown
-            last["error"] = True
+        if harness or not (last.get("content") or "").strip():
+            _stamp(last)
             _record_turn_meter(chat, detail=detail)
             stats = _persist_context(store, chat)
             chat["updated_at"] = now_iso()
@@ -3871,15 +3885,16 @@ def _append_error(store: Store, bot_id: str, chat_id: str, detail: str) -> dict:
             public = _public_chat(store, chat)
             public["context"] = stats
             return {"reply": shown, "skills_saved": [], "chat": public, "context": stats}
-    chat["messages"].append(
-        {
-            "id": new_id(),
-            "role": "assistant",
-            "content": shown,
-            "error": True,
-            "created_at": now_iso(),
-        }
-    )
+    fresh = {
+        "id": new_id(),
+        "role": "assistant",
+        "content": shown,
+        "error": True,
+        "created_at": now_iso(),
+    }
+    if harness:
+        fresh["kind"] = "connection"
+    chat["messages"].append(fresh)
     _record_turn_meter(chat, detail=detail)
     stats = _persist_context(store, chat)
     chat["updated_at"] = now_iso()
@@ -4326,6 +4341,9 @@ async def _reply_json(store: Store, bot_id: str, chat_id: str, *, continue_run: 
     _write_live(store, bot_id, chat_id, step="Waiting on model", start=not continue_run, force=True)
     try:
         visible, saved, choices, made, thinking, reacted, checked, lesson = await _complete_for_chat(store, bot_id, chat)
+        if retry.saw_unreachable() and retry.model_explained_harness_failure(visible):
+            endpoint = _require_endpoint(store, bot_id)
+            raise llm.ProviderError(retry.unreachable_text(endpoint.get("base_url") or ""))
     except llm.ProviderError as exc:
         return _append_error(store, bot_id, chat_id, _chat_connection_error(store, bot_id, str(exc)))
     except SearchError as exc:
@@ -4465,6 +4483,8 @@ async def _stream_reply(
                 yield _sse({"type": kind, "text": text})
         from easyagent.tools import finish_honesty
 
+        if retry.saw_unreachable() and retry.model_explained_harness_failure(final or ""):
+            raise llm.ProviderError(retry.unreachable_text(endpoint.get("base_url") or ""))
         final = await finish_honesty(
             final or "",
             base_url=endpoint["base_url"],

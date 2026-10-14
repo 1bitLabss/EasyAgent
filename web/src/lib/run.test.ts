@@ -46,6 +46,32 @@ describe("run tone", () => {
     expect(view.stuck).toBe(true);
   });
 
+  it("shows a reconnect instead of the last tool step", () => {
+    const now = Date.parse("2026-10-08T12:02:00Z");
+    const view = workingLine(
+      {
+        step_index: 2,
+        step_count: 5,
+        started_at: "2026-10-08T12:00:00Z",
+        current_step: "Model not answering, retrying (attempt 4)…",
+        last_activity: "Reading notes",
+        stuck: true,
+      },
+      now,
+    );
+    expect(view.text).toBe("2m 0s · Model not answering, retrying (attempt 4)…");
+    expect(view.stuck).toBe(false);
+    const quiet = describeRun(
+      "Model not answering, retrying (attempt 4)…",
+      "running",
+      "2026-10-08T12:00:00Z",
+      "2026-10-08T12:00:00Z",
+      undefined,
+      now,
+    );
+    expect(quiet.words).toBe("Model not answering, retrying (attempt 4)…");
+  });
+
   it("describes an empty chat budget in plain words", () => {
     expect(contextNote({ max_context_tokens: 24000 }, "chat")).toContain("No messages yet");
   });

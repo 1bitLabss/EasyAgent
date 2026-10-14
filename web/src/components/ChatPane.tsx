@@ -103,6 +103,7 @@ const MessageRow = memo(function MessageRow({
 }) {
   const botId = useApp((state) => state.botId);
   const chatId = useApp((state) => state.chatId);
+  const setScreen = useApp((state) => state.setScreen);
   if (hideWhileSending(message, sending)) return null;
   const failed = Boolean(message.error);
   const mine = message.role === "user";
@@ -161,6 +162,18 @@ const MessageRow = memo(function MessageRow({
               })}
             >
               Always allow this repo
+            </button>
+          </div>
+        ) : null}
+        {message.kind === "connection" ? (
+          <div className="mt-3">
+            <button
+              type="button"
+              className="rounded-full bg-white px-3 py-1 text-sm text-foreground"
+              data-testid="open-connection-settings"
+              onClick={() => setScreen("connections")}
+            >
+              Connection settings
             </button>
           </div>
         ) : null}

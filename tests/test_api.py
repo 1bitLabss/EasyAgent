@@ -219,9 +219,9 @@ def test_provider_failure_keeps_the_user_turn_and_retry_does_not_duplicate_it(wo
     assert failed.status_code == 200, failed.text
     stored = world.client.get(f"/api/bots/{bot['id']}/chats/{chat['id']}").json()
     assert stored["messages"][0]["content"] == "please keep this"
-    assert stored["messages"][1]["content"].startswith("Stopped:")
-    assert "connection refused" in stored["messages"][1]["content"]
-    assert "\u201clocal\u201d at http://127.0.0.1:9/v1" in stored["messages"][1]["content"]
+    assert stored["messages"][1]["content"] == "Can't reach the model at 127.0.0.1:9. Check the connection or address."
+    assert stored["messages"][1]["kind"] == "connection"
+    assert "connection refused" not in stored["messages"][1]["content"]
     assert stored["messages"][1]["error"] is True
     listed = world.client.get(f"/api/bots/{bot['id']}/chats").json()
     assert [item["id"] for item in listed] == [chat["id"]]
@@ -233,8 +233,8 @@ def test_provider_failure_keeps_the_user_turn_and_retry_does_not_duplicate_it(wo
     messages = retried.json()["chat"]["messages"]
     assert [item["role"] for item in messages] == ["user", "assistant", "assistant"]
     assert messages[0]["content"] == "please keep this"
-    assert messages[1]["content"].startswith("Stopped:")
-    assert "connection refused" in messages[1]["content"]
+    assert messages[1]["content"] == "Can't reach the model at 127.0.0.1:9. Check the connection or address."
+    assert messages[1]["kind"] == "connection"
     assert messages[2]["content"] == "ack"
     # The stored error line names an address. It is not replayed to the model.
     assert "127.0.0.1:9" not in json.dumps(world.rec.calls[-1]["messages"][1:])
@@ -1160,16 +1160,16 @@ def test_stream_reply_arrives_in_pieces_and_a_failure_stays_in_the_chat(world, m
         assert response.status_code == 200, response.read()
         failed = response.read().decode()
     assert '"type": "error"' in failed
-    assert "connection refused" in failed
-    assert "http://127.0.0.1:9/v1" in failed
+    assert "Can't reach the model at 127.0.0.1:9. Check the connection or address." in failed
+    assert "connection refused" not in failed
     stored = world.client.get(f"/api/bots/{bot['id']}/chats/{chat['id']}").json()
     assert [item["content"] for item in stored["messages"]][:3] == [
         "hi there",
         "Hello",
         "second line",
     ]
-    assert stored["messages"][3]["content"].startswith("Stopped:")
-    assert "connection refused" in stored["messages"][3]["content"]
+    assert stored["messages"][3]["content"] == "Can't reach the model at 127.0.0.1:9. Check the connection or address."
+    assert stored["messages"][3]["kind"] == "connection"
     assert stored["messages"][-1]["error"] is True
     raw = (world.path / "bots" / bot["id"] / "chats" / f"{chat['id']}.json").read_text(encoding="utf-8")
     assert "hi there" in raw and "Hello" in raw and "second line" in raw

@@ -193,7 +193,10 @@ function apply(event: Record<string, unknown>, flight: Flight) {
   if (event.type === "status") {
     const run = (event.run as Run | undefined) || live.run;
     const label = String(event.text || "Thinking");
-    if (run && event.text) run.current_step = label;
+    if (run && event.text) {
+      run.current_step = label;
+      if (label.startsWith("Model not answering")) run.last_activity = label;
+    }
     const prev = live.steps || [];
     const steps = prev[prev.length - 1] === label ? prev : [...prev, label].slice(-8);
     remember(flight, carry(live, { phase: "thinking", label, run, steps }));

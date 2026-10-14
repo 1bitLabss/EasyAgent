@@ -102,3 +102,8 @@ def fast_model_retry(monkeypatch):
 
     monkeypatch.setattr("easyagent.retry.now", now)
     monkeypatch.setattr("easyagent.retry.pause", pause)
+    from easyagent import retry
+
+    retry.reset_unreachable()
+    yield
+    retry.reset_unreachable()

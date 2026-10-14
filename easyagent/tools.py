@@ -5480,6 +5480,7 @@ async def _iter_streamed_model(
     api_key: str | None,
     model: str | None,
     messages: list[dict],
+    timeout: float = 120.0,
 ):
     """Yield ('thinking', chunk) as reasoning arrives, and ('text', chunk) for the answer."""
     pending: asyncio.Queue = asyncio.Queue()
@@ -5499,7 +5500,7 @@ async def _iter_streamed_model(
         error: BaseException | None = None
         try:
             async for piece in llm.stream_complete(
-                base_url=base_url, api_key=api_key, model=model, messages=messages
+                base_url=base_url, api_key=api_key, model=model, messages=messages, timeout=timeout
             ):
                 await pending.put(("text", piece or ""))
         except llm.ProviderError as exc:
@@ -5555,9 +5556,13 @@ async def _pull_model(
     retried with the slot released, so another chat can use it during the pause.
     A stream that dies after text has started is replayed once.
     """
-    window = retry.Window()
+    window = retry.Window(base_url=base_url)
     while True:
         turn_mod.raise_if_cancelled()
+        limit = window.attempt_limit(120.0)
+        if limit <= 0:
+            raise llm.ProviderError(retry.unreachable_text(base_url))
+        window.begin_attempt()
         permit = await gate.reserve()
         hold = True
         try:
@@ -5573,26 +5578,39 @@ async def _pull_model(
                         token = llm.attach_reasoning_sink(bucket.append)
                         try:
                             text = await llm.complete(
-                                base_url=base_url, api_key=api_key, model=model, messages=messages
+                                base_url=base_url,
+                                api_key=api_key,
+                                model=model,
+                                messages=messages,
+                                timeout=limit,
                             )
                         finally:
                             llm.detach_reasoning_sink(token)
                         turn_mod.raise_if_cancelled()
                         if bucket:
                             started = True
+                            retry.charge_unreachable()
                             yield "thinking", join_segments(bucket)
                         if text:
                             started = True
+                            retry.charge_unreachable()
                             yield "text", text
+                        retry.charge_unreachable()
                         return
                     async for kind, piece in _iter_streamed_model(
-                        base_url=base_url, api_key=api_key, model=model, messages=messages
+                        base_url=base_url,
+                        api_key=api_key,
+                        model=model,
+                        messages=messages,
+                        timeout=limit,
                     ):
                         turn_mod.raise_if_cancelled()
                         if kind in {"text", "thinking"} and piece:
                             started = True
+                            retry.charge_unreachable()
                         yield kind, piece
                     turn_mod.raise_if_cancelled()
+                    retry.charge_unreachable()
                     return
                 except turn_mod.TurnCancelled:
                     raise
@@ -6463,10 +6481,14 @@ async def run_turn(
                     for event in close(""):
                         yield event
                     return
+                if turn_mod.cancelled() or "incomplete chunked read" in str(exc).lower():
+                    for event in _partial_stream(text_bits):
+                        yield event
+                    raise turn_mod.TurnCancelled() from exc
+                if _retryable_provider(exc) or retry.is_unreachable_message(str(exc)):
+                    raise
                 for event in _partial_stream(text_bits):
                     yield event
-                if turn_mod.cancelled() or "incomplete chunked read" in str(exc).lower():
-                    raise turn_mod.TurnCancelled() from exc
                 raise
         raw_text = "".join(text_bits)
         hidden, answer = llm.peel_thinking(raw_text)
@@ -7716,6 +7738,7 @@ async def complete_with_tools(
     chat_id: str | None = None,
 ) -> Settled:
     """Run tools and keep calling the model until it answers, or the loop is stuck."""
+    retry.reset_unreachable()
     _remember_inbound(messages)
     messages = await open_honesty(
         messages,
@@ -7796,6 +7819,7 @@ async def stream_with_tools(
     chat_id: str | None = None,
 ):
     """Yield stream events, then ('final', text). The turn stays open across tools."""
+    retry.reset_unreachable()
     _remember_inbound(messages)
     messages = await open_honesty(
         messages,

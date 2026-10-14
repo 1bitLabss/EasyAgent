@@ -65,12 +65,14 @@ export function workingLine(
   const index = run?.step_index || 0;
   const started = Date.parse(run?.started_at || "");
   const elapsed = Number.isNaN(started) ? "" : formatElapsed((now - started) / 1000);
-  const activity = run?.last_activity || run?.current_step || "";
+  const step = run?.current_step || "";
+  const reconnecting = step.startsWith("Model not answering");
+  const activity = reconnecting ? step : run?.last_activity || step;
   const bits: string[] = [];
-  if (count) bits.push(index ? `Step ${index} of ${count}` : `${count} steps`);
+  if (!reconnecting && count) bits.push(index ? `Step ${index} of ${count}` : `${count} steps`);
   if (elapsed) bits.push(elapsed);
   if (activity) bits.push(activity);
-  return { text: bits.join(" · "), queued: (run?.queued || 0) > 0, stuck: Boolean(run?.stuck) };
+  return { text: bits.join(" · "), queued: (run?.queued || 0) > 0, stuck: reconnecting ? false : Boolean(run?.stuck) };
 }
 
 export function describeRun(

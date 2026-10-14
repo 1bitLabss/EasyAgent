@@ -3,6 +3,7 @@
 import asyncio
 import random
 import time
+from pathlib import Path
 
 import pytest
 
@@ -29,11 +30,11 @@ def test_backoff_grows_then_caps_at_15_seconds():
 
 
 def test_retry_budget_comes_from_the_environment(monkeypatch):
-    assert retry.budget_seconds() == 180
+    assert retry.budget_seconds() == 120
     monkeypatch.setenv("EASYAGENT_MODEL_RETRY_SECONDS", "9")
     assert retry.budget_seconds() == 9
     monkeypatch.setenv("EASYAGENT_MODEL_RETRY_SECONDS", "nope")
-    assert retry.budget_seconds() == 180
+    assert retry.budget_seconds() == 120
     monkeypatch.setenv("EASYAGENT_MODEL_RETRY_SECONDS", "-4")
     assert retry.budget_seconds() == 0
 
@@ -317,3 +318,137 @@ def test_a_dropped_stream_is_replaced_and_the_tool_is_not_run_again(tmp_path, mo
     assert "note.txt" in text
     assert "Model not answering, retrying (attempt" in body
     assert '"type": "replay"' in body
+
+
+def test_the_host_in_the_harness_sentence_has_no_secret():
+    assert retry.host_of("http://127.0.0.1:9/v1") == "127.0.0.1:9"
+    assert retry.host_of("https://example.com/v1") == "example.com"
+    assert retry.host_of("http://token:secret@127.0.0.1:9/v1") == "127.0.0.1:9"
+    assert (
+        retry.unreachable_text("http://127.0.0.1:9/v1")
+        == "Can't reach the model at 127.0.0.1:9. Check the connection or address."
+    )
+    assert retry.model_explained_harness_failure("The tool calls timed out and were not run.")
+    assert not retry.model_explained_harness_failure(retry.unreachable_text("http://127.0.0.1:9/v1"))
+    assert not retry.model_explained_harness_failure("The page is ready.")
+
+
+def test_unreachable_time_is_shared_across_model_calls(monkeypatch):
+    clock = {"t": 0.0}
+    monkeypatch.setattr(retry, "now", lambda: clock["t"])
+    retry.reset_unreachable()
+    detail = "Timed out calling http://127.0.0.1:9/v1"
+    first = retry.Window(budget=10, base_url="http://127.0.0.1:9/v1")
+    first.begin_attempt()
+    clock["t"] = 6
+    assert first.plan(detail, started=False) == "again"
+    first.arm("again", detail)
+    clock["t"] = 10
+    assert first.plan(detail, started=False) is None
+    assert first.failure_message(detail) == "Can't reach the model at 127.0.0.1:9. Check the connection or address."
+    second = retry.Window(budget=10, base_url="http://127.0.0.1:9/v1")
+    assert second.attempt_limit(120) == 0
+    assert second.plan(detail, started=False) is None
+    retry.reset_unreachable()
+
+
+def test_a_dead_model_stops_in_the_budget_and_the_model_does_not_explain_it(tmp_path, monkeypatch):
+    """The invented 'timed out and not run' line is not the reply. The harness is."""
+    gate.reset_lanes()
+    clock = {"t": 0.0}
+
+    def now():
+        return clock["t"]
+
+    async def pause(seconds):
+        clock["t"] += float(seconds or 0)
+
+    monkeypatch.setattr("easyagent.retry.now", now)
+    monkeypatch.setattr("easyagent.retry.pause", pause)
+    monkeypatch.setenv("EASYAGENT_MODEL_RETRY_SECONDS", "10")
+    calls = {"n": 0}
+    seen: list = []
+
+    async def reply(**kwargs):
+        calls["n"] += 1
+        seen.append(kwargs.get("messages") or [])
+        clock["t"] += 6
+        if calls["n"] == 1:
+            yield "The tool calls timed out and were not run."
+        raise ProviderError("Timed out calling http://127.0.0.1:9/v1")
+
+    monkeypatch.setattr("easyagent.llm.stream_complete", reply)
+
+    async def scenario():
+        client, _endpoint, bot_a, _bot_b, chat_a, _chat_b = await _pair(tmp_path, parallel=1)
+        try:
+            sent = await client.post(
+                f"/api/bots/{bot_a['id']}/chats/{chat_a['id']}/messages",
+                json={"content": "PING-A"},
+                headers={"Accept": "text/event-stream"},
+            )
+            body = sent.text
+            stored = (await client.get(f"/api/bots/{bot_a['id']}/chats/{chat_a['id']}")).json()
+        finally:
+            await client.aclose()
+        return sent.status_code, body, stored
+
+    status, body, stored = asyncio.run(scenario())
+    assert status == 200, body
+    assert calls["n"] <= 3
+    last = stored["messages"][-1]
+    assert last["content"] == "Can't reach the model at 127.0.0.1:9. Check the connection or address."
+    assert last["kind"] == "connection"
+    assert last["error"] is True
+    assert "not run" not in last["content"].lower()
+    assert "timed out" not in last["content"].lower()
+    assert stored["run"]["status"] == "error"
+    assert "Model not answering, retrying" in body
+    for messages in seen:
+        for item in messages:
+            if item.get("role") != "user":
+                continue
+            text = item.get("content") or ""
+            assert "not run" not in text.lower()
+            assert "explain" not in text.lower()
+    root = Path(__file__).resolve().parents[1]
+    react = (root / "web/src/components/ChatPane.tsx").read_text(encoding="utf-8")
+    classic = (root / "easyagent/static/app.js").read_text(encoding="utf-8")
+    assert 'data-testid="open-connection-settings"' in react
+    assert 'setScreen("connections")' in react
+    assert '"open-connection-settings"' in classic
+    assert 'openPlainScreen("connections")' in classic
+
+
+def test_a_model_excuse_after_a_retry_is_replaced_by_the_harness(tmp_path, monkeypatch):
+    gate.reset_lanes()
+    calls = {"n": 0}
+
+    async def reply(**kwargs):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise ProviderError("Timed out calling http://127.0.0.1:9/v1")
+        yield "The tool calls timed out and were not run."
+
+    monkeypatch.setattr("easyagent.llm.stream_complete", reply)
+
+    async def scenario():
+        client, _endpoint, bot_a, _bot_b, chat_a, _chat_b = await _pair(tmp_path, parallel=1)
+        try:
+            sent = await client.post(
+                f"/api/bots/{bot_a['id']}/chats/{chat_a['id']}/messages",
+                json={"content": "PING-A"},
+                headers={"Accept": "text/event-stream"},
+            )
+            stored = (await client.get(f"/api/bots/{bot_a['id']}/chats/{chat_a['id']}")).json()
+        finally:
+            await client.aclose()
+        return sent.status_code, sent.text, stored
+
+    status, body, stored = asyncio.run(scenario())
+    assert status == 200, body
+    assert calls["n"] == 2
+    last = stored["messages"][-1]
+    assert last["content"] == "Can't reach the model at 127.0.0.1:9. Check the connection or address."
+    assert last["kind"] == "connection"
+    assert "not run" not in last["content"].lower()

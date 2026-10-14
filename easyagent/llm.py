@@ -190,11 +190,15 @@ def connection_error_text(detail: str, endpoint: dict | None, model: str | None 
 
     The address comes from the connection saved on the bot at the time of the
     request. Nothing here falls back to an older or default address.
+    An unreachable model is the harness sentence. The model does not write it.
     """
     text = (detail or "").strip() or "The model server did not answer."
+    url = ((endpoint or {}).get("base_url") or "").strip()
+    if retry.is_unreachable_message(text) or retry.retryable_before_token(text):
+        return retry.unreachable_text(url or retry.url_from_detail(text))
     if not endpoint:
         return text
-    url = (endpoint.get("base_url") or "").strip() or "(no address saved)"
+    url = url or "(no address saved)"
     name = (endpoint.get("name") or "").strip() or "unnamed"
     who = f"{bot_name} used" if bot_name else "This request used"
     shown_model = model or "the server's default model"
@@ -956,8 +960,12 @@ async def _complete_window(
     yield_to_chats: bool = False,
 ) -> str:
     """Retry a completion that never returned, and free the slot during the pause."""
-    window = retry.Window()
+    window = retry.Window(base_url=base_url)
     while True:
+        limit = window.attempt_limit(timeout)
+        if limit <= 0:
+            raise ProviderError(retry.unreachable_text(base_url))
+        window.begin_attempt()
         try:
             permit = await gate.reserve(step_aside=yield_to_chats)
         except gate.BusyLane as exc:
@@ -966,17 +974,19 @@ async def _complete_window(
         try:
             await permit.acquire()
             try:
-                return await _complete_once(
+                text = await _complete_once(
                     base_url=base_url,
                     api_key=api_key,
                     model=model,
                     messages=messages,
-                    timeout=timeout,
+                    timeout=limit,
                     response_schema=response_schema,
                     grammar=grammar,
                     tools=tools,
                     yield_to_chats=yield_to_chats,
                 )
+                retry.charge_unreachable()
+                return text
             except turn_mod.TurnCancelled:
                 raise
             except YieldLater:
@@ -1285,8 +1295,12 @@ async def _stream_window(
     timeout: float,
 ) -> AsyncIterator[str]:
     """Retry until the first token, then let a later drop surface to the caller."""
-    window = retry.Window()
+    window = retry.Window(base_url=base_url)
     while True:
+        limit = window.attempt_limit(timeout)
+        if limit <= 0:
+            raise ProviderError(retry.unreachable_text(base_url))
+        window.begin_attempt()
         permit = await gate.reserve()
         hold = True
         started = False
@@ -1298,10 +1312,12 @@ async def _stream_window(
                     api_key=api_key,
                     model=model,
                     messages=messages,
-                    timeout=timeout,
+                    timeout=limit,
                 ):
                     started = True
+                    retry.charge_unreachable()
                     yield piece
+                retry.charge_unreachable()
                 return
             except turn_mod.TurnCancelled:
                 raise

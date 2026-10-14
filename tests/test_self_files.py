@@ -144,8 +144,8 @@ def test_each_request_uses_the_connection_saved_now(world):
     failed = _send(world, "are you there?")
     error = failed["chat"]["messages"][-1]
     assert error["error"] is True
-    assert "\u201chome\u201d at http://localhost:8080/v1" in error["content"]
-    assert "Bot1 used the connection" in error["content"]
+    assert error["kind"] == "connection"
+    assert error["content"] == "Can't reach the model at localhost:8080. Check the connection or address."
     assert world.rec.calls[-1]["base_url"] == "http://localhost:8080/v1"
 
     patched = world.client.patch(

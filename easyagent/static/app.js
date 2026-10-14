@@ -1202,10 +1202,12 @@ function renderRunIndicator(messages, bot) {
   const view = describeRun(run, Date.now());
   const stepCount = run.step_count || 0;
   const stepIndex = run.step_index || 0;
+  const current = String(run.current_step || "");
+  const reconnecting = current.startsWith("Model not answering");
   const bits = [];
-  if (stepCount) bits.push(stepIndex ? `Step ${stepIndex} of ${stepCount}` : `${stepCount} steps`);
+  if (!reconnecting && stepCount) bits.push(stepIndex ? `Step ${stepIndex} of ${stepCount}` : `${stepCount} steps`);
   if (view.elapsed) bits.push(view.elapsed);
-  const activity = run.last_activity || run.current_step || "";
+  const activity = reconnecting ? current : (run.last_activity || current);
   if (activity) bits.push(activity);
   const words = bits.length ? bits.join(" · ") : view.words;
   const tone = runTone(words, run.status);
@@ -1221,7 +1223,7 @@ function renderRunIndicator(messages, bot) {
       el("span", { class: "run-pulse", "aria-hidden": "true" }),
       el("p", { class: "body run-step" }, [
         el("span", { class: "run-step-text", id: "run-step" }, [words]),
-        el("span", { class: "run-stuck" }, [run.stuck ? " No activity for a while" : ""]),
+        el("span", { class: "run-stuck" }, [!reconnecting && run.stuck ? " No activity for a while" : ""]),
         el("span", { class: "run-queued", "data-testid": "queued-badge" }, [run.queued ? " Queued" : ""]),
         el("span", { class: "run-dots", "aria-hidden": "true" }),
       ]),
@@ -1423,6 +1425,13 @@ function renderThread() {
     const open = index === transcript.length - 1 && message.role === "assistant" && !failed
       && Array.isArray(message.choices) && message.choices.length > 1;
     if (open) main.append(choiceRow(message.choices));
+    if (message.kind === "connection") {
+      main.append(el("button", {
+        type: "button",
+        "data-testid": "open-connection-settings",
+        onclick: () => openPlainScreen("connections"),
+      }, ["Connection settings"]));
+    }
     if (message.kind === "resume-offer") {
       main.append(el("div", { class: "resume-card" }, [
         el("button", { type: "button", "data-testid": "resume-job", onclick: () => void resumeSavedJob() }, ["Resume"]),
@@ -1861,7 +1870,10 @@ function applyStreamEvent(event, stream) {
   }
   if (event.type === "status") {
     const run = event.run || live.run || null;
-    if (run && event.text) run.current_step = event.text;
+    if (run && event.text) {
+      run.current_step = event.text;
+      if (String(event.text).startsWith("Model not answering")) run.last_activity = event.text;
+    }
     rememberLive(stream, {
       phase: "thinking",
       label: event.text || "Thinking",

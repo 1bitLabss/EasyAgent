@@ -79,7 +79,8 @@ function BotTile({ bot }: { bot: Bot }) {
           if (run?.status !== "running") return null;
           const index = run.step_index || 0;
           const countSteps = run.step_count || 0;
-          const label = countSteps ? `${index || "–"}/${countSteps}` : "Working";
+          const reconnecting = String(run.current_step || "").startsWith("Model not answering");
+          const label = reconnecting ? "Retry" : countSteps ? `${index || "–"}/${countSteps}` : "Working";
           return (
             <span data-testid="working-pill" className="absolute bottom-0.5 left-1/2 -translate-x-1/2 rounded-full bg-foreground px-1 text-[9px] leading-4 text-background">
               {label}

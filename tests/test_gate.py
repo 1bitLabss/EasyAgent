@@ -321,9 +321,9 @@ def test_a_dropped_connection_is_retried_then_says_stopped(tmp_path, monkeypatch
         assert calls == ["A"] * len(calls)
         assert "Model not answering, retrying (attempt 2)" in body
         text = stored["messages"][-1]["content"]
-        assert text.startswith("Stopped:")
-        assert "Server disconnected without sending a response" in text
-        assert "Retried for" in text
+        assert text == "Can't reach the model at 127.0.0.1:9. Check the connection or address."
+        assert "Server disconnected without sending a response" not in text
+        assert "Retried for" not in text
         assert stored["messages"][-1]["error"] is True
 
     asyncio.run(scenario())
@@ -430,8 +430,8 @@ def test_stream_complete_retries_a_hangup_for_the_window(monkeypatch):
     with pytest.raises(llm.ProviderError) as caught:
         asyncio.run(fail())
     assert again.calls > 2
-    assert "Connection reset by peer" in str(caught.value)
-    assert "Retried for" in str(caught.value)
+    assert str(caught.value) == "Can't reach the model at 127.0.0.1:9. Check the connection or address."
+    assert "Retried for" not in str(caught.value)
 
 
 def test_stream_complete_does_not_retry_when_the_caller_already_will(monkeypatch):

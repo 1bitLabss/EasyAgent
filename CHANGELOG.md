@@ -6,6 +6,7 @@
 - A message during a job does not start it over. The reply comes back at once with the step, the last activity, and how long the job has been running. By default the message steers the same job. A bot can instead take it as a follow-up when the job finishes. Three messages can wait. Stop is the only way to cancel.
 - While a job is running, the chat and the sidebar show which step it is on, how long it has been running, and the last activity. A quiet job says so. A message waiting on that job shows Queued.
 - A job that was running when EasyAgent stopped can be resumed at the same step, or dismissed with the checklist kept. Starting again on its own is off until that bot opts in. Open approval cards are dropped and are not carried onto the new run.
+- When the model cannot be reached, retries stop after about two minutes (`EASYAGENT_MODEL_RETRY_SECONDS` changes that). The run stops with "Can't reach the model at <host>. Check the connection or address." and a button that opens connection settings. The working pill says the model is not answering while that retry is going on. The model does not write that explanation.
 
 ## 0.3.19
 

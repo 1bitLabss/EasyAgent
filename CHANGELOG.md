@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.3.22
+
+- `/yolo` turns on auto-approval for this chat only. The header control does the same. File actions inside this bot's workspace, or a folder this bot already has a grant for, skip the approval card. The sandbox and containment still wrap the command. Drive wipes, downloaded scripts, secrets, other bots, the app data folder, bridge sends, outbound messages, and anything outside still wait or are blocked.
+- It turns off after 2 hours, or after 30 minutes with nothing running. `/yolo 4h`, `/yolo 90m`, and `/yolo off` change that. Eight hours is the longest. A routine, a schedule, a helper, or Resume does not keep it.
+- Only a message you send, or the header control, can turn it on. The access check refuses a bot, a steered line, and a bridge. The chat header shows a red YOLO badge with the time left. Each action it approves is written to the safety audit with the tag yolo.
+
 ## 0.3.21
 
 - A message sent while a job is running shows up in the transcript immediately and stays there across a refresh. It is marked Queued, then Seen by bot when the job folds it in, then Answered when the reply finishes. The instant "Still on this job" note sits under that message.

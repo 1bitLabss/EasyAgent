@@ -698,6 +698,77 @@ function renderChatList() {
   }
 }
 
+let yoloTimer = null;
+
+function yoloDeadline() {
+  const yolo = state.chat && state.chat.yolo;
+  if (!yolo || !yolo.on) return 0;
+  const key = `${state.chatId}:${yolo.until || ""}:${yolo.idle_until || ""}:${yolo.remaining_seconds}`;
+  if (state.yoloKey !== key) {
+    state.yoloKey = key;
+    state.yoloDeadline = Date.now() + Math.max(0, Number(yolo.remaining_seconds) || 0) * 1000;
+  }
+  return state.yoloDeadline || 0;
+}
+
+function yoloClockText(seconds) {
+  const left = Math.max(0, Math.floor(seconds));
+  const hours = Math.floor(left / 3600);
+  const minutes = Math.floor((left % 3600) / 60);
+  const secs = left % 60;
+  if (hours > 0) return minutes ? `${hours}h ${minutes}m` : `${hours}h`;
+  if (minutes > 0) return `${minutes}m`;
+  return `${secs}s`;
+}
+
+function paintYolo() {
+  const node = $("yolo-badge");
+  if (!node) return;
+  const chat = state.chat;
+  const open = (state.screen || "chat") === "chat" && state.view !== "room" && chat && state.chatId && (!chat.bot_id || chat.bot_id === state.botId);
+  if (!open) {
+    node.hidden = true;
+    if (yoloTimer) {
+      clearInterval(yoloTimer);
+      yoloTimer = null;
+    }
+    return;
+  }
+  node.hidden = false;
+  const deadline = yoloDeadline();
+  const left = deadline ? Math.max(0, (deadline - Date.now()) / 1000) : 0;
+  const on = Boolean(chat.yolo && chat.yolo.on && left > 0);
+  node.classList.toggle("is-off", !on);
+  node.setAttribute("aria-pressed", on ? "true" : "false");
+  node.textContent = on ? `YOLO ${yoloClockText(left)}` : "YOLO";
+  node.setAttribute("aria-label", on ? `YOLO on, ${yoloClockText(left)} left` : "Turn YOLO on for this chat");
+  if (on && !yoloTimer) yoloTimer = setInterval(paintYolo, 1000);
+  if (!on && yoloTimer) {
+    clearInterval(yoloTimer);
+    yoloTimer = null;
+  }
+}
+
+async function toggleYolo() {
+  if (!state.botId || !state.chatId) return;
+  const node = $("yolo-badge");
+  const on = !(node && node.getAttribute("aria-pressed") === "true");
+  formError("thread-error", "");
+  try {
+    const chat = await api(`/api/bots/${state.botId}/chats/${state.chatId}/yolo`, {
+      method: "POST",
+      body: JSON.stringify({ on }),
+    });
+    if (state.chatId !== chat.id) return;
+    state.chat = chat;
+    state.yoloKey = "";
+    paintYolo();
+    renderThread();
+  } catch (error) {
+    formError("thread-error", error.message || "YOLO was not changed.");
+  }
+}
+
 function renderStage() {
   syncBotLive();
   const screen = state.screen || "chat";
@@ -735,9 +806,11 @@ function renderStage() {
       show($("thread-empty"), false);
       show($("thread"), false);
     }
+    paintYolo();
     return;
   }
   $("bot-title").textContent = bot.name;
+  paintYolo();
   if (onChat) mountChatFace(bot);
   if ($("settings-heading")) $("settings-heading").textContent = bot.name;
   renderAskChoices(bot);
@@ -3385,6 +3458,7 @@ function wire() {
   $("show-direction").addEventListener("click", showDirection);
   $("open-settings").addEventListener("click", openSettings);
   $("open-settings-chat").addEventListener("click", openSettings);
+  if ($("yolo-badge")) $("yolo-badge").addEventListener("click", toggleYolo);
   $("close-settings").addEventListener("click", backToChat);
   $("rooms-back").addEventListener("click", () => openPlainScreen("rooms"));
   $("projects-back").addEventListener("click", () => {

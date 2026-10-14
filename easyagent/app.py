@@ -464,6 +464,15 @@ class MessageIn(BaseModel):
     attachment_id: str | None = None
 
 
+class YoloIn(BaseModel):
+    """The header control. A source field in the body is ignored."""
+
+    model_config = ConfigDict(extra="ignore")
+    on: bool = True
+    hours: float | None = None
+    idle_minutes: int | None = None
+
+
 class BridgeIn(BaseModel):
     model_config = ConfigDict(extra="ignore")
     kind: str = "telegram"
@@ -1434,6 +1443,25 @@ def create_app(data_dir: str | Path | None = None) -> FastAPI:
             raise HTTPException(exc.status, exc.message) from exc
         return Response(content=data, media_type=meta.get("media_type") or "application/octet-stream")
 
+    @app.post("/api/bots/{bot_id}/chats/{chat_id}/yolo")
+    def set_yolo(bot_id: str, chat_id: str, body: YoloIn):
+        """Turn YOLO on or off for this chat. Only the header control reaches this route."""
+        from easyagent.yolo import apply_toggle
+
+        store.get_chat(bot_id, chat_id)
+        result = apply_toggle(
+            store,
+            bot_id,
+            chat_id,
+            on=body.on,
+            hours=body.hours,
+            idle_minutes=body.idle_minutes,
+            source="user-click",
+        )
+        if not result.ok:
+            raise HTTPException(400, result.message)
+        return _public_chat(store, store.get_chat(bot_id, chat_id))
+
     @app.post("/api/bots/{bot_id}/chats/{chat_id}/messages")
     async def post_message(bot_id: str, chat_id: str, body: MessageIn, request: Request):
         content = (body.content or "").strip()
@@ -1447,6 +1475,15 @@ def create_app(data_dir: str | Path | None = None) -> FastAPI:
         if not turn_mod.try_begin(store, chat_id):
             return await _answer_while_busy(store, bot_id, chat_id, content, attachment, request)
         turn_mod.interrupt(store, chat_id, "a new message was sent in this chat")
+        if attachment is None and _yolo_command(content):
+            try:
+                async with chat_lock(store, chat_id):
+                    turn_mod.bind(store, chat_id, bot_id=bot_id)
+                    _save_user_turn(store, bot_id, chat_id, content, None)
+                    _apply_yolo_command(store, bot_id, chat_id, content)
+                    return _public_chat(store, store.get_chat(bot_id, chat_id))
+            finally:
+                turn_mod.clear_busy(store, chat_id)
         if _wants_stream(request):
             return StreamingResponse(
                 _stream_new_message(store, bot_id, chat_id, content, attachment),
@@ -1619,7 +1656,9 @@ def create_app(data_dir: str | Path | None = None) -> FastAPI:
         if not turn_mod.try_begin(store, chat_id):
             raise HTTPException(409, "This job is still running. Stop is what cancels it.")
         from easyagent.plan import undismiss_plan
+        from easyagent.yolo import clear as clear_yolo
 
+        clear_yolo(store, bot_id, chat_id)
         undismiss_plan(store, bot_id, chat_id)
         _close_resume_offer(store, bot_id, chat_id)
         line = "Resume the checklist where it stopped. Do not start over."
@@ -2600,6 +2639,7 @@ def _public_chat(store: Store, chat: dict, window: int | None = None) -> dict:
         "context": _metered_stats(store, chat, prepared.stats),
         "run": public_run(chat, store),
         "plan": _public_plan(store, chat),
+        "yolo": _public_yolo(chat),
     }
     _overlay_queue(store, chat, public)
     return public
@@ -2634,6 +2674,41 @@ def _can_retry(messages: list) -> bool:
         return True
     text = (last.get("content") or "").strip()
     return text == "Stopped." or text.startswith("Stopped:")
+
+
+def _public_yolo(chat: dict) -> dict:
+    from easyagent.yolo import public_view
+
+    return public_view(chat)
+
+
+def _yolo_command(content: str) -> bool:
+    from easyagent.yolo import is_command
+
+    return is_command(content)
+
+
+def _apply_yolo_command(store: Store, bot_id: str, chat_id: str, content: str) -> None:
+    """A typed /yolo. The actor is the person, checked again inside apply_command."""
+    from easyagent.yolo import apply_command
+
+    result = apply_command(store, bot_id, chat_id, content, source="user-message")
+    chat = store.get_chat(bot_id, chat_id)
+    chat["messages"].append({
+        "id": new_id(),
+        "role": "assistant",
+        "kind": "yolo",
+        "content": result.message,
+        "created_at": now_iso(),
+    })
+    chat["updated_at"] = now_iso()
+    store.save_chat(chat)
+
+
+def _note_yolo_run(chat: dict, status: str) -> None:
+    from easyagent.yolo import note_run
+
+    note_run(chat, status)
 
 
 def _save_user_turn(
@@ -3492,6 +3567,7 @@ def _apply_run(
             "current_step": "",
             "reason": "",
         }
+        _note_yolo_run(chat, "idle")
         return chat["run"]
     slot = turn_mod.current_slot()
     if start or not run.get("started_at"):
@@ -3525,6 +3601,7 @@ def _apply_run(
     if run.get("activity_started_at"):
         stored["activity_started_at"] = run["activity_started_at"]
     chat["run"] = stored
+    _note_yolo_run(chat, status)
     return chat["run"]
 
 
@@ -4071,6 +4148,9 @@ async def _kick_auto_resume(store: Store) -> None:
 
 async def _auto_resume_turn(store: Store, bot_id: str, chat_id: str) -> None:
     try:
+        from easyagent.yolo import clear as clear_yolo
+
+        clear_yolo(store, bot_id, chat_id)
         async with chat_lock(store, chat_id):
             turn_mod.bind(store, chat_id, bot_id=bot_id)
             _save_user_turn(store, bot_id, chat_id, "Resume the checklist where it stopped. Do not start over.")

@@ -3436,6 +3436,18 @@ def _notify_bridge(store: Store, bot_id: str | None, card: Pending) -> None:
         return
 
 
+def _yolo_take(store: Store, request, bot_id: str | None, verdict: Verdict) -> bool:
+    """Skip the card only when this chat's YOLO covers the action. A failure stays a card."""
+    if verdict.tier != ASK or not bot_id or is_unattended():
+        return False
+    from easyagent.yolo import covers
+
+    try:
+        return bool(covers(store, bot_id, request, verdict))
+    except Exception:
+        return False
+
+
 async def guard(store: Store, request, bot_id: str | None):
     """Return (request, early_result). early_result is set when the tool must not run."""
     from easyagent.tools import ToolError
@@ -3479,6 +3491,36 @@ async def guard(store: Store, request, bot_id: str | None):
         asyncio.create_task(_settle_unattended(store, request, bot_id, card, verdict))
         _notify_bridge(store, bot_id, card)
         raise ToolError("That needs you. A card is in the chat. This routine went on without it. If nobody answers, that counts as a denial.")
+    if verdict.tier == ASK and _yolo_take(store, request, bot_id, verdict):
+        _audit(
+            store,
+            bot_id,
+            {
+                "at": now_iso(),
+                "decision": "approve",
+                "tag": "yolo",
+                "rule": verdict.rule,
+                "why": verdict.why,
+                "detail": verdict.detail,
+            },
+        )
+        if getattr(request, "kind", "") == "shell" and verdict.rule == "delete":
+            paths = _pure_delete_paths(getattr(request, "command", "") or "")
+            if paths is not None:
+                text = _trash_paths(store, paths)
+                _remember_created(request)
+                return request, text
+        if verdict.rule in {"overwrite", "redirect-overwrite", "script-body", "write-outside"}:
+            try:
+                cwd = Path(turn_mod.tool_cwd())
+            except OSError:
+                cwd = Path(".")
+            for path in _paths_in(verdict.detail, cwd):
+                _snapshot(store, path)
+            if getattr(request, "kind", "") == "files":
+                _snapshot(store, _file_request_path(store, getattr(request, "path", "") or ".", cwd, bot_id))
+        _remember_created(request)
+        return request, None
     if verdict.tier == ASK:
         exact = (getattr(request, "command", "") or getattr(request, "path", "") or "").strip()
         card = Pending(

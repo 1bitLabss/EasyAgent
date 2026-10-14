@@ -117,6 +117,14 @@ export type Chat = ChatSummary & {
   context?: Record<string, number>;
   run?: Run;
   plan?: Plan | null;
+  yolo?: Yolo;
+};
+
+export type Yolo = {
+  on: boolean;
+  until?: string | null;
+  idle_until?: string | null;
+  remaining_seconds?: number;
 };
 
 export type Room = {

@@ -84,6 +84,21 @@ def presented_token(headers) -> str:
     return ""
 
 
+# A person at the keyboard. Anything else is the bot, or a path the bot can steer.
+_YOLO_ACTORS = frozenset({"user-message", "user-click"})
+
+
+def yolo_actor_allowed(source: str | None) -> bool:
+    """True only when a person turned YOLO on for this chat.
+
+    ``user-message`` is a slash command typed into an idle chat. ``user-click``
+    is the header control. A bot, a steered line, a bridge, a routine, a helper,
+    a schedule, or a resume is refused. The caller passes the source. A request
+    body cannot name it.
+    """
+    return (source or "").strip() in _YOLO_ACTORS
+
+
 def access_decision(host: str | None, presented: str, phone=None) -> str:
     """allow, refuse, or need_token.
 

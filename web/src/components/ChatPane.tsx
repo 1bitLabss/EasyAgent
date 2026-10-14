@@ -9,6 +9,7 @@ import { ThinkingBox } from "@/components/ThinkingBox";
 import { WindowControls } from "@/components/WindowControls";
 import { moodForReaction, pokeFace } from "@/lib/mood";
 import { chipText } from "@/lib/chips";
+import { yoloClock, yoloRemaining } from "@/lib/yolo";
 import { activityLine, describeRun, faceStateFor, runTone, workingLine } from "@/lib/run";
 import { hideWhileSending, messageHasBubble, reactionWho } from "@/lib/transcript";
 import { cn } from "@/lib/utils";
@@ -334,7 +335,23 @@ export function ChatPane() {
   const scroller = useRef<HTMLDivElement>(null);
   const box = useRef<HTMLTextAreaElement>(null);
   const bot = (bots.data || []).find((item) => item.id === botId) || null;
+  const yoloLeft = yoloRemaining(chat.data?.yolo, chat.dataUpdatedAt || now, now);
+  const yoloOn = yoloLeft > 0;
   void tick;
+
+  async function toggleYolo() {
+    if (!botId || !chatId) return;
+    try {
+      const next = await api<Chat>(`/api/bots/${botId}/chats/${chatId}/yolo`, {
+        method: "POST",
+        json: { on: !yoloOn },
+      });
+      const prev = queryClient.getQueryData<Chat>(["chat", botId, chatId]);
+      queryClient.setQueryData(["chat", botId, chatId], mergeChat(prev, next));
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "YOLO was not changed.");
+    }
+  }
   const flight = botId && chatId ? flightFor(botId, chatId) : null;
   const live = flight?.live || null;
   const readSent = useRef("");
@@ -521,7 +538,7 @@ export function ChatPane() {
     <section className="relative flex h-full min-h-0 flex-1 flex-col">
       <div className="title-drag relative z-10 flex h-14 shrink-0 items-center justify-center" data-tauri-drag-region>
       <WindowControls />
-      <div className="relative z-20 flex justify-center" data-testid="bot-pill">
+      <div className="relative z-20 flex items-center justify-center gap-2" data-testid="bot-pill">
         <div className="relative">
           <button
             type="button"
@@ -567,6 +584,20 @@ export function ChatPane() {
             </div>
           ) : null}
         </div>
+        {botId && chatId ? (
+          <button
+            type="button"
+            data-testid="yolo-badge"
+            aria-pressed={yoloOn}
+            aria-label={yoloOn ? `YOLO on, ${yoloClock(yoloLeft)} left` : "Turn YOLO on for this chat"}
+            onClick={() => void toggleYolo()}
+            className={yoloOn
+              ? "rounded-full bg-[#b42318] px-2.5 py-1 text-xs font-bold tracking-wide text-white"
+              : "rounded-full bg-background px-2.5 py-1 text-xs font-semibold text-[#b42318] shadow-[inset_0_0_0_1px_#b42318]"}
+          >
+            {yoloOn ? `YOLO ${yoloClock(yoloLeft)}` : "YOLO"}
+          </button>
+        ) : null}
       </div>
       </div>
 

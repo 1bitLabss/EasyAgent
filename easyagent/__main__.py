@@ -81,6 +81,9 @@ def main() -> None:
     port = int(os.environ.get("EASYAGENT_PORT", "44721"))
     host = os.environ.get("EASYAGENT_HOST", "127.0.0.1")
     data = default_data_dir()
+    from easyagent.logstamp import stamp_stdio
+
+    stamp_stdio()
     _print_banner(port, host, data)
     app = create_app(data)
     tray_stop = threading.Event()

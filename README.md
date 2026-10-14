@@ -216,7 +216,7 @@ The classifier lowers risk. OS containment is what limits the damage if a comman
 
 Text from a web page, a file, or a tool is marked untrusted. The bot is told that instructions inside those markers are data. A tool call that copies a command out of that text waits for you.
 
-A lesson, a nightly proposal, a playbook, or a note cannot turn the guardrails down. A lesson that tries is rejected. One turn also stops after 48 tool calls or 20 minutes of tool time.
+A lesson, a nightly proposal, a playbook, or a note cannot turn the guardrails down. A lesson that tries is rejected. One turn also stops after 48 tool calls or 20 minutes spent running tools. Waiting on the model does not count, and the next turn starts that clock over.
 
 ## Day to day
 

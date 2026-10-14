@@ -124,6 +124,8 @@ async def _grade(
                 {"role": "user", "content": user},
             ],
             tools=False,
+            timeout=llm.grade_timeout(base_url),
+            long_wait=True,
         )
     except turn_mod.TurnCancelled:
         raise

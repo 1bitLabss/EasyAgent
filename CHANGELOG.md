@@ -7,6 +7,7 @@
 - While a job is running, the chat and the sidebar show which step it is on, how long it has been running, and the last activity. A quiet job says so. A message waiting on that job shows Queued.
 - A job that was running when EasyAgent stopped can be resumed at the same step, or dismissed with the checklist kept. Starting again on its own is off until that bot opts in. Open approval cards are dropped and are not carried onto the new run.
 - When the model cannot be reached, retries stop after about two minutes (`EASYAGENT_MODEL_RETRY_SECONDS` changes that). The run stops with "Can't reach the model at <host>. Check the connection or address." and a button that opens connection settings. The working pill says the model is not answering while that retry is going on. The model does not write that explanation.
+- The 48-call and 20-minute tool limits reset with each run. The 20 minutes counts time tools spend running, not time waiting on the model or time since an earlier turn. A checker or grader on a local or home-network model may wait up to 10 minutes. Server log lines start with a UTC timestamp.
 
 ## 0.3.19
 

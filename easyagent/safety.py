@@ -3053,21 +3053,49 @@ def _injected(detail: str, command: str) -> bool:
     return False
 
 
+_BUDGET_LOCK = threading.Lock()
+
+
+def _now() -> float:
+    """Clock for tool time. Tests move this without waiting."""
+    return time.monotonic()
+
+
+def _budget_state(slot) -> dict:
+    """Call count and tool seconds for this run. A new run id starts over."""
+    run_id = str(getattr(slot, "run_id", "") or "")
+    state = getattr(slot, "safety_budget", None)
+    if not isinstance(state, dict) or state.get("run_id") != run_id:
+        state = {"run_id": run_id, "calls": 0, "seconds": 0.0}
+        slot.safety_budget = state
+    return state
+
+
+def note_tool_seconds(seconds: float) -> None:
+    """Add time a tool actually spent running. Model waits and idle time are not added."""
+    slot = turn_mod.current_slot()
+    if slot is None:
+        return
+    spent = max(0.0, float(seconds))
+    if spent <= 0:
+        return
+    with _BUDGET_LOCK:
+        state = _budget_state(slot)
+        state["seconds"] = float(state["seconds"]) + spent
+
+
 def _budget() -> Verdict | None:
     slot = turn_mod.current_slot()
     if slot is None:
         return None
-    started = getattr(slot, "safety_started", None)
-    if started is None:
-        slot.safety_started = time.monotonic()
-        slot.safety_calls = 0
-        started = slot.safety_started
-    calls = int(getattr(slot, "safety_calls", 0) or 0) + 1
-    slot.safety_calls = calls
+    with _BUDGET_LOCK:
+        state = _budget_state(slot)
+        if float(state["seconds"]) > MAX_SECONDS:
+            return _verdict(BLOCK, "time-budget", "This turn ran for twenty minutes of tool time. It stops.", "", _fp("budget", "time"))
+        state["calls"] = int(state["calls"]) + 1
+        calls = int(state["calls"])
     if calls > MAX_CALLS:
         return _verdict(BLOCK, "call-budget", f"This turn already ran {MAX_CALLS} tools. It stops so it cannot loop.", "", _fp("budget", "calls"))
-    if time.monotonic() - float(started) > MAX_SECONDS:
-        return _verdict(BLOCK, "time-budget", "This turn ran for twenty minutes of tool time. It stops.", "", _fp("budget", "time"))
     return None
 
 

@@ -23,6 +23,9 @@ from easyagent import retry
 # Idle notes and the rolling summary run at night. A local 27B often needs
 # minutes, not a few seconds, before the first token.
 IDLE_MODEL_TIMEOUT = 180.0
+# A grader or checker on a local model may think for several minutes before
+# a short JSON grade. A public endpoint keeps the ordinary chat timeout.
+LOCAL_GRADE_TIMEOUT = 600.0
 from easyagent import turn as turn_mod
 
 
@@ -126,6 +129,22 @@ def _log_model_call(data: dict | None, started: float, messages) -> None:
         f"generated_tokens={generated} ms={elapsed} prefix={prefix}",
         flush=True,
     )
+
+
+def grade_timeout(base_url: str) -> float:
+    """How long a grader or checker may wait. A local or home-network model gets longer."""
+    from urllib.parse import urlparse
+
+    from easyagent.access import is_lan, is_local
+
+    raw = (base_url or "").strip()
+    try:
+        host = urlparse(raw if "://" in raw else "//" + raw).hostname or ""
+    except ValueError:
+        host = ""
+    if is_local(host) or is_lan(host):
+        return LOCAL_GRADE_TIMEOUT
+    return 120.0
 
 
 def grammar_rejected(detail: str) -> bool:
@@ -913,6 +932,7 @@ async def _dispatch_complete(
     grammar: str | None,
     tools: bool,
     yield_to_chats: bool,
+    long_wait: bool = False,
 ) -> str:
     if not gate.inner_retry_allowed():
         try:
@@ -944,6 +964,7 @@ async def _dispatch_complete(
         grammar=grammar,
         tools=tools,
         yield_to_chats=yield_to_chats,
+        long_wait=long_wait,
     )
 
 
@@ -958,9 +979,10 @@ async def _complete_window(
     grammar: str | None = None,
     tools: bool = True,
     yield_to_chats: bool = False,
+    long_wait: bool = False,
 ) -> str:
     """Retry a completion that never returned, and free the slot during the pause."""
-    window = retry.Window(base_url=base_url)
+    window = retry.Window(base_url=base_url, long_wait=long_wait)
     while True:
         limit = window.attempt_limit(timeout)
         if limit <= 0:
@@ -1018,6 +1040,7 @@ async def complete(
     grammar: str | None = None,
     tools: bool | None = None,
     yield_to_chats: bool = False,
+    long_wait: bool = False,
 ) -> str:
     """One completion. The request runs in this process, not in the tool container. Structured and internal calls omit tools. llama.cpp gets plain JSON."""
     structured = bool(response_schema or grammar)
@@ -1041,6 +1064,7 @@ async def complete(
             grammar=gram,
             tools=send_tools,
             yield_to_chats=yield_to_chats,
+            long_wait=long_wait,
         )
     except ProviderError as exc:
         if structured and grammar_rejected(str(exc)):
@@ -1055,6 +1079,7 @@ async def complete(
                 grammar=None,
                 tools=False,
                 yield_to_chats=yield_to_chats,
+                long_wait=long_wait,
             )
         raise
 

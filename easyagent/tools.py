@@ -2121,7 +2121,7 @@ async def execute(store: Store, request: ToolRequest, bot_id: str | None = None)
 async def _execute_now(store: Store, request: ToolRequest, bot_id: str | None = None) -> str:
     turn_mod.raise_if_cancelled()
     from easyagent.helpers import scope_block
-    from easyagent.safety import _audit, guard, unattended_blocked_target, wrap_output
+    from easyagent.safety import _audit, guard, unattended_blocked_target
     from easyagent.store import now_iso
 
     limited = scope_block(request.kind)
@@ -2146,6 +2146,19 @@ async def _execute_now(store: Store, request: ToolRequest, bot_id: str | None = 
     if early is not None:
         turn_mod.raise_if_cancelled()
         return early
+    from easyagent import safety as safety_mod
+
+    started = safety_mod._now()
+    try:
+        return await _run_allowed_tool(store, request, bot_id)
+    finally:
+        safety_mod.note_tool_seconds(safety_mod._now() - started)
+
+
+async def _run_allowed_tool(store: Store, request: ToolRequest, bot_id: str | None = None) -> str:
+    """Run a tool guard already allowed. The caller times this, not the wait before it."""
+    from easyagent.safety import wrap_output
+
     if request.kind == "mcp":
         from easyagent.connectors import invoke
 

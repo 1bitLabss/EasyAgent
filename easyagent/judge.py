@@ -136,6 +136,8 @@ async def grade_text(
                 {"role": "user", "content": user},
             ],
             tools=False,
+            timeout=llm.grade_timeout(endpoint.get("base_url") or ""),
+            long_wait=True,
         )
     finally:
         gate.reset_connection(token)

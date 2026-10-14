@@ -230,9 +230,10 @@ class Window:
     does not start the two minutes over.
     """
 
-    def __init__(self, budget: float | None = None, base_url: str = "") -> None:
+    def __init__(self, budget: float | None = None, base_url: str = "", long_wait: bool = False) -> None:
         self.budget = budget_seconds() if budget is None else max(0.0, float(budget))
         self.base_url = base_url or ""
+        self.long_wait = bool(long_wait)
         self.started = now()
         self._attempt_started = self.started
         self.failures = 0
@@ -254,6 +255,11 @@ class Window:
         left = self.budget - self.spent()
         if left <= 0:
             return 0.0
+        # A local grade may think longer than the reconnect budget. A hung
+        # chat call still stops at the budget. After the budget is already
+        # spent, neither kind starts another attempt.
+        if self.long_wait:
+            return float(default)
         return min(float(default), left)
 
     def plan(self, detail: str, *, started: bool) -> str | None:

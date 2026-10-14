@@ -4,10 +4,18 @@ import os
 import ssl
 import subprocess
 import sys
+from pathlib import Path
 
 
 def _run(env_extra: dict) -> subprocess.CompletedProcess:
     env = {**os.environ, **env_extra}
+    # The suite points HOME at an empty folder, so this child does not see the
+    # user site where httpx is installed. Put that directory on PYTHONPATH.
+    import httpx
+
+    site = str(Path(httpx.__file__).resolve().parents[1])
+    parts = [env.get("PYTHONPATH", ""), site]
+    env["PYTHONPATH"] = os.pathsep.join(part for part in parts if part)
     code = "import easyagent, os, httpx; print(os.environ.get('SSLKEYLOGFILE')); httpx.AsyncClient()"
     return subprocess.run([sys.executable, "-c", code], env=env, capture_output=True, text=True, timeout=60)
 

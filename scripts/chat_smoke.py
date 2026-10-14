@@ -26,10 +26,12 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 os.environ.pop("SSLKEYLOGFILE", None)
 
 REPLY = "Yes, I am connected. (chat-smoke stub)"
+LOOP_TEXT = "The bot repeated itself without making progress, so I stopped it."
 MODEL = "stub-model"
 HOLD = threading.Event()
 _COMPLETIONS = {"n": 0}
 _COMPLETION_LOCK = threading.Lock()
+_REPLY = {"text": REPLY}
 
 
 class Stub(BaseHTTPRequestHandler):
@@ -74,7 +76,7 @@ class Stub(BaseHTTPRequestHandler):
             self.end_headers()
             chunks = [
                 {"role": "assistant", "content": ""},
-                {"content": REPLY},
+                {"content": _REPLY["text"]},
             ]
             for delta in chunks:
                 event = {"id": "stub", "object": "chat.completion.chunk", "created": created, "model": MODEL,
@@ -88,7 +90,7 @@ class Stub(BaseHTTPRequestHandler):
             return
         self._json(200, {
             "id": "stub", "object": "chat.completion", "created": created, "model": MODEL,
-            "choices": [{"index": 0, "message": {"role": "assistant", "content": REPLY}, "finish_reason": "stop"}],
+            "choices": [{"index": 0, "message": {"role": "assistant", "content": _REPLY["text"]}, "finish_reason": "stop"}],
             "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
         })
 
@@ -262,6 +264,47 @@ def main() -> int:
         print("FAIL: no real assistant reply")
         return 1
     print("PASS: real assistant reply received")
+
+    _REPLY["text"] = "Looking"
+    status, text = call(app, "POST", "/api/bots", {"name": "SMOKE2", "endpoint_id": endpoint["id"]})
+    if status != 200:
+        print(f"FAIL: create second bot HTTP {status}: {text}")
+        return 1
+    other = json.loads(text)
+    status, text = call(app, "POST", f"/api/bots/{other['id']}/chats")
+    if status != 200:
+        print(f"FAIL: create second chat HTTP {status}: {text}")
+        return 1
+    other_chat = json.loads(text)
+    status, body = call(
+        app,
+        "POST",
+        f"/api/bots/{other['id']}/chats/{other_chat['id']}/messages",
+        {"content": "Look at the notes."},
+        accept="text/event-stream",
+        timeout=180,
+    )
+    _, stored = call(app, "GET", f"/api/bots/{other['id']}/chats/{other_chat['id']}?window=80")
+    try:
+        saved = json.loads(stored)
+    except json.JSONDecodeError:
+        saved = {}
+    messages = saved.get("messages") or []
+    looking = [
+        item for item in messages
+        if str(item.get("content") or "").strip() in {"Looking", "Looking."}
+        and item.get("about") != "activity"
+        and item.get("kind") != "status"
+    ]
+    stopped = next((item for item in messages if item.get("content") == LOOP_TEXT), None)
+    run = saved.get("run") or {}
+    if status != 200 or len(looking) > 1 or stopped is None or stopped.get("kind") != "resume-offer" or run.get("status") != "paused":
+        print(f"FAIL: repeated Looking did not stop the run (HTTP {status})")
+        print("looking rows:", len(looking))
+        print("run:", run.get("status"))
+        print("messages:", [(item.get("role"), item.get("kind"), item.get("content")) for item in messages])
+        return 1
+    print("PASS: repeated Looking stopped with Resume")
     return 0
 
 

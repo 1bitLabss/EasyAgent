@@ -37,6 +37,7 @@ class Slot:
         self.store = None
         self.busy = False
         self.job_started = ""
+        self.follow_chain = 0
 
 
 _GUARD = threading.Lock()
@@ -159,6 +160,7 @@ def bind(store, chat_id: str, bot_id: str = "") -> Slot:
     slot.reason = ""
     slot.run_id = str(uuid.uuid4())
     slot.job_started = ""
+    slot.follow_chain = 0
     slot.bot_id = bot_id or slot.bot_id
     slot.chat_id = chat_id
     slot.store = store

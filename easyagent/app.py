@@ -3471,6 +3471,8 @@ def _write_live(
     def once() -> dict | None:
         chat = store.get_chat(bot_id, chat_id)
         run = _apply_run(chat, status=status, step=step, reason=reason, start=start)
+        if step:
+            _upsert_activity(chat, step)
         if thinking and thinking.strip():
             message = _live_slot(chat)
             message["thinking"] = thinking
@@ -3527,10 +3529,27 @@ def _stopped_text(reason: str = "") -> str:
     return f"Stopped: {cleaned}"
 
 
+def _live_reply(message: dict) -> bool:
+    """The running answer. A status note is not that answer."""
+    return (
+        isinstance(message, dict)
+        and message.get("role") == "assistant"
+        and bool(message.get("live"))
+        and message.get("kind") not in {"status", "activity", "pickup", "resume-offer"}
+        and message.get("about") != "activity"
+    )
+
+
 def _live_slot(chat: dict) -> dict:
     messages = chat.setdefault("messages", [])
-    if messages and messages[-1].get("live") and messages[-1].get("role") == "assistant":
-        return messages[-1]
+    for message in reversed(messages):
+        if not isinstance(message, dict):
+            continue
+        if message.get("kind") in {"status", "activity", "pickup"} or message.get("about") == "activity":
+            continue
+        if _live_reply(message):
+            return message
+        break
     message = {
         "id": new_id(),
         "role": "assistant",
@@ -3540,6 +3559,70 @@ def _live_slot(chat: dict) -> dict:
     }
     messages.append(message)
     return message
+
+
+def _upsert_activity(chat: dict, step: str) -> None:
+    """One status note for the running step. A later step updates that note."""
+    text = " ".join((step or "").split())
+    if not text:
+        return
+    messages = chat.setdefault("messages", [])
+    for message in messages:
+        if isinstance(message, dict) and message.get("about") == "activity":
+            message["content"] = text
+            message["kind"] = "status"
+            message["role"] = "assistant"
+            return
+    from easyagent.plan import _splice_before_live
+
+    _splice_before_live(messages, [{
+        "id": "activity",
+        "role": "assistant",
+        "kind": "status",
+        "about": "activity",
+        "content": text,
+        "created_at": now_iso(),
+    }])
+
+
+def _drop_activity(chat: dict) -> None:
+    messages = [
+        item for item in (chat.get("messages") or [])
+        if not (isinstance(item, dict) and item.get("about") == "activity")
+    ]
+    chat["messages"] = messages
+
+
+def _pause_for_repeat(store: Store, bot_id: str, chat_id: str, text: str) -> dict:
+    """Stop a run that repeated itself. One harness line, and Resume."""
+    from easyagent.tools import LOOP_TEXT
+
+    chat = store.get_chat(bot_id, chat_id)
+    _drop_activity(chat)
+    shown = " ".join((text or LOOP_TEXT).split()) or LOOP_TEXT
+    messages = chat.setdefault("messages", [])
+    target = None
+    for message in reversed(messages):
+        if _live_reply(message):
+            target = message
+            break
+    if target is None:
+        target = {
+            "id": new_id(),
+            "role": "assistant",
+            "created_at": now_iso(),
+        }
+        messages.append(target)
+    target["content"] = shown
+    target["kind"] = "resume-offer"
+    target.pop("live", None)
+    target.pop("error", None)
+    _apply_run(chat, status="paused", reason=shown, step="")
+    _settle_chips(chat)
+    chat["updated_at"] = now_iso()
+    _save_chat_final(store, chat)
+    poke(store, "message")
+    return _public_chat(store, chat)
 
 
 def _save_live_reply(store: Store, bot_id: str, chat_id: str, text: str) -> None:
@@ -3616,8 +3699,13 @@ def _overlay_queue(store: Store, chat: dict, public: dict) -> None:
         added += 1
     status = last_status(store, bot_id, chat_id)
     run = public.get("run") if isinstance(public.get("run"), dict) else {}
-    already = any(isinstance(item, dict) and item.get("content") == status for item in public.get("messages") or [])
-    if status and run.get("status") == "running" and not already:
+    rows = public.get("messages") or []
+    existing = next((item for item in rows if isinstance(item, dict) and item.get("id") == "live-status"), None)
+    already = any(isinstance(item, dict) and item.get("content") == status for item in rows)
+    if existing is not None:
+        if status:
+            existing["content"] = status
+    elif status and run.get("status") == "running" and not already:
         public["messages"].append({
             "id": "live-status",
             "role": "assistant",
@@ -3705,12 +3793,38 @@ async def _answer_while_busy(store: Store, bot_id: str, chat_id: str, content: s
     )
 
 
+def _follow_capped(store: Store, chat_id: str) -> bool:
+    """A steered follow-up may start another turn only up to the cap for this run."""
+    from easyagent.plan import FOLLOW_CAP
+
+    slot = turn_mod.slot_for(store, chat_id)
+    return slot.follow_chain >= FOLLOW_CAP
+
+
+def _take_follow(store: Store, chat_id: str) -> bool:
+    from easyagent.plan import FOLLOW_CAP
+
+    slot = turn_mod.slot_for(store, chat_id)
+    if slot.follow_chain >= FOLLOW_CAP:
+        return False
+    slot.follow_chain += 1
+    return True
+
+
+def _run_paused(store: Store, bot_id: str, chat_id: str) -> bool:
+    try:
+        chat = store.get_chat(bot_id, chat_id)
+    except StoreError:
+        return True
+    return (chat.get("run") or {}).get("status") == "paused"
+
+
 async def _continue_queued(store: Store, bot_id: str, chat_id: str):
     """After the model returns, take what was queued without starting a new run."""
-    from easyagent.plan import QUEUE_CAP, pop_item, steer_into
+    from easyagent.plan import pop_item, steer_into
 
-    for _ in range(QUEUE_CAP):
-        if turn_mod.cancelled():
+    while True:
+        if turn_mod.cancelled() or _follow_capped(store, chat_id) or _run_paused(store, bot_id, chat_id):
             return
         try:
             bot = store.get_bot(bot_id)
@@ -3733,16 +3847,18 @@ async def _continue_queued(store: Store, bot_id: str, chat_id: str):
                 )
         elif not steer_into(store, bot_id, chat_id, None):
             return
+        if not _take_follow(store, chat_id):
+            return
         async for chunk in _stream_reply(store, bot_id, chat_id, continue_run=True, drain=False, emit_done=False):
             yield chunk
 
 
 async def _drain_queued_json(store: Store, bot_id: str, chat_id: str) -> dict | None:
-    from easyagent.plan import QUEUE_CAP, pop_item, steer_into
+    from easyagent.plan import pop_item, steer_into
 
     last = None
-    for _ in range(QUEUE_CAP):
-        if turn_mod.cancelled():
+    while True:
+        if turn_mod.cancelled() or _follow_capped(store, chat_id) or _run_paused(store, bot_id, chat_id):
             break
         try:
             bot = store.get_bot(bot_id)
@@ -3765,6 +3881,8 @@ async def _drain_queued_json(store: Store, bot_id: str, chat_id: str) -> dict | 
                 )
         elif not steer_into(store, bot_id, chat_id, None):
             break
+        if not _take_follow(store, chat_id):
+            break
         last = await _reply_json(store, bot_id, chat_id, continue_run=True)
     return last
 
@@ -3781,6 +3899,8 @@ def _pause_for_resume(store: Store, bot_id: str, chat_id: str) -> None:
         return
     messages = []
     for message in chat.get("messages") or []:
+        if isinstance(message, dict) and message.get("about") == "activity":
+            continue
         if message.get("role") == "assistant" and message.get("live"):
             message.pop("live", None)
             message.pop("error", None)
@@ -3909,6 +4029,7 @@ def _settle_interrupted(store: Store, bot_id: str, chat_id: str, reason: str = "
         chat = store.get_chat(bot_id, chat_id)
     except StoreError:
         return
+    _drop_activity(chat)
     messages = chat.setdefault("messages", [])
     if not messages:
         _apply_run(chat, status="stopped", reason=reason, step="")
@@ -3961,6 +4082,7 @@ def _append_error(store: Store, bot_id: str, chat_id: str, detail: str) -> dict:
     reports that failure. The model does not.
     """
     chat = store.get_chat(bot_id, chat_id)
+    _drop_activity(chat)
     before = len(chat.get("messages") or [])
     cleaned = " ".join((redact(store, detail) or "").split())
     harness = retry.is_unreachable_message(cleaned)
@@ -4285,6 +4407,7 @@ def _finish_reply(
     thought_seconds: int = 0,
 ) -> dict:
     chat = store.get_chat(bot_id, chat_id)
+    _drop_activity(chat)
     visible = redact(store, visible)
     visible = keep_lessons(store, bot_id, visible)
     visible, handed = take_file(visible)
@@ -4314,6 +4437,7 @@ def _finish_reply(
             kept.append(cleaned)
     if not visible.strip() and not kept and not saved and quiet:
         chat = store.get_chat(bot_id, chat_id)
+        _drop_activity(chat)
         messages = chat.setdefault("messages", [])
         if messages and messages[-1].get("role") == "assistant" and messages[-1].get("live"):
             blank = messages[-1]
@@ -4423,10 +4547,20 @@ def _finish_reply(
         message.pop("choices", None)
     if attachment:
         message["attachment"] = attachment
+    from easyagent.tools import LOOP_TEXT
+
+    repeated = (message.get("content") or "").strip() == LOOP_TEXT
+    if repeated:
+        message["kind"] = "resume-offer"
+        message.pop("live", None)
+        message.pop("error", None)
+        blank_reply = False
     _record_turn_meter(chat, clear_overflow=True)
     stats = _persist_context(store, chat)
     chat["updated_at"] = now_iso()
-    if blank_reply:
+    if repeated:
+        _apply_run(chat, status="paused", reason=LOOP_TEXT, step="")
+    elif blank_reply:
         _apply_run(chat, status="error", reason=message.get("content") or "", step="")
     else:
         _apply_run(chat, status="idle")
@@ -4577,6 +4711,10 @@ async def _stream_reply(
                     if saved_run:
                         yield _sse({"type": "run", "run": saved_run})
                 continue
+            if kind == "loop":
+                saved = _pause_for_repeat(store, bot_id, chat_id, text)
+                yield _sse({"type": "done", "chat": saved})
+                return
             if kind == "status":
                 if text not in {"Thinking", "Waiting on model"} and not str(text).startswith("Waiting on model"):
                     model_mark = None

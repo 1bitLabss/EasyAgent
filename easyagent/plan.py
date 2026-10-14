@@ -16,6 +16,7 @@ from pathlib import Path
 from easyagent.store import Store, atomic_write_json, new_id, now_iso, read_json
 
 QUEUE_CAP = 10
+FOLLOW_CAP = 3
 STUCK_SECONDS = 90
 MAX_STEPS = 12
 MAX_STEP = 160

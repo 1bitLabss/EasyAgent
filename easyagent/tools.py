@@ -999,6 +999,42 @@ def _step_excerpt(command: str, limit: int = 72) -> str:
     return text[: limit - 1].rstrip() + "…"
 
 
+LOOP_TEXT = "The bot repeated itself without making progress, so I stopped it."
+REPEAT_LIMIT = 3
+
+_STATUS_ONLY = re.compile(
+    r"^(?:looking|thinking|revising|searching|remembering|connecting|asking|"
+    r"reading(?: [\w.+\-]+)?|writing(?: [\w.+\-]+)?|running(?: .{1,72})?|"
+    r"waiting on model.*|still on this job\..*|updating the checklist)$"
+)
+
+
+def _norm_line(text: str) -> str:
+    """Fold case and space so 'Looking.' and 'looking' are the same line."""
+    return " ".join((text or "").casefold().split()).strip(" .!?:;\"'`")
+
+
+def _near_line(left: str, right: str) -> bool:
+    """Same line, or one short line contained in the other."""
+    first, second = _norm_line(left), _norm_line(right)
+    if not first or not second:
+        return False
+    if first == second:
+        return True
+    short, long = (first, second) if len(first) <= len(second) else (second, first)
+    if len(short) < 8:
+        return False
+    return long.startswith(short) or short in long
+
+
+def status_only_narration(text: str) -> bool:
+    """A status word with no answer. 'Looking' is that word. A sentence is not."""
+    key = _norm_line(text)
+    if not key or len(key) > 80:
+        return False
+    return bool(_STATUS_ONLY.match(key))
+
+
 def status_label(request: ToolRequest) -> str:
     if request.kind == "plan":
         return "Updating the checklist"
@@ -5699,6 +5735,8 @@ async def run_turn(
     shown = ""
     last_sig: tuple | None = None
     last_batch: tuple | None = None
+    tool_hits: dict[tuple, int] = {}
+    narration_hits: list[str] = []
     seen_results: dict[tuple, str] = {}
     empty_retried = False
     deliver_tries = 0
@@ -6391,6 +6429,15 @@ async def run_turn(
             detail = "Research for the work:\n" + mark_untrusted(findings) + "\n\n" + detail
         working = [*working, {"role": "user", "content": detail}]
 
+    def _mark_repeat(key: tuple) -> int:
+        """How many times this call has shown up. The first success counts as one."""
+        tool_hits[key] = tool_hits.get(key, 1) + 1
+        return tool_hits[key]
+
+    def _note_narration(spoken: str) -> int:
+        narration_hits.append(spoken)
+        return sum(1 for item in narration_hits if _near_line(item, spoken))
+
     while True:
         turn_mod.raise_if_cancelled()
         if store is not None and bot_id and chat_id:
@@ -6757,6 +6804,9 @@ async def run_turn(
                 batch_sig = tuple(_tool_signature(item) for item in work)
                 if not any(_write_changes_disk(item) for item in work):
                     if batch_sig == last_batch or any(_near_repeat(item) for item in work):
+                        if _mark_repeat(batch_sig) >= REPEAT_LIMIT:
+                            yield "loop", LOOP_TEXT
+                            return
                         held = _hold_for_draft()
                         if held:
                             yield "status", "Thinking"
@@ -7050,6 +7100,9 @@ async def run_turn(
                     call_arguments=json.dumps({"query": query}),
                 )
             if sig == last_sig:
+                if _mark_repeat(sig) >= REPEAT_LIMIT:
+                    yield "loop", LOOP_TEXT
+                    return
                 resume, events = _after_stuck("It repeated the same tool with the same arguments.")
                 for event in events:
                     yield event
@@ -7057,6 +7110,9 @@ async def run_turn(
                     continue
                 return
             if _near_repeat(search_request):
+                if _mark_repeat(sig) >= REPEAT_LIMIT:
+                    yield "loop", LOOP_TEXT
+                    return
                 resume, events = _after_stuck("It repeated the same tool with nearly the same arguments.")
                 for event in events:
                     yield event
@@ -7167,6 +7223,25 @@ async def run_turn(
                 yield event
             continue
         if request is None:
+            spoken_line = _norm_line(strip_tool_markup(text or ""))
+            if status_only_narration(spoken_line):
+                if _note_narration(spoken_line) >= REPEAT_LIMIT:
+                    yield "loop", LOOP_TEXT
+                    return
+                working = [
+                    *working,
+                    {"role": "assistant", "content": (text or "").strip() or "Looking"},
+                    {
+                        "role": "user",
+                        "content": (
+                            "That repeated the same line and did not use a tool. "
+                            "Call the tool this step needs, or write the answer. "
+                            "Do not say that line again."
+                        ),
+                    },
+                ]
+                yield "status", "Thinking"
+                continue
             if await _hold_for_dead_asset():
                 yield "status", "Thinking"
                 continue
@@ -7394,6 +7469,9 @@ async def run_turn(
                 yield event
             return
         if (sig == last_sig or _near_repeat(request)) and not _write_changes_disk(request):
+            if _mark_repeat(sig) >= REPEAT_LIMIT:
+                yield "loop", LOOP_TEXT
+                return
             held = _hold_for_draft()
             if held:
                 yield "status", "Thinking"
@@ -7592,6 +7670,9 @@ async def run_turn(
         line = happened_line(request, working)
         lines.append(line)
         if sig in seen_results and seen_results[sig] == result:
+            if _mark_repeat(sig) >= REPEAT_LIMIT:
+                yield "loop", LOOP_TEXT
+                return
             if _keep_thinking():
                 yield "status", "Thinking"
                 continue
@@ -7787,6 +7868,9 @@ async def complete_with_tools(
         bot_id=bot_id,
         chat_id=chat_id,
     ):
+        if kind == "loop":
+            final = text or LOOP_TEXT
+            return Settled(final, (), "", thought.strip(), False, "", "", (), False)
         if kind == "final":
             final = text
         elif kind == "made":

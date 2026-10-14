@@ -3031,11 +3031,16 @@ def test_the_goal_is_in_the_chat_before_the_model_replies(tmp_path, monkeypatch)
         seen["calls"] += 1
         if seen["calls"] == 1:
             stored = json.loads(chat_path.read_text(encoding="utf-8"))
-            last = stored["messages"][-1]
-            content = last.get("content") or ""
             blob = json.dumps(stored)
+            users = [index for index, item in enumerate(stored["messages"]) if item.get("role") == "user"]
+            tail = stored["messages"][users[-1] + 1:] if users else stored["messages"]
+            quiet = not tail or (
+                len(tail) == 1
+                and tail[0].get("about") == "activity"
+                and tail[0].get("kind") == "status"
+            )
             seen["goal_before_model"] = (
-                last.get("role") == "user"
+                quiet
                 and "I'll build a simple landing page for a hotel." not in blob
                 and "I looked up what a hotel landing page contains" not in blob
                 and "Goal:" not in blob

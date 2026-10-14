@@ -157,6 +157,9 @@ async def review_turn(run_turn, **kwargs):
         call = dict(kwargs)
         call["messages"] = current
         async for kind, text in run_turn(**call):
+            if kind == "loop":
+                yield kind, text
+                return
             if kind == "ledger":
                 ledger_raw = text or "[]"
                 continue

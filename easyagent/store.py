@@ -414,9 +414,14 @@ def atomic_write_json(path: Path, data) -> None:
     atomic_write_text(path, json.dumps(data, indent=2, ensure_ascii=False) + "\n")
 
 
+def _transient_activity_row(item: dict) -> bool:
+    """The one running-step note. A later step updates it. A finished save removes it."""
+    return isinstance(item, dict) and (item.get("about") == "activity" or item.get("id") == "activity")
+
+
 def _busy_transcript_row(item: dict) -> bool:
     """A message stored while a job was running. A stale live save must not drop it."""
-    if not isinstance(item, dict):
+    if not isinstance(item, dict) or _transient_activity_row(item):
         return False
     if item.get("chip") in {"queued", "seen", "answered", "refused"}:
         return True
@@ -1178,8 +1183,13 @@ class Store:
         current = read_json(path)
         disk = list(current.get("messages") or [])
         incoming = list(chat.get("messages") or [])
-        disk_ids = {item.get("id") for item in disk if isinstance(item, dict) and item.get("id")}
         incoming_ids = {item.get("id") for item in incoming if isinstance(item, dict) and item.get("id")}
+        # Dropping the running-step note is intentional. It is not a lost busy message.
+        disk = [
+            item for item in disk
+            if not (_transient_activity_row(item) and item.get("id") not in incoming_ids)
+        ]
+        disk_ids = {item.get("id") for item in disk if isinstance(item, dict) and item.get("id")}
         missing = [item for item in disk if isinstance(item, dict) and item.get("id") and item.get("id") not in incoming_ids]
         added = [item for item in incoming if isinstance(item, dict) and item.get("id") and item.get("id") not in disk_ids]
         # A live chat save can hold a stale list while a busy message or a routine appends.

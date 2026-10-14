@@ -5,6 +5,7 @@
 - A message sent while a job is running shows up in the transcript immediately and stays there across a refresh. It is marked Queued, then Seen by bot when the job folds it in, then Answered when the reply finishes. The instant "Still on this job" note sits under that message.
 - A message that does not fit in the queue stays on screen with the reason, and offers Send now and Stop and send. Ten messages can wait. The composer stays open during a job, labelled "Add to the current job", with Stop and send next to Send.
 - While a job is working, the chat shows what it is doing, including the file it is writing, a command and how long it has been running, and how long it has been waiting on the model with the tokens so far. That clock keeps moving while tokens arrive, and the thinking text streams into the thinking box. When the job picks up a message, the transcript says "Picked up your message".
+- A status line such as "Looking" updates one note. It is not added again as another assistant message. If the same line or the same tool call comes around three times and nothing new happened, the run stops with "The bot repeated itself without making progress, so I stopped it." and Resume is offered. A follow-up started from a steered message stops after three, so those turns cannot chain without a limit.
 
 ## 0.3.20
 

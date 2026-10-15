@@ -207,7 +207,7 @@ def test_a_pre_existing_claim_reruns_the_failing_command_on_the_snapshot(tmp_pat
         "sys.exit(0 if text == 'old' else 1)\n",
         encoding="utf-8",
     )
-    command = f"{Path(sys.executable).name} {script.name}"
+    command = f"{sys.executable} {script.name}"
 
     def run(call):
         if call.kind == "files":

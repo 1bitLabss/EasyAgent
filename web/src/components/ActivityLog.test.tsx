@@ -30,7 +30,7 @@ function bot(): Bot {
     id: "bot-1",
     name: "Ada",
     endpoint_id: "local",
-    endpoint_name: "LLM3",
+    endpoint_name: "Local",
     endpoint_base_url: null,
     model: null,
     context_tokens: 8192,
@@ -129,7 +129,7 @@ describe("activity log", () => {
       "Revising",
       "Writing states.html — failed",
     ]);
-    expect(screen.getByTestId("asked-line").textContent).toBe("Asked LLM3 → got reply (4s)");
+    expect(screen.getByTestId("asked-line").textContent).toBe("Asked Local → got reply (4s)");
     expect(screen.getByTestId("run-state").textContent).toBe("Idle");
     expect(screen.queryByText(/Messaged/)).toBeNull();
   });
@@ -142,6 +142,6 @@ describe("activity log", () => {
       ],
       [],
     );
-    expect(screen.getByTestId("asked-line").textContent).toBe("Asked LLM3 → failed: 500 from the model");
+    expect(screen.getByTestId("asked-line").textContent).toBe("Asked Local → failed: 500 from the model");
   });
 });

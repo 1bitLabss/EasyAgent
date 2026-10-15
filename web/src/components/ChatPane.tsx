@@ -142,6 +142,11 @@ const MessageRow = memo(function MessageRow({
           {mine ? (message.content || "") : <Markdown text={message.content || ""} />}
         </div>
         {chip ? <p className="mt-2 text-xs" data-testid={`chip-${message.chip}`}>{chip}</p> : null}
+        {message.chip === "held" && message.id && botId && chatId ? (
+          <div className="mt-2">
+            <button type="button" className="rounded-full bg-white px-3 py-1 text-sm text-foreground" data-testid="retry-held" onClick={() => void sendNow(botId, chatId, message.id || "")}>Retry</button>
+          </div>
+        ) : null}
         {message.chip === "unsent" && message.refuse_reason === RETRY_REASON && message.client_id && botId && chatId ? (
           <div className="mt-2">
             <button type="button" className="rounded-full bg-white px-3 py-1 text-sm text-foreground" data-testid="retry-unsent" onClick={() => void retryUnsent(botId, chatId, message.client_id || "")}>Retry</button>

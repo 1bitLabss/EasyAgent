@@ -84,6 +84,7 @@ def checks_use_an_opt_in(monkeypatch, tmp_path):
     monkeypatch.setenv("EASYAGENT_NIGHTLY", "0")
     monkeypatch.setenv("EASYAGENT_SAFETY_REVIEW", "0")
     monkeypatch.setenv("EASYAGENT_APPROVAL_SECONDS", "0.05")
+    monkeypatch.setenv("EASYAGENT_SUPERVISE", "0")
 
 
 @pytest.fixture(autouse=True)

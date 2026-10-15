@@ -611,6 +611,9 @@ async def _lifespan(app: FastAPI):
     learn_task = asyncio.create_task(learn_loop(app.state.store, stop))
     relay_task = asyncio.create_task(relay_loop(app, stop))
     bridge_task = asyncio.create_task(_bridge_loop(app.state.store, stop))
+    supervise_task = None
+    if os.environ.get("EASYAGENT_SUPERVISE", "1") != "0":
+        supervise_task = asyncio.create_task(_supervise(app.state.store, stop))
     try:
         yield
     finally:
@@ -622,6 +625,8 @@ async def _lifespan(app: FastAPI):
         learn_task.cancel()
         task.cancel()
         bridge_task.cancel()
+        if supervise_task is not None:
+            supervise_task.cancel()
         for worker in running:
             with suppress(asyncio.CancelledError, Exception):
                 await worker
@@ -633,6 +638,9 @@ async def _lifespan(app: FastAPI):
             await task
         with suppress(asyncio.CancelledError):
             await bridge_task
+        if supervise_task is not None:
+            with suppress(asyncio.CancelledError):
+                await supervise_task
 
 
 def create_app(data_dir: str | Path | None = None) -> FastAPI:
@@ -1527,6 +1535,7 @@ def create_app(data_dir: str | Path | None = None) -> FastAPI:
         try:
             async with chat_lock(store, chat_id):
                 turn_mod.bind(store, chat_id, bot_id=bot_id)
+                await _deliver_queued_first(store, bot_id, chat_id)
                 _save_user_turn(store, bot_id, chat_id, content, attachment, client_id=client_id)
                 result = await _reply_json(store, bot_id, chat_id)
                 followed = await _drain_queued_json(store, bot_id, chat_id)
@@ -1587,6 +1596,9 @@ def create_app(data_dir: str | Path | None = None) -> FastAPI:
         if worker is not None and not worker.done():
             with suppress(asyncio.TimeoutError):
                 await asyncio.wait_for(asyncio.shield(worker), timeout=8)
+        from easyagent.plan import hold_for_send
+
+        hold_for_send(store, bot_id, chat_id)
         if worker is None or worker.done():
             turn_mod.clear_busy(store, chat_id)
             turn_mod.slot_for(store, chat_id).user_stop = False
@@ -1605,6 +1617,9 @@ def create_app(data_dir: str | Path | None = None) -> FastAPI:
                 raise HTTPException(400, str(exc)) from exc
             return _public_chat(store, store.get_chat(bot_id, chat_id))
         _require_endpoint(store, bot_id)
+        from easyagent.plan import release_hold_for_send
+
+        release_hold_for_send(store, bot_id, chat_id)
         if not turn_mod.try_begin(store, chat_id):
             try:
                 force_enqueue(store, bot_id, chat_id, message_id)
@@ -1650,6 +1665,9 @@ def create_app(data_dir: str | Path | None = None) -> FastAPI:
             raise HTTPException(409, "This job is still running. Stop is what cancels it.")
         turn_mod.clear_busy(store, chat_id)
         turn_mod.slot_for(store, chat_id).user_stop = False
+        from easyagent.plan import release_hold_for_send
+
+        release_hold_for_send(store, bot_id, chat_id)
         if not turn_mod.try_begin(store, chat_id):
             raise HTTPException(409, "This job is still running. Stop is what cancels it.")
         try:
@@ -4041,6 +4059,9 @@ async def _finish_turn(store: Store, bot_id: str, chat_id: str) -> None:
     async with turn_mod.boundary(store, chat_id):
         slot = turn_mod.slot_for(store, chat_id)
         if slot.user_stop:
+            from easyagent.plan import hold_for_send
+
+            hold_for_send(store, bot_id, chat_id)
             turn_mod.clear_busy(store, chat_id)
             slot.user_stop = False
             return
@@ -4068,6 +4089,8 @@ async def _answer_while_busy(
     from easyagent.plan import busy_mode, enqueue
 
     outcome = enqueue(store, bot_id, chat_id, content, attachment, client_id=client_id)
+    if outcome.get("refused"):
+        raise HTTPException(429, outcome.get("text") or "The queue cannot take another message. Nothing was saved.")
     if not outcome.get("duplicate"):
         try:
             bot = store.get_bot(bot_id)
@@ -4221,7 +4244,35 @@ async def _drain_queued_json(store: Store, bot_id: str, chat_id: str) -> dict | 
         if not _take_follow(store, chat_id):
             break
         last = await _reply_json(store, bot_id, chat_id, continue_run=True)
+        if _run_failed(store, bot_id, chat_id):
+            break
     return last
+
+
+def _run_failed(store: Store, bot_id: str, chat_id: str) -> bool:
+    try:
+        chat = store.get_chat(bot_id, chat_id)
+    except StoreError:
+        return True
+    return (chat.get("run") or {}).get("status") == "error"
+
+
+async def _deliver_queued_first(store: Store, bot_id: str, chat_id: str) -> None:
+    """Answer what Stop left in the queue before the new message is stored."""
+    from easyagent.plan import QUEUE_CAP, queued_items, release_hold_for_send
+
+    release_hold_for_send(store, bot_id, chat_id)
+    delivered = 0
+    while delivered < QUEUE_CAP and queued_items(store, bot_id, chat_id):
+        if turn_mod.cancelled() or _run_paused(store, bot_id, chat_id):
+            return
+        before = len(queued_items(store, bot_id, chat_id))
+        turn_mod.slot_for(store, chat_id).follow_chain = 0
+        await _drain_queued_json(store, bot_id, chat_id)
+        after = len(queued_items(store, bot_id, chat_id))
+        if after >= before or _run_failed(store, bot_id, chat_id):
+            return
+        delivered += before - after
 
 
 def _pause_for_resume(store: Store, bot_id: str, chat_id: str) -> None:
@@ -4347,6 +4398,10 @@ async def _kick_unanswered(store: Store) -> None:
                 continue
             if not queued_items(store, bot["id"], chat_id):
                 continue
+            from easyagent.plan import queue_held_for_send
+
+            if queue_held_for_send(store, bot["id"], chat_id):
+                continue
             if run.get("status") == "paused":
                 chat["run"] = {
                     "id": run.get("id") or "",
@@ -4364,6 +4419,66 @@ async def _kick_unanswered(store: Store) -> None:
             if not turn_mod.try_begin(store, chat_id):
                 continue
             _spawn_drain(store, bot["id"], chat_id)
+
+
+async def kick(store: Store) -> int:
+    """Drain every queue that has lines and no live worker.
+
+    Stop keeps its queue for the next send. A turn that already owns the chat
+    is left alone. A worker that died at the drain cap is started again.
+    """
+    from easyagent.plan import queue_held_for_send, queued_items
+
+    started = 0
+    try:
+        bots = store.list_bots()
+    except StoreError:
+        return 0
+    for bot in bots:
+        try:
+            chats = store.list_chats(bot["id"])
+        except StoreError:
+            continue
+        for summary in chats:
+            chat_id = summary["id"]
+            try:
+                if queue_held_for_send(store, bot["id"], chat_id):
+                    continue
+                if not queued_items(store, bot["id"], chat_id):
+                    continue
+                chat = store.get_chat(bot["id"], chat_id)
+            except (StoreError, OSError):
+                continue
+            if chat.get("resume_now"):
+                continue
+            run = chat.get("run") if isinstance(chat.get("run"), dict) else {}
+            if run.get("status") == "paused":
+                continue
+            slot = turn_mod.slot_for(store, chat_id)
+            worker = slot.worker
+            if worker is not None and not worker.done():
+                continue
+            if slot.user_stop:
+                continue
+            slot.drain_chains = 0
+            if not turn_mod.try_begin(store, chat_id):
+                continue
+            _spawn_drain(store, bot["id"], chat_id)
+            started += 1
+    return started
+
+
+async def _supervise(store: Store, stop: asyncio.Event) -> None:
+    """Keep looking for a queue whose worker is gone."""
+    while not stop.is_set():
+        try:
+            await kick(store)
+        except Exception as exc:
+            _log.warning("Supervisor kick failed: %s", exc)
+        try:
+            await asyncio.wait_for(stop.wait(), timeout=1)
+        except asyncio.TimeoutError:
+            continue
 
 
 async def _auto_resume_turn(store: Store, bot_id: str, chat_id: str) -> None:
@@ -4502,6 +4617,8 @@ def _append_error(store: Store, bot_id: str, chat_id: str, detail: str) -> dict:
             stats = _persist_context(store, chat)
             chat["updated_at"] = now_iso()
             _apply_run(chat, status="paused" if malformed else "error", reason=shown, step="")
+            if not malformed:
+                _hold_failed_turn(store, bot_id, chat_id, chat)
             _settle_chips(chat)
             _save_chat_final(store, chat)
             poke(store, "message")
@@ -4525,6 +4642,8 @@ def _append_error(store: Store, bot_id: str, chat_id: str, detail: str) -> dict:
     stats = _persist_context(store, chat)
     chat["updated_at"] = now_iso()
     _apply_run(chat, status="paused" if malformed else "error", reason=shown, step="")
+    if not malformed:
+        _hold_failed_turn(store, bot_id, chat_id, chat)
     _settle_chips(chat)
     _save_chat_final(store, chat)
     poke(store, "message")
@@ -4791,6 +4910,12 @@ def _settle_chips(chat: dict) -> None:
     from easyagent.plan import mark_answered
 
     mark_answered(chat)
+
+
+def _hold_failed_turn(store: Store, bot_id: str, chat_id: str, chat: dict) -> None:
+    from easyagent.plan import drop_queued_ids, mark_held
+
+    drop_queued_ids(store, bot_id, chat_id, mark_held(chat))
 
 
 def _finish_reply(
@@ -5341,6 +5466,7 @@ async def _stream_new_message(
     client_id: str = "",
 ):
     async def produce():
+        await _deliver_queued_first(store, bot_id, chat_id)
         message = _save_user_turn(store, bot_id, chat_id, content, attachment, client_id=client_id)
         # The user line goes out before the word scan. The scan runs inside the reply.
         yield _sse({"type": "user", "message": message})

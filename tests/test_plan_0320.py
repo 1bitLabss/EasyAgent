@@ -147,8 +147,9 @@ def test_queue_cap_refuses_the_eleventh_message(tmp_path):
     stored = store.get_chat(bot["id"], chat["id"])
     assert stored["run"]["id"] == "run-keep"
     refused = [item for item in stored["messages"] if item.get("content") == "past the cap"]
-    assert refused and refused[0].get("chip") == "refused"
+    assert refused and refused[0].get("chip") == "held"
     assert "queue is full" in refused[0].get("refuse_reason", "")
+    assert "Retry" in refused[0].get("refuse_reason", "")
     assert load_plan(store, bot["id"], chat["id"])["steps"][1]["state"] == "doing"
     client.close()
 

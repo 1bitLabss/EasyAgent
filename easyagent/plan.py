@@ -17,6 +17,8 @@ from easyagent.store import Store, atomic_write_json, new_id, now_iso, read_json
 
 QUEUE_CAP = 32
 FOLLOW_CAP = 3
+# Queued lines plus visibly held lines. Past this the request is refused and nothing is written.
+WAITING_CAP = 512
 STUCK_SECONDS = 90
 MAX_STEPS = 12
 MAX_STEP = 160
@@ -69,17 +71,22 @@ def _write_plan(store: Store, bot_id: str, chat_id: str, plan: dict | None) -> N
 
 
 def _read_queue(store: Store, bot_id: str, chat_id: str) -> dict:
+    empty = {"items": [], "last_status": "", "hold_for_send": False}
     path = queue_path(store, bot_id, chat_id)
     if not path.is_file():
-        return {"items": [], "last_status": ""}
+        return dict(empty)
     try:
         data = read_json(path)
     except Exception:
-        return {"items": [], "last_status": ""}
+        return dict(empty)
     if not isinstance(data, dict):
-        return {"items": [], "last_status": ""}
+        return dict(empty)
     items = [item for item in data.get("items") or [] if isinstance(item, dict) and item.get("id")]
-    return {"items": items, "last_status": str(data.get("last_status") or "")}
+    return {
+        "items": items,
+        "last_status": str(data.get("last_status") or ""),
+        "hold_for_send": bool(data.get("hold_for_send")),
+    }
 
 
 def _write_queue(store: Store, bot_id: str, chat_id: str, payload: dict) -> None:
@@ -462,7 +469,7 @@ def _user_row(
         row["client_id"] = client_id
     if chip == "queued":
         row["queued"] = True
-    if chip == "refused" and reason:
+    if chip in {"refused", "held"} and reason:
         row["refuse_reason"] = reason
     if attachment:
         row["attachment"] = attachment
@@ -492,6 +499,9 @@ def _pickup_row(about: str) -> dict:
 
 
 REFUSE_REASON = "The queue is full, so that message was not added. The job was not restarted."
+HELD_REASON = "The reply failed, so this message is held. Retry to send it again."
+HELD_FULL_REASON = "The queue is full, so this message is held. The job was not restarted. Retry to send it again."
+REFUSE_NOTHING = "The queue cannot take another message. Nothing was saved."
 UNSENT_REASON = "Not sent (job stopped)"
 MODES = ("interrupt", "queue", "steer", "follow")
 
@@ -616,18 +626,33 @@ def _enqueue(
     payload = _read_queue(store, bot_id, chat_id)
     items = payload["items"]
     full = len(items) >= QUEUE_CAP
+    held_count = sum(
+        1
+        for row in messages
+        if isinstance(row, dict) and row.get("role") == "user" and row.get("chip") == "held"
+    )
+    if full and len(items) + held_count >= WAITING_CAP:
+        return {
+            "text": REFUSE_NOTHING,
+            "message": None,
+            "note": None,
+            "full": True,
+            "queued": len(items),
+            "refused": True,
+            "wrote": False,
+        }
     at = now_iso()
     message_id = new_id()
     queued = len(items) if full else len(items) + 1
     text = status_text(chat, plan, queued, full=full)
-    reason = REFUSE_REASON if full else ""
+    reason = HELD_FULL_REASON if full else ""
     message = {
         "id": message_id,
         "content": content,
         "attachment": attachment,
         "at": at,
         "status": text,
-        "chip": "refused" if full else "queued",
+        "chip": "held" if full else "queued",
         "refuse_reason": reason,
         "client_id": client_id,
     }
@@ -723,6 +748,86 @@ def _steer(store: Store, bot_id: str, chat_id: str, working: list | None) -> int
     return taken
 
 
+def mark_held(chat: dict) -> set[str]:
+    """A failed turn is held until Retry. A real reply is not a failure. A queued line stays queued."""
+    messages = [item for item in chat.get("messages") or [] if isinstance(item, dict)]
+    held: set[str] = set()
+    for index, message in enumerate(messages):
+        if message.get("role") != "user" or message.get("harness"):
+            continue
+        chip = str(message.get("chip") or "")
+        if chip not in {"", "seen"}:
+            continue
+        if any(reply_is_real(later) for later in messages[index + 1:]):
+            continue
+        message["chip"] = "held"
+        message["refuse_reason"] = HELD_REASON
+        message.pop("queued", None)
+        if message.get("id"):
+            held.add(str(message["id"]))
+    return held
+
+
+def drop_queued_ids(store: Store, bot_id: str, chat_id: str, ids: set[str]) -> None:
+    """Take failed lines off the hot queue so a dead model is not retried by itself."""
+    if not ids:
+        return
+    lock = getattr(store, "_lock", None)
+    if lock is not None:
+        with lock:
+            _drop_queued_ids(store, bot_id, chat_id, ids)
+            return
+    _drop_queued_ids(store, bot_id, chat_id, ids)
+
+
+def _drop_queued_ids(store: Store, bot_id: str, chat_id: str, ids: set[str]) -> None:
+    payload = _read_queue(store, bot_id, chat_id)
+    kept = [item for item in payload["items"] if item.get("id") not in ids]
+    if len(kept) == len(payload["items"]):
+        return
+    payload["items"] = kept
+    _write_queue(store, bot_id, chat_id, payload)
+
+
+def hold_for_send(store: Store, bot_id: str, chat_id: str) -> None:
+    """Stop leaves the queue in order. The next send delivers it. A supervisor does not."""
+    lock = getattr(store, "_lock", None)
+    if lock is not None:
+        with lock:
+            _hold_for_send(store, bot_id, chat_id)
+            return
+    _hold_for_send(store, bot_id, chat_id)
+
+
+def _hold_for_send(store: Store, bot_id: str, chat_id: str) -> None:
+    payload = _read_queue(store, bot_id, chat_id)
+    if not payload["items"] or payload.get("hold_for_send"):
+        return
+    payload["hold_for_send"] = True
+    _write_queue(store, bot_id, chat_id, payload)
+
+
+def queue_held_for_send(store: Store, bot_id: str, chat_id: str) -> bool:
+    return bool(_read_queue(store, bot_id, chat_id).get("hold_for_send"))
+
+
+def release_hold_for_send(store: Store, bot_id: str, chat_id: str) -> None:
+    lock = getattr(store, "_lock", None)
+    if lock is not None:
+        with lock:
+            _release_hold_for_send(store, bot_id, chat_id)
+            return
+    _release_hold_for_send(store, bot_id, chat_id)
+
+
+def _release_hold_for_send(store: Store, bot_id: str, chat_id: str) -> None:
+    payload = _read_queue(store, bot_id, chat_id)
+    if not payload.get("hold_for_send"):
+        return
+    payload["hold_for_send"] = False
+    _write_queue(store, bot_id, chat_id, payload)
+
+
 def mark_answered(chat: dict) -> bool:
     """A real assistant reply answers a picked-up line. Stopped and errors do not."""
     messages = [item for item in chat.get("messages") or [] if isinstance(item, dict)]
@@ -785,7 +890,7 @@ def _requeue_unanswered(store: Store, bot_id: str, chat_id: str) -> int:
 
 
 def force_enqueue(store: Store, bot_id: str, chat_id: str, message_id: str) -> dict:
-    """Send now: put one refused message on the queue even when the queue is full."""
+    """Send now: put one held or refused message on the queue even when the queue is full."""
     lock = getattr(store, "_lock", None)
     if lock is not None:
         with lock:

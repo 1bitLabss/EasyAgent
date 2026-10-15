@@ -59,6 +59,13 @@ function chat(): Chat {
         chip: "refused",
         refuse_reason: "The queue is full, so that message was not added. The job was not restarted.",
       },
+      {
+        id: "u5",
+        role: "user",
+        content: "hold this",
+        chip: "held",
+        refuse_reason: "The reply failed, so this message is held. Retry to send it again.",
+      },
     ],
     message_count: 6,
     window_start: 0,
@@ -96,6 +103,8 @@ describe("busy chips", () => {
     expect(screen.getByTestId("chip-seen").textContent).toBe("Seen by bot (folded in at step 2)");
     expect(screen.getByTestId("chip-answered").textContent).toBe("Answered");
     expect(screen.getByTestId("chip-refused").textContent).toContain("queue is full");
+    expect(screen.getByTestId("chip-held").textContent).toContain("Retry");
+    expect(screen.getByTestId("retry-held").textContent).toBe("Retry");
     expect(screen.getByTestId("status-note").textContent).toContain("Still on this job.");
     expect(screen.getByTestId("pickup-marker").textContent).toBe("Picked up your message");
     expect(screen.getByTestId("send-now").textContent).toBe("Send now");

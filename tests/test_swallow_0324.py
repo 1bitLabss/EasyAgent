@@ -11,7 +11,8 @@ from fastapi.testclient import TestClient
 from easyagent import llm
 from easyagent import turn as turn_mod
 from easyagent.app import create_app
-from easyagent.plan import QUEUE_CAP, mark_answered, queued_items
+from easyagent.app import kick
+from easyagent.plan import HELD_REASON, QUEUE_CAP, WAITING_CAP, enqueue, mark_answered, mark_held, queued_items
 from tests.test_plan_0320 import _client, _running
 
 
@@ -110,7 +111,8 @@ def test_a_full_queue_stays_visible_and_send_now_retries_it(tmp_path):
     assert refused.status_code == 200
     assert "queue is full" in refused.json()["reply"]
     row = next(item for item in store.get_chat(bot["id"], chat["id"])["messages"] if item.get("content") == "one past the cap")
-    assert row["chip"] == "refused"
+    assert row["chip"] == "held"
+    assert "Retry" in row.get("refuse_reason", "")
     sent = client.post(f"/api/bots/{bot['id']}/chats/{chat['id']}/messages/{row['id']}/send-now")
     assert sent.status_code == 200
     again = next(item for item in sent.json()["messages"] if item["id"] == row["id"])
@@ -127,6 +129,17 @@ def test_an_error_does_not_mark_a_picked_up_line_answered(tmp_path, monkeypatch)
     }
     assert mark_answered(plain) is False
     assert plain["messages"][0]["chip"] == "seen"
+    assert mark_held(plain) is not None
+    assert plain["messages"][0]["chip"] == "held"
+    assert plain["messages"][0]["refuse_reason"] == HELD_REASON
+    answered = {
+        "messages": [
+            {"role": "user", "chip": "seen", "content": "hi"},
+            {"role": "assistant", "content": "Here is the reply."},
+        ]
+    }
+    assert mark_held(answered) == set()
+    assert answered["messages"][0]["chip"] == "seen"
 
     calls = {"n": 0}
     app, client, bot, chat = _client(tmp_path)
@@ -149,6 +162,9 @@ def test_an_error_does_not_mark_a_picked_up_line_answered(tmp_path, monkeypatch)
     )
     assert response.status_code == 200, response.text
     saved = store.get_chat(bot["id"], chat["id"])
+    hello = next(item for item in saved["messages"] if item.get("content") == "hello")
+    assert hello["chip"] == "held"
+    assert "Retry" in hello.get("refuse_reason", "")
     waiting = next(item for item in saved["messages"] if item.get("content") == "still waiting")
     assert waiting["chip"] == "answered"
     assert any(item.get("content") == "Recovered." for item in saved["messages"])
@@ -169,18 +185,27 @@ def test_stop_keeps_queued_lines_for_the_next_turn(tmp_path, monkeypatch):
     store = app.state.store
     _running(store, bot["id"], chat["id"])
     url = f"/api/bots/{bot['id']}/chats/{chat['id']}/messages"
-    assert client.post(url, json={"content": "keep me"}).status_code == 200
+    assert client.post(url, json={"content": "alpha-queued"}).status_code == 200
+    assert client.post(url, json={"content": "beta-queued"}).status_code == 200
     stopped = client.post(f"/api/bots/{bot['id']}/chats/{chat['id']}/stop")
     assert stopped.status_code == 200
-    assert stopped.json()["messages"][-1]["chip"] == "queued" if stopped.json()["messages"][-1].get("role") == "user" else True
     users = [item for item in stopped.json()["messages"] if item.get("role") == "user"]
-    assert users[-1]["content"] == "keep me"
-    assert users[-1]["chip"] == "queued"
-    sent = client.post(url, json={"content": "and now"})
+    assert [item["content"] for item in users] == ["alpha-queued", "beta-queued"]
+    assert [item["chip"] for item in users] == ["queued", "queued"]
+    assert asyncio.run(kick(store)) == 0
+    assert [item["content"] for item in queued_items(store, bot["id"], chat["id"])] == ["alpha-queued", "beta-queued"]
+    sent = client.post(url, json={"content": "gamma-now"})
     assert sent.status_code == 200, sent.text
-    blob = json.dumps(seen)
-    assert "keep me" in blob
-    assert "and now" in blob
+    blobs = [json.dumps(batch) for batch in seen]
+    first = next(blob for blob in blobs if "alpha-queued" in blob)
+    assert first.index("alpha-queued") < first.index("beta-queued")
+    assert "gamma-now" not in first
+    gamma_at = next(index for index, blob in enumerate(blobs) if "gamma-now" in blob)
+    assert blobs.index(first) < gamma_at
+    saved = store.get_chat(bot["id"], chat["id"])
+    by_text = {item.get("content"): item for item in saved["messages"] if item.get("role") == "user"}
+    assert by_text["alpha-queued"]["chip"] == "answered"
+    assert by_text["beta-queued"]["chip"] == "answered"
     client.close()
 
 
@@ -414,3 +439,136 @@ def test_boot_drains_an_acknowledged_message(tmp_path, monkeypatch):
         assert any(item.get("content") == "Picked up after restart." for item in saved["messages"])
         remembered = next(item for item in saved["messages"] if item.get("content") == "remember this")
         assert remembered["chip"] == "answered"
+
+
+def test_kick_drains_a_queue_the_cap_left_behind(tmp_path, monkeypatch):
+    async def complete(**_kwargs):
+        return "From the supervisor."
+
+    monkeypatch.setattr("easyagent.llm.complete", complete)
+
+    async def scenario():
+        app = create_app(tmp_path)
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+            endpoint = (await client.post("/api/endpoints", json={"name": "local", "base_url": "http://127.0.0.1:9/v1", "model": "stub"})).json()
+            bot = (await client.post("/api/bots", json={"name": "Ada", "endpoint_id": endpoint["id"]})).json()
+            await client.patch(f"/api/bots/{bot['id']}", json={"check_enabled": False, "busy_input": "follow"})
+            chat = (await client.post(f"/api/bots/{bot['id']}/chats")).json()
+            store = app.state.store
+            enqueue(store, bot["id"], chat["id"], "stranded")
+            slot = turn_mod.slot_for(store, chat["id"])
+            slot.busy = False
+            slot.worker = None
+            slot.user_stop = False
+            slot.drain_chains = 99
+            assert await kick(store) == 1
+            worker = turn_mod.current_worker(store, chat["id"])
+            assert worker is not None
+            await worker
+            saved = store.get_chat(bot["id"], chat["id"])
+            row = next(item for item in saved["messages"] if item.get("content") == "stranded")
+            assert row["chip"] == "answered"
+            assert queued_items(store, bot["id"], chat["id"]) == []
+
+    asyncio.run(scenario())
+
+
+def test_kick_answers_the_line_an_error_left_queued(tmp_path, monkeypatch):
+    async def complete(**_kwargs):
+        return "Recovered."
+
+    monkeypatch.setattr("easyagent.llm.complete", complete)
+
+    async def scenario():
+        app = create_app(tmp_path)
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+            endpoint = (await client.post("/api/endpoints", json={"name": "local", "base_url": "http://127.0.0.1:9/v1", "model": "stub"})).json()
+            bot = (await client.post("/api/bots", json={"name": "Ada", "endpoint_id": endpoint["id"]})).json()
+            await client.patch(f"/api/bots/{bot['id']}", json={"check_enabled": False, "busy_input": "follow"})
+            chat = (await client.post(f"/api/bots/{bot['id']}/chats")).json()
+            store = app.state.store
+            _running(store, bot["id"], chat["id"])
+            enqueue(store, bot["id"], chat["id"], "one")
+            enqueue(store, bot["id"], chat["id"], "two")
+            saved = store.get_chat(bot["id"], chat["id"])
+            for item in saved["messages"]:
+                if item.get("content") == "one":
+                    item["chip"] = "seen"
+            saved["messages"].append({
+                "id": "err",
+                "role": "assistant",
+                "content": "Stopped: 500 from the model",
+                "error": True,
+                "created_at": "2026-01-01T00:00:00+00:00",
+            })
+            saved["run"]["status"] = "error"
+            from easyagent.plan import drop_queued_ids
+
+            drop_queued_ids(store, bot["id"], chat["id"], mark_held(saved))
+            store.save_chat(saved)
+            slot = turn_mod.slot_for(store, chat["id"])
+            slot.busy = False
+            slot.worker = None
+            slot.user_stop = False
+            slot.drain_chains = 99
+            one = next(item for item in store.get_chat(bot["id"], chat["id"])["messages"] if item.get("content") == "one")
+            assert one["chip"] == "held"
+            assert "Retry" in one.get("refuse_reason", "")
+            assert [item["content"] for item in queued_items(store, bot["id"], chat["id"])] == ["two"]
+            assert await kick(store) == 1
+            worker = turn_mod.current_worker(store, chat["id"])
+            assert worker is not None
+            await worker
+            saved = store.get_chat(bot["id"], chat["id"])
+            assert next(item for item in saved["messages"] if item.get("content") == "two")["chip"] == "answered"
+            assert next(item for item in saved["messages"] if item.get("content") == "one")["chip"] == "held"
+
+    asyncio.run(scenario())
+
+
+def test_a_burst_keeps_every_message_visible(tmp_path):
+    app, client, bot, chat = _client(tmp_path)
+    store = app.state.store
+    _running(store, bot["id"], chat["id"])
+    url = f"/api/bots/{bot['id']}/chats/{chat['id']}/messages"
+    total = 390
+    for number in range(total):
+        response = client.post(url, json={"content": f"burst-{number}"})
+        assert response.status_code == 200, response.text
+    saved = store.get_chat(bot["id"], chat["id"])
+    rows = [item for item in saved["messages"] if str(item.get("content") or "").startswith("burst-")]
+    assert len(rows) == total
+    assert {item["content"] for item in rows} == {f"burst-{number}" for number in range(total)}
+    assert all(item.get("chip") in {"queued", "held"} for item in rows)
+    assert sum(1 for item in rows if item.get("chip") == "queued") == QUEUE_CAP
+    held = [item for item in rows if item.get("chip") == "held"]
+    assert held
+    assert all(item.get("refuse_reason") for item in held)
+    assert "Retry" in held[0]["refuse_reason"]
+    sent = client.post(f"/api/bots/{bot['id']}/chats/{chat['id']}/messages/{held[0]['id']}/send-now")
+    assert sent.status_code == 200, sent.text
+    again = next(item for item in sent.json()["messages"] if item["id"] == held[0]["id"])
+    assert again["chip"] == "queued"
+    client.close()
+
+
+def test_past_the_waiting_cap_returns_429_and_writes_nothing(tmp_path):
+    app, client, bot, chat = _client(tmp_path)
+    store = app.state.store
+    _running(store, bot["id"], chat["id"])
+    for number in range(WAITING_CAP):
+        outcome = enqueue(store, bot["id"], chat["id"], f"wait-{number}")
+        assert outcome.get("refused") is not True
+    before = [item.get("id") for item in store.get_chat(bot["id"], chat["id"])["messages"]]
+    extra = client.post(
+        f"/api/bots/{bot['id']}/chats/{chat['id']}/messages",
+        json={"content": "not-stored"},
+    )
+    assert extra.status_code == 429, extra.text
+    after = store.get_chat(bot["id"], chat["id"])["messages"]
+    assert [item.get("id") for item in after] == before
+    assert all(item.get("content") != "not-stored" for item in after)
+    assert len(queued_items(store, bot["id"], chat["id"])) == QUEUE_CAP
+    client.close()

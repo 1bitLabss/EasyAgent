@@ -21,7 +21,7 @@ You need Python 3.11 or newer. The same steps work on Windows, macOS, and Linux.
 ```bat
 py -m venv .venv
 .venv\Scripts\activate
-pip install -r requirements.txt
+pip install .
 python -m easyagent
 ```
 
@@ -30,7 +30,7 @@ python -m easyagent
 ```bash
 python3 -m venv .venv
 source .venv/bin/activate
-pip install -r requirements.txt
+pip install .
 python -m easyagent
 ```
 
@@ -55,7 +55,7 @@ That opens a dev server on http://127.0.0.1:44731 and proxies `/api`, `/static`,
   - Linux: `$XDG_DATA_HOME/EasyAgent`, or `~/.local/share/EasyAgent` when `XDG_DATA_HOME` is unset
 - Bind address: `127.0.0.1`. Phone access in Settings also listens on this computer's LAN address. It is off until you turn it on. An address outside the home network is refused.
 
-`pip install -r requirements.txt` installs the server. On Windows it also installs the tray dependencies. The tray is optional. `EASYAGENT_TRAY=0` skips it.
+`pip install .` installs the server from the bounds in `pyproject.toml`. `requirements.txt` lists those same packages and bounds. On Windows the install also includes the tray dependencies. The tray is optional. `EASYAGENT_TRAY=0` skips it. Tests need the dev extra: `pip install -e ".[dev]"`.
 
 ## Release check
 
@@ -133,6 +133,18 @@ The model can use tools on this computer. The chat shows a short line that somet
 A printed tool call is not the answer. The call runs, and the result goes back to the model. One send keeps going while the work is still unfinished. The turn stops when it is stuck: the same tool with the same arguments and nothing new, a real blocker, a question only you can answer, or finish. A risky call does not run until you approve it. See [Safety](#safety).
 
 Saved computer passwords and keys are sealed in an encrypted vault. The page asks for them in a sign-in prompt. They are not written into the chat.
+
+### Helpers
+
+A bot can hand a self-contained task to a helper. The parent reply contains a `helper` block with a name, a tool list, a step budget, a time budget, and the task under `---`. Up to four helpers run. Each one has its own messages. It does not see the parent chat. It uses the parent's guardrails, and it cannot start another helper, a routine, or a tool outside its list. When the list is omitted, the helper can read files and search. On a connection with one slot, helpers run one after another. With more slots, they overlap. Stop cancels the ones still going. The chat shows each helper as a card. The parent model receives the result as untrusted data, not as a new instruction. A helper does not keep /yolo.
+
+### Connectors
+
+Each bot has its own MCP servers, under that bot's settings, in Connectors. The starters are Filesystem, Fetch, Git, and SQLite. Filesystem is this bot's workspace. You can also add a stdio command or a streamable HTTP URL. A secret stays in the secrets database and is handed only to that server. Nothing is installed until you approve the review card. A write, delete, or send waits for you. Each listed tool can be set to allow, ask, or block. The model calls a tool with an `mcp` block that names the connector, the tool, and the JSON arguments.
+
+### Telegram and Discord
+
+A bridge is Telegram or Discord for your own account. Save one with `POST /api/bridges`: the kind (`telegram` or `discord`), a name, the bot, your user id, and the token. An empty allow list is refused. The token is sealed in `secrets.db`. The master key is in the OS keychain. The saved record stores that a token exists, not the token itself. Telegram is read by long poll. Discord connects as a bot to the gateway. A message from any other id is ignored and written to the bridge log. It does not enter the chat. The reply goes back to the person who wrote, through the same tools and Strict checks, and that turn does not mark the chat running. The model is told the bridge reaches you. Messaging anyone else waits for an approval card.
 
 ### Memory notes
 
@@ -399,6 +411,7 @@ The rubric is graded by the same connection, using that bot's model, and it wait
 ## Tests
 
 ```bash
+pip install -e ".[dev]"
 python -m pytest
 ```
 

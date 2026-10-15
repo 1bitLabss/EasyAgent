@@ -2,9 +2,10 @@
 
 ## 0.3.24
 
+- A queued message with no live worker is picked up by a supervisor. An error marks that line held, with the reason and Retry, and does not call it answered. Stop keeps the queue in order and the next send answers those lines first. Past the 32-message queue, further lines are held on screen instead of dropped. Only a queue that cannot take another line returns 429, and that request writes nothing.
 - The message box grows with the text and stops at eight lines, then scrolls. Sending or clearing it returns the box to one line. The chat always shows Idle, Working with the elapsed time, or Waiting on model with the elapsed time.
 - The activity log shows each tool step once. That line moves from running to done or failed. The same step repeated in a row shows a count. The last line says who was asked, whether a reply came back, and how long it took.
-- A message that arrives as a job finishes is kept and answered. The same is true after an error, after Stop, and after EasyAgent restarts. A full queue refuses the extra line in the transcript, where Send now can still send it. The queue holds 32 messages.
+- A message that arrives as a job finishes is kept and answered. The same is true after an error, after Stop, and after EasyAgent restarts. A full queue holds the extra line in the transcript, where Retry can still send it. The queue holds 32 messages.
 - While a job is running, a new message interrupts the model request and is picked up in that job. A command that is already running is left alone until it finishes. `/queue` waits until the job finishes. `/steer` folds the message in after the current step. Stop leaves queued lines in the next turn.
 - If the send does not reach the job, that line shows Not sent with Retry, once. A repeated send with the same id does not add a second copy.
 - While /yolo is on for this chat, every ask-tier action inside this bot's folders, or a folder it already has a grant for, skips the approval card. The sandbox still wraps the command. Each path is resolved again, including a symlink, a junction, .., an environment variable, a UNC path, and a wildcard.

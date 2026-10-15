@@ -185,8 +185,8 @@ def test_pyproject_runtime_deps_match_requirements():
         "python-multipart>=0.0.9",
         "pillow>=10.1",
         "pystray>=0.19",
-        "websockets>=13",
-        "paramiko>=3.5",
+        "websockets~=17.0",
+        "paramiko~=5.0",
         "pywinrm>=0.5",
         "pywin32>=306; sys_platform == 'win32'",
     ):

@@ -93,7 +93,7 @@ export type ChatMessage = {
   kind?: string;
   git_repo?: string;
   created_at?: string;
-  chip?: "queued" | "seen" | "answered" | "refused" | "unsent" | string;
+  chip?: "queued" | "seen" | "answered" | "held" | "refused" | "unsent" | string;
   seen_step?: number;
   refuse_reason?: string;
   client_id?: string;

@@ -473,6 +473,15 @@ class YoloIn(BaseModel):
     idle_minutes: int | None = None
 
 
+class ClassGrantIn(BaseModel):
+    """Revoke a class grant. Turning one on is only the approval card."""
+
+    model_config = ConfigDict(extra="ignore")
+    name: str = ""
+    tool: str = ""
+    on: bool = False
+
+
 class BridgeIn(BaseModel):
     model_config = ConfigDict(extra="ignore")
     kind: str = "telegram"
@@ -1460,6 +1469,17 @@ def create_app(data_dir: str | Path | None = None) -> FastAPI:
         )
         if not result.ok:
             raise HTTPException(400, result.message)
+        return _public_chat(store, store.get_chat(bot_id, chat_id))
+
+    @app.post("/api/bots/{bot_id}/chats/{chat_id}/class-grants")
+    def set_class_grant(bot_id: str, chat_id: str, body: ClassGrantIn):
+        """Revoke a class grant for this chat. The card is what turns one on."""
+        from easyagent.actionclass import revoke
+
+        store.get_chat(bot_id, chat_id)
+        if body.on:
+            raise HTTPException(400, "A class grant is turned on from the approval card.")
+        revoke(store, bot_id, chat_id, (body.name or "").strip(), (body.tool or "").strip())
         return _public_chat(store, store.get_chat(bot_id, chat_id))
 
     @app.post("/api/bots/{bot_id}/chats/{chat_id}/messages")
@@ -2640,6 +2660,7 @@ def _public_chat(store: Store, chat: dict, window: int | None = None) -> dict:
         "run": public_run(chat, store),
         "plan": _public_plan(store, chat),
         "yolo": _public_yolo(chat),
+        "class_grants": _public_class_grants(chat),
     }
     _overlay_queue(store, chat, public)
     return public
@@ -2682,6 +2703,12 @@ def _public_yolo(chat: dict) -> dict:
     return public_view(chat)
 
 
+def _public_class_grants(chat: dict) -> list[dict]:
+    from easyagent.actionclass import public_rows
+
+    return public_rows(chat)
+
+
 def _yolo_command(content: str) -> bool:
     from easyagent.yolo import is_command
 
@@ -2706,9 +2733,11 @@ def _apply_yolo_command(store: Store, bot_id: str, chat_id: str, content: str) -
 
 
 def _note_yolo_run(chat: dict, status: str) -> None:
+    from easyagent.actionclass import note_run as note_class_run
     from easyagent.yolo import note_run
 
     note_run(chat, status)
+    note_class_run(chat, status)
 
 
 def _save_user_turn(

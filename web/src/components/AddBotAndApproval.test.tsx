@@ -78,6 +78,21 @@ describe("Approval card lasting grants", () => {
     expect(await buttons(card({}))).toContain("Always allow this command for this bot");
   });
 
+  it("offers the action class by name and does not offer it on a blocked rule", async () => {
+    const label = "Allow all: read files in this bot's folder for this chat";
+    const labels = await buttons(card({ class_label: label, action_class: "read-in-workspace" }));
+    expect(labels).toContain(label);
+    cleanup();
+    queryClient.clear();
+    const hidden = await buttons(card({
+      rule: "bridge-send",
+      class_label: label,
+      action_class: "read-in-workspace",
+      proposal: { kind: "script-diff", session: true, exec_always: true },
+    }));
+    expect(hidden).not.toContain(label);
+  });
+
   it.each(["bridge-send", "browser-submit", "mcp-ask", "own-server", "root-delete", "guardrail-edit"])(
     "never offers a lasting grant for %s, even if the flags say so",
     async (rule) => {

@@ -219,6 +219,9 @@ class Pending:
     event: asyncio.Event = field(default_factory=asyncio.Event)
     decision: str = ""
     proposal: dict | None = None
+    action_class: str = ""
+    action_tool: str = ""
+    class_label: str = ""
 
 
 _PENDING: dict[str, Pending] = {}
@@ -3226,6 +3229,9 @@ def _public_card(card: Pending) -> dict:
         "detail": card.detail,
         "offer_always": card.offer_always,
         "proposal": card.proposal,
+        "action_class": card.action_class,
+        "action_tool": card.action_tool,
+        "class_label": card.class_label,
     }
 
 
@@ -3241,7 +3247,7 @@ def resolve_card(card_id: str, decision: str, bot_id: str | None = None) -> Pend
     if bot_id is not None and card.bot_id != bot_id:
         # Another bot's card is not answered through this bot.
         return None
-    if decision not in {"approve", "deny", "always", "done", "session", "exec-always"}:
+    if decision not in {"approve", "deny", "always", "done", "session", "exec-always", "class"}:
         decision = "deny"
     if decision == "done" and (card.proposal or {}).get("kind") != "takeover":
         decision = "deny"
@@ -3257,7 +3263,9 @@ def resolve_card(card_id: str, decision: str, bot_id: str | None = None) -> Pend
     # Before "always" is folded into a one-time approval. A card that does not
     # offer a lasting grant must not accept one, including a blocked card and a
     # bridge send whose button was hidden.
-    if decision in {"always", "exec-always", "session"} and (card.rule in _NEVER_ALWAYS or card.tier == BLOCK):
+    if decision in {"always", "exec-always", "session", "class"} and (card.rule in _NEVER_ALWAYS or card.tier == BLOCK):
+        decision = "deny"
+    elif decision == "class" and not card.action_class:
         decision = "deny"
     elif decision == "always" and not card.offer_always:
         decision = "approve"
@@ -3448,6 +3456,59 @@ def _yolo_take(store: Store, request, bot_id: str | None, verdict: Verdict) -> b
         return False
 
 
+def _class_take(store: Store, request, bot_id: str | None, verdict: Verdict) -> bool:
+    """Skip the card when this chat already allowed this action class and the paths still fit."""
+    if verdict.tier != ASK or not bot_id or is_unattended():
+        return False
+    from easyagent.actionclass import covers
+
+    try:
+        return bool(covers(store, bot_id, request, verdict))
+    except Exception:
+        return False
+
+
+def _decorate_class(store: Store, request, verdict: Verdict, card: Pending) -> None:
+    """Name the class on the card when this command is one instance of it."""
+    if verdict.tier != ASK or verdict.rule in _NEVER_ALWAYS or is_unattended():
+        return
+    from easyagent.actionclass import match
+    from easyagent.helpers import in_helper
+
+    if in_helper():
+        return
+    try:
+        found = match(store, card.bot_id, request, verdict)
+    except Exception:
+        return
+    if found is None:
+        return
+    card.action_class = found.name
+    card.action_tool = found.tool
+    card.class_label = found.label
+
+
+def _release_ask(store: Store, request, bot_id: str | None, verdict: Verdict):
+    """Trash and snapshots that an approval of this ask would have taken."""
+    if getattr(request, "kind", "") == "shell" and verdict.rule == "delete":
+        paths = _pure_delete_paths(getattr(request, "command", "") or "")
+        if paths is not None:
+            text = _trash_paths(store, paths)
+            _remember_created(request)
+            return request, text
+    if verdict.rule in {"overwrite", "redirect-overwrite", "script-body", "write-outside"}:
+        try:
+            cwd = Path(turn_mod.tool_cwd())
+        except OSError:
+            cwd = Path(".")
+        for path in _paths_in(verdict.detail, cwd):
+            _snapshot(store, path)
+        if getattr(request, "kind", "") == "files":
+            _snapshot(store, _file_request_path(store, getattr(request, "path", "") or ".", cwd, bot_id))
+    _remember_created(request)
+    return request, None
+
+
 async def guard(store: Store, request, bot_id: str | None):
     """Return (request, early_result). early_result is set when the tool must not run."""
     from easyagent.tools import ToolError
@@ -3504,23 +3565,30 @@ async def guard(store: Store, request, bot_id: str | None):
                 "detail": verdict.detail,
             },
         )
-        if getattr(request, "kind", "") == "shell" and verdict.rule == "delete":
-            paths = _pure_delete_paths(getattr(request, "command", "") or "")
-            if paths is not None:
-                text = _trash_paths(store, paths)
-                _remember_created(request)
-                return request, text
-        if verdict.rule in {"overwrite", "redirect-overwrite", "script-body", "write-outside"}:
-            try:
-                cwd = Path(turn_mod.tool_cwd())
-            except OSError:
-                cwd = Path(".")
-            for path in _paths_in(verdict.detail, cwd):
-                _snapshot(store, path)
-            if getattr(request, "kind", "") == "files":
-                _snapshot(store, _file_request_path(store, getattr(request, "path", "") or ".", cwd, bot_id))
-        _remember_created(request)
-        return request, None
+        return _release_ask(store, request, bot_id, verdict)
+    if verdict.tier == ASK and _class_take(store, request, bot_id, verdict):
+        from easyagent.actionclass import match as class_match
+
+        found = None
+        try:
+            found = class_match(store, bot_id or "", request, verdict)
+        except Exception:
+            found = None
+        _audit(
+            store,
+            bot_id,
+            {
+                "at": now_iso(),
+                "decision": "approve",
+                "tag": "class",
+                "class": found.name if found is not None else "",
+                "tool": found.tool if found is not None else "",
+                "rule": verdict.rule,
+                "why": verdict.why,
+                "detail": verdict.detail,
+            },
+        )
+        return _release_ask(store, request, bot_id, verdict)
     if verdict.tier == ASK:
         exact = (getattr(request, "command", "") or getattr(request, "path", "") or "").strip()
         card = Pending(
@@ -3539,6 +3607,7 @@ async def guard(store: Store, request, bot_id: str | None):
         # A blocked rule that was unlocked is still not offered "always".
         if verdict.rule in _NEVER_ALWAYS:
             card.offer_always = False
+        _decorate_class(store, request, verdict, card)
         _PENDING[card.id] = card
         _notify(verdict.why)
         _notify_bridge(store, bot_id, card)
@@ -3552,16 +3621,26 @@ async def guard(store: Store, request, bot_id: str | None):
         if decision == "always" and bot_id and exact:
             _remember_allow(store, bot_id, exact)
             decision = "approve"
+        class_grant = False
+        if decision == "class" and bot_id and card.action_class:
+            from easyagent.actionclass import remember
+
+            try:
+                class_grant = remember(store, bot_id, request, verdict) is not None
+            except Exception:
+                class_grant = False
+            decision = "approve" if class_grant else "deny"
         decision, session_grant = _opened_session(store, bot_id, decision, card.exact or getattr(request, "command", "") or "")
-        _audit(
-            store,
-            bot_id,
-            {"at": now_iso(), "decision": decision, "rule": verdict.rule, "why": verdict.why, "detail": verdict.detail},
-        )
+        audited = {"at": now_iso(), "decision": decision, "rule": verdict.rule, "why": verdict.why, "detail": verdict.detail}
+        if class_grant:
+            audited["tag"] = "class"
+            audited["class"] = card.action_class
+            audited["tool"] = card.action_tool
+        _audit(store, bot_id, audited)
         if decision != "approve":
             _remember_denial(store, bot_id, verdict.fingerprint)
             raise ToolError("You denied that, or the card expired. It will not be asked again, and it was not run.")
-        if verdict.rule in {"bot-changed", "git-hooks"} and bot_id and not session_grant:
+        if verdict.rule in {"bot-changed", "git-hooks"} and bot_id and not session_grant and not class_grant:
             _stamp_script(store, bot_id, card.exact or getattr(request, "command", "") or "")
         if getattr(request, "kind", "") == "shell":
             paths = _pure_delete_paths(getattr(request, "command", "") or "")

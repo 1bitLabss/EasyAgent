@@ -5,6 +5,9 @@
 - In a chat with /yolo on, a read-only PowerShell pipeline skips the approval card when every statement is a read. The reads are Get-Content, Get-ChildItem, Select-String, Measure-Object, Test-Path, Get-Item, Select-Object, Where-Object, Sort-Object, Out-String, and string reads such as .Length, .Substring, .Split, and .Trim, including an assignment from one of those.
 - The decision is a parse of the pipeline, not a text search. Each path is resolved, including symlinks, .., environment variables, UNC, alternate data streams, and wildcards. A path outside this bot's workspace or a folder it already has a grant for still waits. So does a secret or another bot's files.
 - A write, Invoke-Expression, a nested -Command, Start-Process, a download, redirection, a pipe into any other command, a subexpression that is not a read, an encoded command, a backtick-obfuscated command, and an alias of a dangerous cmdlet still wait. With /yolo off, nothing about this changes.
+- An approval can name a class of action instead of one path. The card says which class, for example "Allow all: read files in this bot's folder for this chat". The classes are read-in-workspace, write-in-workspace, delete-in-workspace, move-in-workspace, and run-listed-program. A later file in that class does not ask again for the rest of this chat.
+- The grant stays on this chat. It ends after 2 hours, or after 30 minutes with nothing running, and it ends with /yolo when it was allowed during /yolo. It can be revoked. Each grant, use, expiry, and revoke is written to the safety audit.
+- Every use resolves the paths again. A symlink, a junction, .., an environment variable, a UNC path, or a wildcard that leaves this bot's folders still waits. So does another bot's folder, the key store, a delete outside the workspace, a download or a fetch-and-run, a sandbox or dangerous-command bypass, and a startup or login script.
 
 ## 0.3.23
 

@@ -250,7 +250,6 @@ def test_yolo_refuses_reads_that_leave_the_workspace(tmp_path):
         "$s = Get-Content .env -Raw; $s.Length",
         f"$s = Get-Content {their / 'notes.txt'} -Raw; $s.Length",
         f"$s = Get-Content {store.root / 'secrets.db'} -Raw; $s.Length",
-        "Get-Content index.html | Out-File out.txt",
         "Set-Alias type Remove-Item; $s = type index.html -Raw; $s.Length",
         "G`et-Content index.html | Select-Object Name",
         "powershell -Command '$s = Get-Content index.html; $s.Length'",

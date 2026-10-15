@@ -636,6 +636,9 @@ async def _lifespan(app: FastAPI):
 def create_app(data_dir: str | Path | None = None) -> FastAPI:
     store = Store(Path(data_dir) if data_dir is not None else default_data_dir())
     store.ensure()
+    from easyagent.yolo import forget_process
+
+    forget_process(store)
     _settle_abandoned_runs(store)
     app = FastAPI(title="EasyAgent", lifespan=_lifespan)
     app.state.store = store

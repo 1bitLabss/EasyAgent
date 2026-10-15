@@ -184,22 +184,23 @@ def test_a_listed_program_grant_is_that_program_in_this_folder(tmp_path):
     other.write_text("def test_b():\n    assert False\n", encoding="utf-8")
     client.post(f"/api/bots/{bot['id']}/chats/{chat['id']}/messages", json={"content": "/yolo"})
     _bind(store, bot["id"], chat["id"])
-    card = _ask_class(
-        store,
-        bot["id"],
-        ToolRequest(kind="shell", command="pytest test_a.py"),
-        "Allow all: run pytest in this bot's folder for this chat",
-    )
-    assert card["action_tool"] == "pytest"
-    _allow(store, bot["id"], ToolRequest(kind="shell", command="pytest test_b.py"))
+    kind, card, _outcome = asyncio.run(_settle(
+        store, bot["id"], ToolRequest(kind="shell", command="pytest test_a.py"), None,
+    ))
+    assert kind == "allow", card
+    assert read_audit(store, bot["id"])[-1].get("tag") == "yolo"
     from easyagent.yolo import clear as clear_yolo
 
     clear_yolo(store, bot["id"], chat["id"])
-    kind, waiting, _outcome = asyncio.run(_settle(
-        store, bot["id"], ToolRequest(kind="shell", command="pytest test_b.py"), "deny",
-    ))
-    assert kind == "answered"
-    assert waiting["action_class"] == "run-listed-program"
+    card = _ask_class(
+        store,
+        bot["id"],
+        ToolRequest(kind="shell", command="pytest test_b.py"),
+        "Allow all: run pytest in this bot's folder for this chat",
+    )
+    assert card["action_tool"] == "pytest"
+    _allow(store, bot["id"], ToolRequest(kind="shell", command="pytest test_a.py"))
+    assert read_audit(store, bot["id"])[-1].get("tag") == "class"
 
 
 def test_scope_escapes_still_wait_after_a_class_grant(tmp_path):

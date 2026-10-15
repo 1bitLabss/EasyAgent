@@ -1,9 +1,12 @@
 """Chat-scoped YOLO. One chat can skip approval cards for its own files.
 
-A person turns it on with ``/yolo`` or the header control. It expires when the
-chat sits idle, and on a hard deadline. It never covers another chat, a routine,
-a helper, a schedule, or a resumed run. The access layer is what decides the
-actor. This module does not trust a source string that the access check refused.
+A person turns it on with ``/yolo`` or the header control. While it is on, every
+ask-tier action inside this bot's folders skips the card. It expires when the
+chat sits idle, on a hard deadline, and when the app starts again. It never
+covers another chat, a routine, a helper, a schedule, or a resumed run. A hard
+block, a download-and-run, a disguised command, a git hook, and a ``.npmrc``
+injection are refused with no card. The access layer is what decides the actor.
+This module does not trust a source string that the access check refused.
 """
 
 from __future__ import annotations
@@ -22,21 +25,56 @@ _MAX_SECONDS = MAX_HOURS * 60 * 60
 _DEFAULT_SECONDS = DEFAULT_HOURS * 60 * 60
 _MIN_SECONDS = 60
 
-# Approval-card rules whose targets are files. Anything else still waits.
-_ELIGIBLE = frozenset({
-    "delete",
-    "overwrite",
-    "redirect-overwrite",
-    "move",
-    "script-body",
-    "write-outside",
+# Asks YOLO never runs, even inside the folder. A block never reaches this set.
+_REFUSE_RULES = frozenset({
+    "download-exec",
+    "remote-script",
+    "remote-change",
+    "install",
+    "git-hooks",
+    "injection",
+    "wrapped-command",
+    "inline-code",
+    "exec-flag",
+    "persistence",
+    "admin",
+    "git-destructive",
+    "off-limits",
+    "credential-dump",
+    "firewall-off",
+    "fork-bomb",
+    "disk-format",
+    "root-delete",
+    "guardrail-edit",
+    "browser-store",
+    "data-dir",
+    "own-server",
+    "bot-isolation",
+    "contain-setup",
+    "already-denied",
+    "unreviewed",
+    "mcp-ask",
+    "mcp-install",
+    "browser-pay",
+    "browser-login",
+    "browser-post",
+    "browser-settings",
+    "browser-submit",
+    "browser-secret",
 })
 
-# Ask rules a proved read-only pipeline may skip. A block never moves.
-_READ_RULES = frozenset({
-    "unlisted-command",
-    "dynamic-command",
-})
+_FETCH = re.compile(
+    r"(?i)\b(curl|wget|iwr|irm|invoke-webrequest|invoke-restmethod|start-bitstransfer|"
+    r"certutil|bitsadmin|mshta|msiexec)\b"
+)
+_DISGUISE = re.compile(
+    r"(?i)(\$\(|`|@'|@\"|"
+    r"\b(iex|invoke-expression|start-process|set-alias|new-alias|sal|nal|eval|exec)\b|"
+    r"\b(powershell|pwsh|cmd|bash|sh)(?:\.exe)?\b[^\n]*\s-(?:command|c|encodedcommand|enc|ec|e)\b|"
+    r"\s-(?:encodedcommand|enc)\s|"
+    r"(?:^|[;&|])\s*&\s*[{$])"
+)
+_INJECT_NAMES = frozenset({".npmrc", ".pnpmfile.cjs", ".yarnrc", ".yarnrc.yml", ".pypirc"})
 
 _DURATION = re.compile(r"^(\d+(?:\.\d+)?)([hm])$", re.IGNORECASE)
 _REDIRECT = re.compile(r"(?i)(?<![0-9&])>{1,2}\s*(['\"]?)([^'\"\s|&;]+)\1")
@@ -208,22 +246,13 @@ def public_view(chat: dict, now: datetime | None = None) -> dict:
     }
 
 
-def covers(store: Store, bot_id: str, request, verdict, *, now: datetime | None = None) -> bool:
-    """True when this ask-tier action may skip its card.
-
-    The current turn's chat must be the one YOLO was turned on for. Paths that
-    cannot be proved to sit inside the workspace, or a folder that already has
-    a grant, stay on the card. A read-only PowerShell pipeline can skip its
-    card on the same terms. A block is never this function's job.
-    """
+def active(store: Store, bot_id: str, *, now: datetime | None = None) -> bool:
+    """True when this turn's chat is the one YOLO was turned on for, and it is still on."""
     from easyagent.helpers import in_helper
     from easyagent.safety import is_unattended
     from easyagent import turn as turn_mod
 
-    if is_unattended() or in_helper():
-        return False
-    rule = getattr(verdict, "rule", "")
-    if getattr(verdict, "tier", "") != "ask" or rule not in _ELIGIBLE | _READ_RULES:
+    if is_unattended() or in_helper() or not bot_id:
         return False
     slot = turn_mod.current_slot()
     if slot is None or slot.bot_id != bot_id or not slot.chat_id:
@@ -232,23 +261,70 @@ def covers(store: Store, bot_id: str, request, verdict, *, now: datetime | None 
         chat = store.get_chat(bot_id, slot.chat_id)
     except Exception:
         return False
-    if not public_view(chat, now=now)["on"]:
+    return bool(public_view(chat, now=now)["on"])
+
+
+def refuses(store: Store, bot_id: str, request, verdict) -> bool:
+    """True when this ask is a hard block YOLO must refuse with no card.
+
+    A path outside the folder is not this. That still waits on a card. A drive
+    wipe, a download, a disguise, a git hook, and a ``.npmrc`` injection are.
+    """
+    rule = str(getattr(verdict, "rule", "") or "")
+    if rule in _REFUSE_RULES:
+        return True
+    kind = getattr(request, "kind", "")
+    if kind == "files":
+        return _files_refused(store, bot_id, request, rule)
+    if kind != "shell":
         return False
-    if rule in _READ_RULES:
-        try:
-            return _covers_readonly(store, bot_id, request)
-        except Exception:
-            return False
+    command = getattr(request, "command", "") or ""
+    if _shape_hard(command):
+        return True
+    if rule == "bot-changed" and _implicated_hard(store, bot_id, command):
+        return True
     try:
-        paths = _prove_paths(store, bot_id, request, verdict)
+        paths = _touched_paths(store, bot_id, request, verdict)
     except Exception:
         return False
-    if not paths:
+    return bool(paths) and any(_hard_path(path) for path in paths)
+
+
+def covers(store: Store, bot_id: str, request, verdict, *, now: datetime | None = None) -> bool:
+    """True when this ask-tier action may skip its card.
+
+    Every ask whose paths stay in this bot's folders, or a folder that already
+    has a grant, skips the card. A hard block, a secret, another bot's files,
+    and a path that cannot be proved to stay there do not.
+    """
+    if getattr(verdict, "tier", "") != "ask" or not active(store, bot_id, now=now):
         return False
-    roots = _scope_roots(store, bot_id)
-    if not roots:
+    if refuses(store, bot_id, request, verdict):
         return False
-    return all(_safe_inside(store, bot_id, path, roots) for path in paths)
+    try:
+        return _inside_scope(store, bot_id, request, verdict)
+    except Exception:
+        return False
+
+
+def forget_process(store: Store) -> None:
+    """A restart does not keep YOLO. Each chat loses it when the app starts."""
+    try:
+        bots = store.list_bots()
+    except Exception:
+        return
+    for bot in bots:
+        bot_id = str(bot.get("id") or "")
+        if not bot_id:
+            continue
+        try:
+            chats = store.list_chats(bot_id)
+        except Exception:
+            continue
+        for item in chats:
+            chat_id = str(item.get("id") or "")
+            if chat_id:
+                clear(store, bot_id, chat_id)
 
 
 def _enable(
@@ -303,9 +379,9 @@ def _on_sentence(hard: int, idle_minutes: int, notes: list[str]) -> str:
     idle = "1 minute" if idle_minutes == 1 else f"{idle_minutes} minutes"
     return (
         f"YOLO is on for this chat.{extra} "
-        f"File actions in this workspace skip the approval card for {_span(hard)}, "
+        f"Actions in this workspace skip the approval card for {_span(hard)}, "
         f"or after {idle} with nothing running. "
-        "Drive wipes, secrets, messages, and anything outside still wait."
+        "Drive wipes, downloads, disguised commands, git hooks, secrets, and anything outside still stop."
     )
 
 
@@ -389,9 +465,9 @@ def _prove_paths(store: Store, bot_id: str, request, verdict) -> list | None:
                 created=set(),
                 mode=_mode(bot),
             )
-            if inner.tier == "block" or inner.rule not in _ELIGIBLE:
+            if inner.tier == "block" or inner.rule in _REFUSE_RULES or _shape_hard(body):
                 return None
-            inner_paths = _shell_paths(body, path.parent, inner.rule)
+            inner_paths = _shell_paths(body, path.parent, inner.rule) or _operand_paths(body, path.parent)
             if not inner_paths:
                 return None
             paths.extend(inner_paths)
@@ -454,6 +530,250 @@ def _unique(paths: list) -> list:
         seen.add(key)
         found.append(path)
     return found
+
+
+def _shape_hard(command: str) -> bool:
+    text = command or ""
+    return bool(_FETCH.search(text) or _DISGUISE.search(text))
+
+
+def _hard_path(path) -> bool:
+    from easyagent.safety import _persistence_path
+
+    return _inject_path(path) or _persistence_path(path)
+
+
+def _inject_path(path) -> bool:
+    name = path.name.lower()
+    if name in _INJECT_NAMES or name.startswith(".yarnrc"):
+        return True
+    parts = [part.lower() for part in path.parts]
+    return ".git" in parts and "hooks" in parts
+
+
+def _files_refused(store: Store, bot_id: str, request, rule: str) -> bool:
+    from pathlib import Path
+
+    from easyagent import turn as turn_mod
+    from easyagent.safety import _file_request_path, _mode, _workspace_roots, judge_command
+
+    try:
+        cwd = Path(turn_mod.tool_cwd())
+    except OSError:
+        return False
+    path = _file_request_path(store, getattr(request, "path", "") or ".", cwd, bot_id)
+    if _hard_path(path):
+        return True
+    if rule != "script-body":
+        return False
+    body = getattr(request, "body", "") or ""
+    if _shape_hard(body):
+        return True
+    try:
+        bot = store.get_bot(bot_id)
+    except Exception:
+        bot = None
+    inner = judge_command(
+        body,
+        remote=False,
+        cwd=path.parent,
+        roots=_workspace_roots(store, bot_id, ""),
+        created=set(),
+        mode=_mode(bot),
+    )
+    return inner.tier == "block" or inner.rule in _REFUSE_RULES or _shape_hard(body)
+
+
+def _implicated(store: Store, bot_id: str, command: str):
+    from pathlib import Path
+
+    from easyagent import turn as turn_mod
+    from easyagent.safety import _workspace_roots
+    from easyagent.strictshell import _records, _review_paths
+
+    try:
+        cwd = Path(turn_mod.tool_cwd())
+        _bot, records = _records(store, bot_id)
+        return list(_review_paths(command, cwd, _workspace_roots(store, bot_id, ""), records))
+    except Exception:
+        return None
+
+
+def _exists(path) -> bool:
+    try:
+        return path.exists()
+    except OSError:
+        return True
+
+
+def _implicated_hard(store: Store, bot_id: str, command: str) -> bool:
+    paths = _implicated(store, bot_id, command)
+    if not paths:
+        return False
+    return any(_hard_path(path) and _exists(path) for path in paths)
+
+
+def _touched_paths(store: Store, bot_id: str, request, verdict) -> list | None:
+    from pathlib import Path
+
+    from easyagent import turn as turn_mod
+    from easyagent.safety import _file_request_path
+
+    kind = getattr(request, "kind", "")
+    if kind == "files":
+        try:
+            cwd = Path(turn_mod.tool_cwd())
+        except OSError:
+            return None
+        return [_file_request_path(store, getattr(request, "path", "") or ".", cwd, bot_id)]
+    if kind != "shell":
+        return None
+    command = getattr(request, "command", "") or ""
+    proved = _readonly_paths(request)
+    if proved is not None:
+        return proved
+    paths = _prove_paths(store, bot_id, request, verdict)
+    if paths:
+        return paths
+    try:
+        cwd = Path(turn_mod.tool_cwd())
+    except OSError:
+        return None
+    return _operand_paths(command, cwd)
+
+
+def _inside_scope(store: Store, bot_id: str, request, verdict) -> bool:
+    from pathlib import Path
+
+    from easyagent import turn as turn_mod
+
+    kind = getattr(request, "kind", "")
+    roots = _scope_roots(store, bot_id)
+    if not roots:
+        return False
+    if kind == "files":
+        rule = str(getattr(verdict, "rule", "") or "")
+        paths = _prove_paths(store, bot_id, request, verdict) if rule == "script-body" else _touched_paths(
+            store, bot_id, request, verdict
+        )
+        if not paths or any(_hard_path(path) for path in paths):
+            return False
+        return all(_safe_inside(store, bot_id, path, roots) for path in paths)
+    if kind != "shell":
+        return False
+    command = getattr(request, "command", "") or ""
+    if _command_is_wide(command, _wide()):
+        return False
+    rule = str(getattr(verdict, "rule", "") or "")
+    if rule == "bot-changed":
+        found = _implicated(store, bot_id, command)
+        if not found:
+            return False
+        paths = []
+        for path in found:
+            if _hard_path(path):
+                return False
+            if not _exists(path):
+                continue
+            paths.append(path)
+        if not paths:
+            return False
+        return all(_read_inside(store, bot_id, path, roots) for path in paths)
+    proved = _readonly_paths(request)
+    if proved is not None:
+        if any(_hard_path(path) for path in proved):
+            return False
+        return _covers_readonly(store, bot_id, request)
+    paths = _prove_paths(store, bot_id, request, verdict)
+    if not paths:
+        try:
+            cwd = Path(turn_mod.tool_cwd())
+        except OSError:
+            return False
+        paths = _operand_paths(command, cwd)
+    if not paths or any(_hard_path(path) for path in paths):
+        return False
+    writes = rule in {"delete", "move", "overwrite", "redirect-overwrite", "write-outside", "script-body"} or bool(
+        _REDIRECT.search(command)
+    )
+    check = _safe_inside if writes else _read_inside
+    return all(check(store, bot_id, path, roots) for path in paths)
+
+
+def _wide():
+    from easyagent.safety import _wide_token
+
+    return _wide_token
+
+
+def _readonly_paths(request):
+    import os
+    from pathlib import Path
+
+    from easyagent import turn as turn_mod
+    from easyagent.psread import prove_readonly
+
+    if getattr(request, "kind", "") != "shell":
+        return None
+    command = getattr(request, "command", "") or ""
+    try:
+        cwd = Path(turn_mod.tool_cwd())
+    except OSError:
+        return None
+    slot = turn_mod.current_slot()
+    env = dict(slot.env) if slot is not None and slot.env else dict(os.environ)
+    return prove_readonly(command, cwd, env)
+
+
+def _operand_paths(command: str, cwd) -> list | None:
+    """Files a command names, after expansion. None when a path cannot be proved."""
+    from pathlib import Path
+
+    from easyagent.safety import _command_program, _content_target, _path_key, _paths_in, _resolve, _wide_token
+    from easyagent.shellexpand import prepared_command, still_unresolved
+
+    raw = command or ""
+    # A variable, an alternate stream, or .. is proved by the read parser or not at all.
+    # Expanding it here can turn an empty variable into a path inside the folder.
+    if re.search(r"[`$%]|\.\.|:", raw):
+        return None
+    expanded = prepared_command(raw)
+    if still_unresolved(expanded) or _shape_hard(expanded):
+        return None
+    if re.search(r"(?i)[a-z][a-z0-9+.-]*://", expanded) or "\\\\" in expanded:
+        return None
+    paths = []
+    for match in _REDIRECT.finditer(expanded):
+        token = match.group(2)
+        if _wide_token(token) or token in {".", "..", "*", "~"}:
+            return None
+        paths.append(_resolve(token, cwd))
+    target = _content_target(expanded, cwd)
+    if target is not None:
+        paths.append(target)
+    paths.extend(_paths_in(expanded, cwd))
+    for token in re.findall(r"[^\s|&;<>]+", expanded):
+        cleaned = token.strip("'\"")
+        if not cleaned or cleaned.startswith("-"):
+            continue
+        if cleaned in {".", "..", "*", "~"} or _wide_token(cleaned):
+            return None
+        if any(mark in cleaned for mark in ("*", "?", "$", "%")):
+            return None
+        looks = "/" in cleaned or "\\" in cleaned or cleaned.startswith(".") or "." in Path(cleaned).name
+        if not looks:
+            try:
+                looks = (cwd / cleaned).exists()
+            except OSError:
+                looks = False
+        if not looks:
+            continue
+        paths.append(_resolve(cleaned, cwd))
+    program = _command_program(expanded, cwd)
+    if program is not None:
+        key = _path_key(program)
+        paths = [path for path in paths if _path_key(path) != key]
+    return _unique(paths)
 
 
 def _covers_readonly(store: Store, bot_id: str, request) -> bool:

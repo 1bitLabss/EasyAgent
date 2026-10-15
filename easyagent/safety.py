@@ -3456,6 +3456,18 @@ def _yolo_take(store: Store, request, bot_id: str | None, verdict: Verdict) -> b
         return False
 
 
+def _yolo_refuse(store: Store, request, bot_id: str | None, verdict: Verdict) -> bool:
+    """A hard block while YOLO is on is a plain refusal, not a card."""
+    if verdict.tier != ASK or not bot_id or is_unattended():
+        return False
+    from easyagent.yolo import active, refuses
+
+    try:
+        return bool(active(store, bot_id) and refuses(store, bot_id, request, verdict))
+    except Exception:
+        return False
+
+
 def _class_take(store: Store, request, bot_id: str | None, verdict: Verdict) -> bool:
     """Skip the card when this chat already allowed this action class and the paths still fit."""
     if verdict.tier != ASK or not bot_id or is_unattended():
@@ -3566,6 +3578,9 @@ async def guard(store: Store, request, bot_id: str | None):
             },
         )
         return _release_ask(store, request, bot_id, verdict)
+    if verdict.tier == ASK and _yolo_refuse(store, request, bot_id, verdict):
+        _audit(store, bot_id, {"at": now_iso(), "decision": "block", "rule": verdict.rule, "why": verdict.why, "detail": verdict.detail})
+        raise ToolError(verdict.why + " It was not run.")
     if verdict.tier == ASK and _class_take(store, request, bot_id, verdict):
         from easyagent.actionclass import match as class_match
 

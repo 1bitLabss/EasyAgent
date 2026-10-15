@@ -600,6 +600,24 @@ export function ChatPane() {
         ) : null}
       </div>
       </div>
+      {yoloOn ? (
+        <div
+          data-testid="yolo-banner"
+          role="status"
+          className="flex shrink-0 items-center justify-between gap-3 bg-[#b42318] px-4 py-2 text-sm font-semibold text-white"
+        >
+          <span>YOLO ON</span>
+          <span className="font-normal">{yoloClock(yoloLeft)} left in this chat</span>
+          <button
+            type="button"
+            data-testid="yolo-off"
+            className="rounded-full bg-white px-3 py-1 text-xs font-bold text-[#b42318]"
+            onClick={() => void toggleYolo()}
+          >
+            Turn off
+          </button>
+        </div>
+      ) : null}
 
       <div ref={scroller} onScroll={onScroll} className="min-h-0 flex-1 overflow-y-auto px-4 pb-4 pt-2" style={{ overflowAnchor: "none" }}>
         <div className="mx-auto flex w-full max-w-[760px] flex-col gap-4">

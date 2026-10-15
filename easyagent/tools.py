@@ -424,25 +424,61 @@ def _fence_request(pattern: re.Pattern[str], text: str) -> str | None:
     return match.group(1).strip("\n")
 
 
-def _load_call(raw: str) -> dict | None:
-    """A JSON or literal tool object. Anything else is not a call."""
-    text = (raw or "").strip()
-    if text.startswith("```"):
-        text = re.sub(r"^```(?:json)?[ \t]*", "", text, flags=re.IGNORECASE)
-        text = re.sub(r"\s*```$", "", text).strip()
-    data = None
-    try:
-        data = json.loads(text)
-    except ValueError:
-        try:
-            data = ast.literal_eval(text)
-        except (ValueError, SyntaxError, MemoryError, TypeError):
-            return None
+def argument_objects(raw) -> list[dict]:
+    """Argument objects, including two JSON objects written one after another."""
+    if isinstance(raw, dict):
+        return [raw]
+    if isinstance(raw, list):
+        return [item for item in raw if isinstance(item, dict)]
+    if not isinstance(raw, str):
+        return []
+    found: list[dict] = []
+    for value in llm.split_json_values(raw):
+        if isinstance(value, dict):
+            found.append(value)
+        elif isinstance(value, list):
+            found.extend(item for item in value if isinstance(item, dict))
+    return found
+
+
+def _call_dict(data) -> dict | None:
     if not isinstance(data, dict) or not str(data.get("name") or "").strip():
         return None
     if "arguments" not in data and "parameters" not in data and "args" not in data:
         return None
     return data
+
+
+def _load_calls(raw: str) -> list[dict]:
+    """Every tool object in a string. Concatenated objects each count."""
+    text = (raw or "").strip()
+    if text.startswith("```"):
+        text = re.sub(r"^```(?:json)?[ \t]*", "", text, flags=re.IGNORECASE)
+        text = re.sub(r"\s*```$", "", text).strip()
+    values = llm.split_json_values(text)
+    if not values:
+        try:
+            literal = ast.literal_eval(text)
+        except (ValueError, SyntaxError, MemoryError, TypeError):
+            literal = None
+        if isinstance(literal, list):
+            values = list(literal)
+        elif literal is not None:
+            values = [literal]
+    found: list[dict] = []
+    for value in values:
+        items = value if isinstance(value, list) else [value]
+        for item in items:
+            call = _call_dict(item)
+            if call is not None:
+                found.append(call)
+    return found
+
+
+def _load_call(raw: str) -> dict | None:
+    """A JSON or literal tool object. Anything else is not a call."""
+    calls = _load_calls(raw)
+    return calls[0] if calls else None
 
 
 def _qwen_call(body: str) -> dict | None:
@@ -462,10 +498,8 @@ def _request_from_call(data: dict) -> ToolRequest:
     if raw_args is None:
         raw_args = data.get("args") or {}
     if isinstance(raw_args, str):
-        try:
-            raw_args = json.loads(raw_args)
-        except ValueError:
-            raw_args = {}
+        objects = argument_objects(raw_args)
+        raw_args = objects[0] if objects else {}
     if not isinstance(raw_args, dict):
         raw_args = {}
     path = str(
@@ -571,6 +605,32 @@ def _request_from_call(data: dict) -> ToolRequest:
         "list and read a project file, read or file a memory topic, run a command here, search the web, "
         "and run a command on a Linux or Windows computer you saved."
     )
+
+
+def _expand_call(data: dict) -> list[ToolRequest]:
+    """One request per argument object. Two objects stuck together become two calls."""
+    raw_args = data.get("arguments")
+    if raw_args is None:
+        raw_args = data.get("parameters")
+    if raw_args is None:
+        raw_args = data.get("args")
+    objects = argument_objects(raw_args if raw_args is not None else {})
+    if not objects:
+        objects = [{}]
+    found: list[ToolRequest] = []
+    errors: list[ToolError] = []
+    for obj in objects:
+        try:
+            request = _request_from_call({**data, "arguments": obj})
+        except ToolError as exc:
+            errors.append(exc)
+            continue
+        found.append(replace(request, call_arguments=json.dumps(obj)))
+    if found:
+        return found
+    if errors:
+        raise errors[0]
+    return []
 
 
 def _tagged_tool(text: str) -> ToolRequest | None:
@@ -906,14 +966,19 @@ def parse_tools(text: str) -> list[ToolRequest]:
     blocks = list(_TOOL_CALL_BLOCK.finditer(raw))
     parsed_block = False
     for match in blocks:
-        data = _load_call(match.group(1)) or _qwen_call(match.group(1))
-        if data is None:
+        calls = _load_calls(match.group(1))
+        if not calls:
+            qwen = _qwen_call(match.group(1))
+            calls = [qwen] if qwen else []
+        if not calls:
             continue
-        try:
-            found.append((match.start(), _request_from_call(data)))
-            parsed_block = True
-        except ToolError as exc:
-            errors.append(exc)
+        for data in calls:
+            try:
+                for request in _expand_call(data):
+                    found.append((match.start(), request))
+                    parsed_block = True
+            except ToolError as exc:
+                errors.append(exc)
     if blocks and not parsed_block:
         raise errors[0] if errors else ToolError(
             "That printed tool call was not run. EasyAgent can list, read, and write files on this computer, "
@@ -970,9 +1035,16 @@ def parse_tools(text: str) -> list[ToolRequest]:
         raise errors[0]
     stripped = raw.strip()
     if stripped.startswith("{") and stripped.endswith("}"):
-        data = _load_call(stripped)
-        if data is not None:
-            return [_request_from_call(data)]
+        calls = _load_calls(stripped)
+        if calls:
+            expanded: list[ToolRequest] = []
+            for data in calls:
+                try:
+                    expanded.extend(_expand_call(data))
+                except ToolError as exc:
+                    errors.append(exc)
+            if expanded:
+                return expanded
     tail = re.search(r"(\{.*\})\s*</tool_call>", raw, re.DOTALL | re.IGNORECASE)
     if tail:
         data = _load_call(tail.group(1))
@@ -4990,7 +5062,7 @@ def _requests_from_native(calls: list[dict]) -> list[ToolRequest]:
         arguments = raw_args if isinstance(raw_args, str) else json.dumps(raw_args or {})
         data = {"name": name, "arguments": arguments}
         try:
-            request = _request_from_call(data)
+            requests = _expand_call(data)
         except ToolError as exc:
             fence = llm.calls_to_fence([data])
             parsed: list[ToolRequest] = []
@@ -4999,13 +5071,14 @@ def _requests_from_native(calls: list[dict]) -> list[ToolRequest]:
                     parsed = parse_tools(fence)
                 except ToolError as inner:
                     exc = inner
-            request = parsed[0] if parsed else ToolRequest(kind="failed", body=str(exc))
-        found.append(replace(
-            request,
-            call_id=cid,
-            call_name=name,
-            call_arguments=arguments,
-        ))
+            requests = parsed or [ToolRequest(kind="failed", body=str(exc))]
+        for offset, request in enumerate(requests):
+            found.append(replace(
+                request,
+                call_id=cid if offset == 0 else f"{cid}:{offset}",
+                call_name=name or request.call_name,
+                call_arguments=request.call_arguments or (arguments if offset == 0 else "{}"),
+            ))
     return found
 
 

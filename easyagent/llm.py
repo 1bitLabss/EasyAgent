@@ -153,6 +153,99 @@ def grammar_rejected(detail: str) -> bool:
     return "failed to parse grammar" in lowered or ("grammar" in lowered and "400" in lowered)
 
 
+# A local model sometimes emits two tool-call objects stuck together. llama.cpp
+# answers 500. Two more tries ask for one valid call and turn parallel calls off.
+TOOL_PARSE_RETRIES = 2
+TOOL_PARSE_NUDGE = "emit exactly one tool call with valid JSON"
+MALFORMED_TOOL_TEXT = "The model produced a malformed tool call. Try again or use a different model."
+
+_PARALLEL_TOOLS: dict[str, bool] = {}
+
+
+def tool_parse_failure(status: int, body: str) -> bool:
+    """A 5xx whose body says the tool-call arguments were not one JSON value."""
+    try:
+        code = int(status)
+    except (TypeError, ValueError):
+        return False
+    if code < 500 or code > 599:
+        return False
+    lowered = (body or "").lower()
+    return "failed to parse tool call" in lowered or "parse_error" in lowered
+
+
+def malformed_tool_call(detail: str) -> bool:
+    """The plain sentence, or the server error that sentence replaces."""
+    lowered = (detail or "").lower()
+    if MALFORMED_TOOL_TEXT.lower() in lowered:
+        return True
+    return "failed to parse tool call" in lowered or "parse_error" in lowered
+
+
+def parallel_tool_calls_supported(base_url: str) -> bool:
+    """True until a server rejects the field. The first request does not send it."""
+    return _PARALLEL_TOOLS.get(_server_root(base_url), True)
+
+
+def remember_parallel_tool_calls(base_url: str, supported: bool) -> None:
+    _PARALLEL_TOOLS[_server_root(base_url)] = bool(supported)
+
+
+def reset_parallel_tool_calls() -> None:
+    _PARALLEL_TOOLS.clear()
+
+
+def nudge_single_tool(messages: list[dict]) -> list[dict]:
+    """Ask for one valid tool call. The stored transcript is not changed."""
+    note = TOOL_PARSE_NUDGE
+    copied = [dict(item) for item in messages if isinstance(item, dict)]
+    if copied and copied[0].get("role") == "system":
+        content = str(copied[0].get("content") or "")
+        if note not in content:
+            copied[0]["content"] = content.rstrip() + "\n\n" + note
+        return copied
+    return [{"role": "system", "content": note}, *copied]
+
+
+def split_json_values(text: str) -> list:
+    """Every JSON value in `text`, including objects written one after another."""
+    raw = (text or "").strip()
+    if not raw:
+        return []
+    decoder = json.JSONDecoder()
+    values: list = []
+    index = 0
+    length = len(raw)
+    while index < length:
+        while index < length and raw[index].isspace():
+            index += 1
+        if index >= length:
+            break
+        try:
+            value, end = decoder.raw_decode(raw, index)
+        except json.JSONDecodeError:
+            break
+        values.append(value)
+        index = end
+    return values
+
+
+class _ToolParseAgain(Exception):
+    """The completion should be sent again. `drop_flag` means omit parallel_tool_calls."""
+
+    def __init__(self, drop_flag: bool = False) -> None:
+        self.drop_flag = drop_flag
+
+
+def _tool_http_action(status: int, body: str, *, sent_parallel_flag: bool) -> str | None:
+    """'drop-flag' or 'retry'. None keeps the ordinary error."""
+    if sent_parallel_flag and int(status) == 400 and "parallel_tool_calls" in (body or "").lower():
+        return "drop-flag"
+    if tool_parse_failure(status, body):
+        return "retry"
+    return None
+
+
 def _server_root(base_url: str) -> str:
     url = (base_url or "").rstrip("/")
     if url.endswith("/v1"):
@@ -212,6 +305,8 @@ def connection_error_text(detail: str, endpoint: dict | None, model: str | None 
     An unreachable model is the harness sentence. The model does not write it.
     """
     text = (detail or "").strip() or "The model server did not answer."
+    if malformed_tool_call(text):
+        return MALFORMED_TOOL_TEXT
     url = ((endpoint or {}).get("base_url") or "").strip()
     if retry.is_unreachable_message(text) or retry.retryable_before_token(text):
         return retry.unreachable_text(url or retry.url_from_detail(text))
@@ -233,11 +328,15 @@ def _call_args(call: dict) -> dict:
         raw = call.get("parameters") or {}
     if isinstance(raw, dict):
         return raw
-    try:
-        parsed = json.loads(raw or "{}")
-    except (TypeError, ValueError):
-        return {}
-    return parsed if isinstance(parsed, dict) else {}
+    values = split_json_values(str(raw or ""))
+    for value in values:
+        if isinstance(value, dict):
+            return value
+        if isinstance(value, list):
+            for item in value:
+                if isinstance(item, dict):
+                    return item
+    return {}
 
 
 def _string_arg(args: dict, *keys: str) -> str:
@@ -555,11 +654,14 @@ def _completion_payload(
     response_schema: dict | None = None,
     grammar: str | None = None,
     tools: bool = True,
+    parallel_tool_calls: bool | None = None,
 ) -> dict:
     """A schema or a grammar never rides along with the tool list. llama.cpp rejects that pair."""
     payload: dict = {"messages": messages}
     if tools and not response_schema and not grammar:
         payload["tools"] = native_tools()
+        if parallel_tool_calls is False:
+            payload["parallel_tool_calls"] = False
     if stream:
         payload["stream"] = True
     if model:
@@ -855,10 +957,55 @@ async def _complete_once(
     tools: bool = True,
     yield_to_chats: bool = False,
 ) -> str:
-    """One non-streaming completion. The caller decides whether to retry."""
+    """One non-streaming completion. A tool-call parse 500 is tried again here."""
+    working = [dict(item) for item in messages if isinstance(item, dict)]
+    single = False
+    flag_off = not parallel_tool_calls_supported(base_url)
+    left = TOOL_PARSE_RETRIES
+    while True:
+        try:
+            return await _complete_attempt(
+                base_url=base_url,
+                api_key=api_key,
+                model=model,
+                messages=working,
+                timeout=timeout,
+                response_schema=response_schema,
+                grammar=grammar,
+                tools=tools,
+                yield_to_chats=yield_to_chats,
+                parallel_tool_calls=False if single and not flag_off else None,
+            )
+        except _ToolParseAgain as exc:
+            if exc.drop_flag:
+                flag_off = True
+                remember_parallel_tool_calls(base_url, False)
+                continue
+            if left <= 0:
+                raise ProviderError(MALFORMED_TOOL_TEXT) from exc
+            left -= 1
+            single = True
+            working = nudge_single_tool(working)
+
+
+async def _complete_attempt(
+    *,
+    base_url: str,
+    api_key: str | None,
+    model: str | None,
+    messages: list[dict],
+    timeout: float,
+    response_schema: dict | None = None,
+    grammar: str | None = None,
+    tools: bool = True,
+    yield_to_chats: bool = False,
+    parallel_tool_calls: bool | None = None,
+) -> str:
+    """One POST. A tool-call parse failure raises `_ToolParseAgain`."""
     started = time.perf_counter()
     _native_calls.set(None)
     url = base_url.rstrip("/") + "/chat/completions"
+    sent_flag = parallel_tool_calls is False
     payload = _completion_payload(
         messages,
         model,
@@ -866,6 +1013,7 @@ async def _complete_once(
         response_schema=response_schema,
         grammar=grammar,
         tools=tools,
+        parallel_tool_calls=parallel_tool_calls,
     )
     headers = {"Content-Type": "application/json"}
     if api_key:
@@ -891,7 +1039,13 @@ async def _complete_once(
         turn_mod.detach_client(client)
         await client.aclose()
     if response.status_code >= 400:
-        detail = " ".join(response.text.split())[:300]
+        full = " ".join(response.text.split())
+        action = _tool_http_action(response.status_code, full, sent_parallel_flag=sent_flag)
+        if action == "drop-flag":
+            raise _ToolParseAgain(drop_flag=True)
+        if action == "retry":
+            raise _ToolParseAgain()
+        detail = full[:300]
         raise ProviderError(f"{response.status_code} from {base_url}: {detail}")
     try:
         data = response.json()
@@ -1272,10 +1426,54 @@ async def _stream_once(
     messages: list[dict],
     timeout: float,
 ) -> AsyncIterator[str]:
-    """One streaming attempt. A pause after the headers is not a failure. No headers in time is."""
+    """One streaming attempt. A tool-call parse 500 is tried again before the first token."""
+    working = [dict(item) for item in messages if isinstance(item, dict)]
+    single = False
+    flag_off = not parallel_tool_calls_supported(base_url)
+    left = TOOL_PARSE_RETRIES
+    while True:
+        try:
+            async for piece in _stream_attempt(
+                base_url=base_url,
+                api_key=api_key,
+                model=model,
+                messages=working,
+                timeout=timeout,
+                parallel_tool_calls=False if single and not flag_off else None,
+            ):
+                yield piece
+            return
+        except _ToolParseAgain as exc:
+            if exc.drop_flag:
+                flag_off = True
+                remember_parallel_tool_calls(base_url, False)
+                continue
+            if left <= 0:
+                raise ProviderError(MALFORMED_TOOL_TEXT) from exc
+            left -= 1
+            single = True
+            working = nudge_single_tool(working)
+
+
+async def _stream_attempt(
+    *,
+    base_url: str,
+    api_key: str | None,
+    model: str | None,
+    messages: list[dict],
+    timeout: float,
+    parallel_tool_calls: bool | None = None,
+) -> AsyncIterator[str]:
+    """One streaming POST. A pause after the headers is not a failure."""
     started = time.perf_counter()
     url = base_url.rstrip("/") + "/chat/completions"
-    payload = _completion_payload(messages, model, stream=True)
+    sent_flag = parallel_tool_calls is False
+    payload = _completion_payload(
+        messages,
+        model,
+        stream=True,
+        parallel_tool_calls=parallel_tool_calls,
+    )
     headers = {"Content-Type": "application/json"}
     if api_key:
         headers["Authorization"] = f"Bearer {api_key}"
@@ -1292,7 +1490,13 @@ async def _stream_once(
             _raise_transport(exc, base_url)
         try:
             if response.status_code >= 400:
-                detail = " ".join((await response.aread()).decode("utf-8", "replace").split())[:300]
+                full = " ".join((await response.aread()).decode("utf-8", "replace").split())
+                action = _tool_http_action(response.status_code, full, sent_parallel_flag=sent_flag)
+                if action == "drop-flag":
+                    raise _ToolParseAgain(drop_flag=True)
+                if action == "retry":
+                    raise _ToolParseAgain()
+                detail = full[:300]
                 raise ProviderError(f"{response.status_code} from {base_url}: {detail}")
             async for piece in _iter_completion_body(response, started=started, messages=messages):
                 turn_mod.raise_if_cancelled()

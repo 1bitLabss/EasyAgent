@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.3.23
+
+- When the model server rejects a tool call because the arguments are not one JSON object, EasyAgent tries that request again, up to twice. The retry asks for exactly one tool call with valid JSON, and sends parallel_tool_calls off when the server accepts that field.
+- Tool arguments that are two JSON objects stuck together are split, and each object is run.
+- If the call is still malformed, the chat says the model produced a malformed tool call and to try again or use a different model. The job stays resumable. It is not marked Stopped.
+
 ## 0.3.22
 
 - `/yolo` turns on auto-approval for this chat only. The header control does the same. File actions inside this bot's workspace, or a folder this bot already has a grant for, skip the approval card. The sandbox and containment still wrap the command. Drive wipes, downloaded scripts, secrets, other bots, the app data folder, bridge sends, outbound messages, and anything outside still wait or are blocked.

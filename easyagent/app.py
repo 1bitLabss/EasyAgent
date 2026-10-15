@@ -4257,14 +4257,24 @@ def _append_error(store: Store, bot_id: str, chat_id: str, detail: str) -> dict:
     before = len(chat.get("messages") or [])
     cleaned = " ".join((redact(store, detail) or "").split())
     harness = retry.is_unreachable_message(cleaned)
-    shown = cleaned if harness else _stopped_text(cleaned)
+    malformed = llm.malformed_tool_call(cleaned)
+    if malformed:
+        shown = llm.MALFORMED_TOOL_TEXT
+    elif harness:
+        shown = cleaned
+    else:
+        shown = _stopped_text(cleaned)
 
     def _stamp(message: dict) -> None:
         message["content"] = shown
-        message["error"] = True
         message.pop("live", None)
-        if harness:
-            message["kind"] = "connection"
+        if malformed:
+            message["kind"] = "resume-offer"
+            message.pop("error", None)
+        else:
+            message["error"] = True
+            if harness:
+                message["kind"] = "connection"
 
     if chat.get("messages") and chat["messages"][-1].get("live"):
         last = chat["messages"][-1]
@@ -4274,7 +4284,7 @@ def _append_error(store: Store, bot_id: str, chat_id: str, detail: str) -> dict:
             _record_turn_meter(chat, detail=detail)
             stats = _persist_context(store, chat)
             chat["updated_at"] = now_iso()
-            _apply_run(chat, status="error", reason=shown, step="")
+            _apply_run(chat, status="paused" if malformed else "error", reason=shown, step="")
             _settle_chips(chat)
             _save_chat_final(store, chat)
             poke(store, "message")
@@ -4285,16 +4295,19 @@ def _append_error(store: Store, bot_id: str, chat_id: str, detail: str) -> dict:
         "id": new_id(),
         "role": "assistant",
         "content": shown,
-        "error": True,
         "created_at": now_iso(),
     }
+    if malformed:
+        fresh["kind"] = "resume-offer"
+    else:
+        fresh["error"] = True
     if harness:
         fresh["kind"] = "connection"
     chat["messages"].append(fresh)
     _record_turn_meter(chat, detail=detail)
     stats = _persist_context(store, chat)
     chat["updated_at"] = now_iso()
-    _apply_run(chat, status="error", reason=shown, step="")
+    _apply_run(chat, status="paused" if malformed else "error", reason=shown, step="")
     _settle_chips(chat)
     _save_chat_final(store, chat)
     poke(store, "message")

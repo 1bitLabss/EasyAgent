@@ -10,6 +10,7 @@ import { WindowControls } from "@/components/WindowControls";
 import { moodForReaction, pokeFace } from "@/lib/mood";
 import { chipText } from "@/lib/chips";
 import { yoloClock, yoloRemaining } from "@/lib/yolo";
+import { activityLabel, askedLine } from "@/lib/activity";
 import { activityLine, describeRun, faceStateFor, runTone, workingLine } from "@/lib/run";
 import { hideWhileSending, messageHasBubble, reactionWho } from "@/lib/transcript";
 import { cn } from "@/lib/utils";
@@ -107,6 +108,7 @@ const MessageRow = memo(function MessageRow({
   const chatId = useApp((state) => state.chatId);
   const setScreen = useApp((state) => state.setScreen);
   if (hideWhileSending(message, sending)) return null;
+  if (message.about === "activity") return null;
   if (message.kind === "status" || message.kind === "pickup") {
     return (
       <li className="message-row" data-kind={message.kind}>
@@ -494,7 +496,8 @@ export function ChatPane() {
   const face = faceFor(Boolean(flight?.sending), live?.phase, view?.words, live?.text, running ? "running" : open?.run?.status, view?.words);
   const asking = (open?.messages || []).slice(-1)[0]?.choices;
   const rows = open?.messages || [];
-  const steps = (live?.steps || []).filter((item) => item && item !== "Thinking" && item !== view?.words);
+  const steps = live?.steps || [];
+  const asked = askedLine(bot.endpoint_name || "", rows);
   const pill = workingLine(live?.run || open?.run, now);
   const activity = activityLine({
     step: live?.label || open?.run?.current_step || "",
@@ -661,7 +664,12 @@ export function ChatPane() {
                 onChoose={onChoose}
               />
               {steps.map((item) => (
-                <Quiet key={item} icon={runTone(item, "running") === "tool" ? <Terminal className="h-3 w-3" /> : <MessageSquare className="h-3 w-3" />} text={item} />
+                <div key={item.id} data-testid="activity-step" data-state={item.state} data-step-id={item.id}>
+                  <Quiet
+                    icon={runTone(item.text, "running") === "tool" ? <Terminal className="h-3 w-3" /> : <MessageSquare className="h-3 w-3" />}
+                    text={activityLabel(item)}
+                  />
+                </div>
               ))}
               {live && (live.reasoning || "").trim() && live.phase !== "error" && live.phase !== "stopped" ? (
                 <ThinkingBox text={live.reasoning} streaming={Boolean(live.reasoningLive)} seconds={live.thoughtSeconds} startedAt={live.thoughtAt} now={now} />
@@ -684,7 +692,11 @@ export function ChatPane() {
               {live && (live.phase === "stopped" || live.phase === "error") ? (
                 <div className="sys-line" role="status"><p className="text-danger">{live.text.startsWith("Stopped") ? live.text : `Stopped: ${live.text}`}</p></div>
               ) : null}
-              {open.messages?.length ? <Quiet icon={<MessageSquare className="h-3 w-3" />} text={`Messaged${bot.endpoint_name ? ` · ${bot.endpoint_name}` : ""}`} /> : null}
+              {open.messages?.length ? (
+                <div data-testid="asked-line">
+                  <Quiet icon={<MessageSquare className="h-3 w-3" />} text={asked} />
+                </div>
+              ) : null}
             </>
           )}
         </div>

@@ -230,6 +230,9 @@ async def review_turn(run_turn, **kwargs):
         revisions += 1
         print("heuristic check: the draft failed, so the reply is revised", flush=True)
         yield "face", "sad"
+        from easyagent.tools import open_tool_step
+
+        open_tool_step("Revising")
         yield "status", "Revising"
         note = _note(grade, revisions)
         if note:

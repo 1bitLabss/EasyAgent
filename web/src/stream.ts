@@ -1,4 +1,5 @@
 import { api, queryClient, streamPost } from "@/api";
+import { noteActivity, settleActivity, type ActivityStep } from "@/lib/activity";
 import { activityLine } from "@/lib/run";
 import { mergeChat } from "@/lib/window";
 import { moodForBadge, pokeFace } from "@/lib/mood";
@@ -12,7 +13,7 @@ export type Live = {
   reasoning: string;
   run: Run | null;
   heardAt: number;
-  steps?: string[];
+  steps?: ActivityStep[];
   thoughtAt?: number;
   thoughtSeconds?: number;
   reasoningLive?: boolean;
@@ -47,6 +48,24 @@ export function resetStreamForTests() {
   for (const flight of flights.values()) flight.control.abort();
   flights.clear();
   settledRuns.clear();
+}
+
+export function setFlightForTests(botId: string, chatId: string, live: Live | null) {
+  const key = flightKey(botId, chatId);
+  if (!live) {
+    flights.delete(key);
+    return;
+  }
+  flights.set(key, {
+    botId,
+    chatId,
+    runId: live.run?.id || "",
+    control: new AbortController(),
+    live,
+    sending: false,
+    replaced: false,
+    settled: false,
+  });
 }
 
 function releaseRun(chat: Chat): Chat {
@@ -218,8 +237,11 @@ function apply(event: Record<string, unknown>, flight: Flight) {
       run.current_step = label;
       if (label.startsWith("Model not answering")) run.last_activity = label;
     }
-    const prev = live.steps || [];
-    const steps = prev[prev.length - 1] === label ? prev : [...prev, label].slice(-8);
+    const steps = noteActivity(live.steps, {
+      text: label,
+      stepId: String(event.step_id || ""),
+      state: String(event.state || ""),
+    });
     const modelWait = label === "Thinking" || label.startsWith("Waiting on model");
     remember(flight, carry(live, {
       phase: "thinking",
@@ -288,6 +310,7 @@ function apply(event: Record<string, unknown>, flight: Flight) {
       thoughtSeconds: freezeThought(live),
       chars,
       waitAt,
+      steps: settleActivity(live.steps),
     }));
     return;
   }
@@ -300,7 +323,14 @@ function apply(event: Record<string, unknown>, flight: Flight) {
   if (event.type === "error") {
     pokeFace(flight.botId, "sad");
     flight.sending = false;
-    remember(flight, carry(live, { phase: "error", label: "Stopped", text: String(event.detail || "The reply failed."), reasoning: "", reasoningLive: false }));
+    remember(flight, carry(live, {
+      phase: "error",
+      label: "Stopped",
+      text: String(event.detail || "The reply failed."),
+      reasoning: "",
+      reasoningLive: false,
+      steps: settleActivity(live.steps, "failed"),
+    }));
     if (event.chat) finish(flight, event.chat as Chat);
     return;
   }

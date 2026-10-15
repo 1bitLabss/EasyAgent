@@ -5121,7 +5121,13 @@ async def _stream_reply(
                     model_mark = None
                     model_chars = 0
                 saved_run = _write_live(store, bot_id, chat_id, step=text, force=True)
-                yield _sse({"type": "status", "text": text})
+                from easyagent.tools import activity_for_status
+
+                noted = activity_for_status(text)
+                payload = {"type": "status", "text": text}
+                if noted:
+                    payload["step_id"], payload["state"] = noted
+                yield _sse(payload)
                 if saved_run:
                     yield _sse({"type": "run", "run": saved_run})
                 continue

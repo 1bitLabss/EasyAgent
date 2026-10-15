@@ -10,6 +10,7 @@ from __future__ import annotations
 import ast
 import asyncio
 import html
+from contextvars import ContextVar
 import json
 import re
 import shutil
@@ -1105,6 +1106,45 @@ def status_only_narration(text: str) -> bool:
     if not key or len(key) > 80:
         return False
     return bool(_STATUS_ONLY.match(key))
+
+
+@dataclass
+class _ActivityNote:
+    step_id: str
+    label: str
+    state: str
+
+
+_activity_note: ContextVar[_ActivityNote | None] = ContextVar("easyagent_activity_note", default=None)
+_activity_seq = 0
+
+
+def open_tool_step(label: str) -> str:
+    """One id for this tool call. A later done or failed event uses the same id."""
+    global _activity_seq
+    _activity_seq += 1
+    step_id = f"step-{_activity_seq}"
+    _activity_note.set(_ActivityNote(step_id, label, "running"))
+    return step_id
+
+
+def close_tool_step(state: str) -> None:
+    note = _activity_note.get()
+    if note is None:
+        return
+    note.state = "failed" if state == "failed" else "done"
+
+
+def activity_for_status(text: str) -> tuple[str, str] | None:
+    """The step id for this status line, when the line is the open tool step."""
+    note = _activity_note.get()
+    if note is None or (text or "") != note.label:
+        return None
+    return note.step_id, note.state
+
+
+def clear_activity() -> None:
+    _activity_note.set(None)
 
 
 def status_label(request: ToolRequest) -> str:
@@ -6900,8 +6940,12 @@ async def run_turn(
                         if resume:
                             continue
                         return
-                yield "status", status_label(work[0])
+                batch_label = status_label(work[0])
+                open_tool_step(batch_label)
+                yield "status", batch_label
                 results = await _run_together(store, work, bot_id)
+                close_tool_step("failed" if results and all(error is not None for _item, _result, error in results) else "done")
+                yield "status", batch_label
                 details: list[str] = []
                 added: list[str] = []
                 progress = False
@@ -7565,10 +7609,14 @@ async def run_turn(
             if resume:
                 continue
             return
-        yield "status", status_label(request)
+        step_label = status_label(request)
+        open_tool_step(step_label)
+        yield "status", step_label
         try:
             result = await execute(store, request, bot_id)
         except ToolError as exc:
+            close_tool_step("failed")
+            yield "status", step_label
             held_note = honesty.consume_hold()
             if held_note:
                 _failed(request, str(exc))
@@ -7737,6 +7785,8 @@ async def run_turn(
             )
             yield "status", "Thinking"
             continue
+        close_tool_step("done")
+        yield "status", step_label
         raws.append(result)
         steps.append({
             "kind": request.kind,

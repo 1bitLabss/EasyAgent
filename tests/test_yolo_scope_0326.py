@@ -587,74 +587,63 @@ def test_windows_key_strips_the_extended_prefix_with_ntpath():
     assert ntpath.normcase(r"C:\Users\Ada") == ntpath.normcase(r"c:\users\ada")
 
 
-def _install_windows_paths(monkeypatch):
-    """os.path is ntpath and os.sep is a backslash, without leaving Linux.
+class TestWindowsPathStrings:
+    """Windows spellings checked as strings. Nothing here patches os or pathlib.
 
-    The store opens its own files with a ``\\\\?\\`` prefix when ``os.name`` is
-    ``nt``. That prefix is right on Windows and names nothing on this disk, so
-    the store keeps the plain path for this test. Grant checks still use ntpath.
+    A real Windows run of the same grant and spelling checks, with real folders,
+    is test_a_granted_folder_matches_every_spelling_of_a_path_inside_it.
     """
-    import ntpath
-    import pathlib
 
-    import easyagent.store as store_mod
+    def test_extended_prefix_key_is_inside_the_granted_folder(self):
+        from easyagent.strictshell import _key_under, windows_key
 
-    monkeypatch.setattr(os, "name", "nt")
-    monkeypatch.setattr(os, "sep", ntpath.sep)
-    monkeypatch.setattr(os, "altsep", ntpath.altsep)
-    monkeypatch.setattr(os, "path", ntpath)
-    monkeypatch.setattr(store_mod, "_io_path", lambda path: pathlib.PosixPath(os.fspath(path)))
+        grant = windows_key(r"C:\Users\Ada\Grant")
+        assert windows_key(r"\\?\C:\Users\Ada\Grant") == grant
+        assert _key_under(windows_key(r"\\?\C:\Users\Ada\Grant\notes.txt"), grant)
+        assert _key_under(windows_key(r"C:\Users\Ada\Grant\notes.txt"), grant)
+        assert _key_under(windows_key(r"//?/c:/users/ada/grant/Sub/notes.txt"), grant)
+        assert not _key_under(windows_key(r"\\?\C:\Users\Ada\Other\notes.txt"), grant)
+        assert not _key_under(windows_key(r"\\?\C:\Users\Ada\Grant2\notes.txt"), grant)
+        assert not _key_under(windows_key(r"\\?\D:\Users\Ada\Grant\notes.txt"), grant)
+        assert not _key_under(windows_key(r"\\?\C:\Users\Ada\Grant\..\Other\notes.txt"), grant)
 
-    def _new(cls, *args, **kwargs):
-        if cls is pathlib.Path or cls is pathlib.WindowsPath:
-            cls = pathlib.PosixPath
-        return object.__new__(cls)
+    def test_extended_unc_folds_to_the_unc_key(self):
+        from easyagent.strictshell import _key_under, windows_key
 
-    monkeypatch.setattr(pathlib.Path, "__new__", _new)
-    monkeypatch.setattr(pathlib.WindowsPath, "__new__", _new)
+        unc = windows_key(r"\\server\share\notes.txt")
+        assert windows_key(r"\\?\UNC\server\share\notes.txt") == unc
+        assert windows_key(r"//?/UNC/server/share/notes.txt") == unc
+        assert not _key_under(unc, windows_key(r"C:\Users\Ada\Grant"))
 
-
-class TestWindowsPathSemantics:
-    """Grant checks with ntpath, on this Linux runner, before a Windows CI run."""
-
-    def test_extended_prefix_is_inside_the_granted_folder(self, tmp_path, monkeypatch):
-        from easyagent.store import atomic_write_json
-        from easyagent.strictshell import _canonical_key, _key_under, windows_key
+    def test_an_extended_wildcard_is_not_proved(self, tmp_path):
         from easyagent.yolo import _operand_paths
+
+        assert _operand_paths(r"rm \\?\C:\Users\Ada\Grant\*.txt", tmp_path) is None
+        assert _operand_paths(r"rm \\?\C:\Users\Ada\Grant\file?.txt", tmp_path) is None
+
+    def test_an_extended_unc_path_still_waits(self, tmp_path):
+        from easyagent.yolo import _command_unreadable
+
+        assert _command_unreadable(r"rm \\?\UNC\server\share\notes.txt") is True
+        assert _command_unreadable(r"rm \\server\share\notes.txt") is True
+
+    def test_extended_spellings_outside_a_grant_are_not_covered(self, tmp_path):
+        from easyagent.store import atomic_write_json
 
         store, bot, _chat, _folder = _world(tmp_path)
         saved = store.get_bot(bot["id"])
         saved["safety_exec_always"] = [{
             "id": "grant-1",
             "tool": "rm",
-            "root": r"C:\Users\Ada\Grant",
+            "root": str(tmp_path / "Grant"),
             "label": "rm in grant",
         }]
         atomic_write_json(store._bot_dir(bot["id"]) / "bot.json", saved)
-        _install_windows_paths(monkeypatch)
-
-        grant = windows_key(r"C:\Users\Ada\Grant")
-        command = r"rm \\?\C:\Users\Ada\Grant\notes.txt"
-        paths = _operand_paths(command, Path(r"C:\Users\Ada\Grant"))
-        assert paths, command
-        assert _canonical_key(paths[0]) == windows_key(r"C:\Users\Ada\Grant\notes.txt")
-        assert _key_under(_canonical_key(paths[0]), _canonical_key(r"C:\Users\Ada\Grant"))
-        assert _canonical_key(r"\\?\C:\Users\Ada\Grant") == grant
-
-        request = ToolRequest(kind="shell", command=command)
-        verdict = classify(store, request, bot["id"])
-        assert verdict.tier == "ask", (verdict.tier, verdict.rule)
-        assert covers(store, bot["id"], request, verdict) is True, command
-
-        plain = ToolRequest(kind="shell", command=r"rm C:\Users\Ada\Grant\notes.txt")
-        plain_verdict = classify(store, plain, bot["id"])
-        assert covers(store, bot["id"], plain, plain_verdict) is True
-
-        outside = ToolRequest(kind="shell", command=r"rm \\?\C:\Users\Ada\Other\notes.txt")
-        outside_verdict = classify(store, outside, bot["id"])
-        assert covers(store, bot["id"], outside, outside_verdict) is False
-
-        wildcard = ToolRequest(kind="shell", command=r"rm \\?\C:\Users\Ada\Grant\*.txt")
-        wild_verdict = classify(store, wildcard, bot["id"])
-        assert covers(store, bot["id"], wildcard, wild_verdict) is False
-        assert _operand_paths(r"rm \\?\C:\Users\Ada\Grant\file?.txt", Path(r"C:\work")) is None
+        for command in (
+            r"rm \\?\C:\Users\Ada\Other\notes.txt",
+            r"rm \\?\C:\Users\Ada\Grant\*.txt",
+            r"rm \\?\UNC\server\share\notes.txt",
+        ):
+            request = ToolRequest(kind="shell", command=command)
+            verdict = classify(store, request, bot["id"])
+            assert covers(store, bot["id"], request, verdict) is False, command

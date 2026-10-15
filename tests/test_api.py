@@ -1684,6 +1684,7 @@ def test_a_second_send_does_not_cancel_the_model_request(tmp_path, monkeypatch):
             bot = (
                 await client.post("/api/bots", json={"name": "Ada", "endpoint_id": endpoint["id"]})
             ).json()
+            await client.patch(f"/api/bots/{bot['id']}", json={"busy_input": "queue"})
             chat = (await client.post(f"/api/bots/{bot['id']}/chats")).json()
             url = f"/api/bots/{bot['id']}/chats/{chat['id']}/messages"
             headers = {"Accept": "text/event-stream"}

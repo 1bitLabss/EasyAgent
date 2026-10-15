@@ -129,22 +129,24 @@ def test_mid_run_question_does_not_restart(tmp_path):
 
 
 def test_queue_cap_refuses_the_eleventh_message(tmp_path):
+    from easyagent.plan import QUEUE_CAP
+
     app, client, bot, chat = _client(tmp_path)
     store = app.state.store
     _checklist(store, bot["id"], chat["id"])
     _running(store, bot["id"], chat["id"])
     url = f"/api/bots/{bot['id']}/chats/{chat['id']}/messages"
-    for number in range(10):
+    for number in range(QUEUE_CAP):
         response = client.post(url, json={"content": f"note {number}"})
         assert response.status_code == 200
         assert response.json()["reply"].startswith("Still on this job.")
-    eleventh = client.post(url, json={"content": "eleven"})
-    assert eleventh.status_code == 200
-    assert "queue is full" in eleventh.json()["reply"]
-    assert "not restarted" in eleventh.json()["reply"]
+    extra = client.post(url, json={"content": "past the cap"})
+    assert extra.status_code == 200
+    assert "queue is full" in extra.json()["reply"]
+    assert "not restarted" in extra.json()["reply"]
     stored = store.get_chat(bot["id"], chat["id"])
     assert stored["run"]["id"] == "run-keep"
-    refused = [item for item in stored["messages"] if item.get("content") == "eleven"]
+    refused = [item for item in stored["messages"] if item.get("content") == "past the cap"]
     assert refused and refused[0].get("chip") == "refused"
     assert "queue is full" in refused[0].get("refuse_reason", "")
     assert load_plan(store, bot["id"], chat["id"])["steps"][1]["state"] == "doing"

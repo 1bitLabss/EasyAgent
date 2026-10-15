@@ -54,6 +54,7 @@ export function sameMessage(left: ChatMessage, right: ChatMessage): boolean {
     left.chip === right.chip &&
     left.seen_step === right.seen_step &&
     left.refuse_reason === right.refuse_reason &&
+    (left.client_id || "") === (right.client_id || "") &&
     sameList(left.choices, right.choices) &&
     sameList(left.skills_saved, right.skills_saved) &&
     (left.attachment?.id || "") === (right.attachment?.id || "") &&
@@ -80,10 +81,37 @@ function sameRun(left: Chat["run"], right: Chat["run"]) {
   return left.id === right.id && left.status === right.status && left.started_at === right.started_at && left.last_activity_at === right.last_activity_at && left.current_step === right.current_step && left.reason === right.reason && left.activity_started_at === right.activity_started_at;
 }
 
+function looseKey(message: ChatMessage): string {
+  if (message.client_id) return `c:${message.client_id}`;
+  if (message.id) return `i:${message.id}`;
+  if (message.role === "user") return `u:${message.content}`;
+  return "";
+}
+
+/** One row per client id, server id, or unsaved user text. A failed send must not multiply. */
+export function dedupeMessages(messages: ChatMessage[]): ChatMessage[] {
+  const seen = new Set<string>();
+  const out: ChatMessage[] = [];
+  let dropped = false;
+  for (const message of messages) {
+    const key = looseKey(message);
+    if (key) {
+      if (seen.has(key)) {
+        dropped = true;
+        continue;
+      }
+      seen.add(key);
+    }
+    out.push(message);
+  }
+  return dropped ? out : messages;
+}
+
 /** Keep a just-sent row when a poll or refresh snapshot has not caught up. */
 export function retainLocalTail(prev: ChatMessage[] | undefined, incoming: ChatMessage[]): ChatMessage[] {
-  if (!prev?.length) return incoming;
+  if (!prev?.length) return dedupeMessages(incoming);
   const incomingIds = new Set(incoming.filter((message) => message.id).map((message) => message.id as string));
+  const incomingClients = new Set(incoming.filter((message) => message.client_id).map((message) => message.client_id as string));
   let split = prev.length;
   for (let index = prev.length - 1; index >= 0; index -= 1) {
     const id = prev[index]?.id;
@@ -95,18 +123,19 @@ export function retainLocalTail(prev: ChatMessage[] | undefined, incoming: ChatM
   }
   const tail = prev.slice(split).filter((message) => {
     if (!message) return false;
+    if (message.client_id && incomingClients.has(message.client_id)) return false;
     if (message.id && incomingIds.has(message.id)) return false;
     if (!message.id && message.role === "user") {
       const echoed = incoming.some(
-        (item) => item.role === "user" && item.content === message.content && item.id && !prev.some((old) => old.id === item.id),
+        (item) => item.role === "user" && item.content === message.content && Boolean(item.id || item.client_id),
       );
       return !echoed;
     }
     if (message.id) return true;
     return false;
   });
-  if (!tail.length) return incoming;
-  return [...incoming, ...tail];
+  if (!tail.length) return dedupeMessages(incoming);
+  return dedupeMessages([...incoming, ...tail]);
 }
 
 /** Keep the previous chat object when a poll repeats the transcript. */

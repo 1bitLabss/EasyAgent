@@ -88,6 +88,18 @@ describe("retainLocalTail", () => {
     expect(shared.messages.map((item) => item.content)).toEqual(["Hello", "what are you doing?"]);
   });
 
+  it("does not duplicate a failed send when the same snapshot is merged again", () => {
+    const local = { role: "user", content: "do not lose this", chip: "queued", client_id: "c-1" };
+    const prev = [message("a", "Hello"), local];
+    let merged = retainLocalTail(prev, [message("a", "Hello")]);
+    for (let n = 0; n < 20; n += 1) {
+      merged = retainLocalTail(merged, [message("a", "Hello")]);
+    }
+    expect(merged.filter((item) => item.content === "do not lose this")).toHaveLength(1);
+    const echoed = retainLocalTail(merged, [message("a", "Hello"), { id: "s", role: "user", content: "do not lose this", client_id: "c-1", chip: "queued" }]);
+    expect(echoed.filter((item) => item.client_id === "c-1" || item.content === "do not lose this")).toHaveLength(1);
+  });
+
   it("replaces a row when its chip changes", () => {
     const first = [{ id: "u", role: "user", content: "hi", chip: "queued" }];
     const seen = [{ id: "u", role: "user", content: "hi", chip: "seen", seen_step: 2 }];

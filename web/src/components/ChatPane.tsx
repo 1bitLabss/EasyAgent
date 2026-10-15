@@ -15,7 +15,7 @@ import { hideWhileSending, messageHasBubble, reactionWho } from "@/lib/transcrip
 import { cn } from "@/lib/utils";
 import { keepLoadedHistory, mergeChat, sameMessage, shareChat, type MessagePage } from "@/lib/window";
 import { useApp } from "@/store";
-import { canResume, chatStillPolling, flightFor, retryMessage, sendMessage, sendNow, settleIncoming, stopAndSendStored, stopMessage } from "@/stream";
+import { RETRY_REASON, canResume, chatStillPolling, flightFor, retryMessage, retryUnsent, sendMessage, sendNow, settleIncoming, stopAndSendStored, stopMessage } from "@/stream";
 import type { Bot, Chat, ChatMessage } from "@/types";
 
 const REACTIONS = ["👍", "👎", "❤️", "👀"];
@@ -139,7 +139,12 @@ const MessageRow = memo(function MessageRow({
           {mine ? (message.content || "") : <Markdown text={message.content || ""} />}
         </div>
         {chip ? <p className="mt-2 text-xs" data-testid={`chip-${message.chip}`}>{chip}</p> : null}
-        {(message.chip === "refused" || message.chip === "unsent") && message.id && botId && chatId ? (
+        {message.chip === "unsent" && message.refuse_reason === RETRY_REASON && message.client_id && botId && chatId ? (
+          <div className="mt-2">
+            <button type="button" className="rounded-full bg-white px-3 py-1 text-sm text-foreground" data-testid="retry-unsent" onClick={() => void retryUnsent(botId, chatId, message.client_id || "")}>Retry</button>
+          </div>
+        ) : null}
+        {(message.chip === "refused" || message.chip === "unsent") && message.refuse_reason !== RETRY_REASON && message.id && botId && chatId ? (
           <div className="mt-2 flex flex-wrap gap-2">
             <button type="button" className="rounded-full bg-white px-3 py-1 text-sm text-foreground" data-testid="send-now" onClick={() => void sendNow(botId, chatId, message.id || "")}>Send now</button>
             {message.chip === "refused" ? (
@@ -481,7 +486,8 @@ export function ChatPane() {
 
   const open = chat.data;
   const resume = open ? canResume(open, flight) : { retry: false, cont: false };
-  const running = Boolean(open && ((flight?.sending && live && live.phase !== "error" && live.phase !== "stopped") || open.run?.status === "running"));
+  const serverSettled = open?.run?.status === "idle" || open?.run?.status === "stopped" || open?.run?.status === "error";
+  const running = Boolean(open && (open.run?.status === "running" || (flight?.sending && live && !serverSettled && live.phase !== "error" && live.phase !== "stopped")));
   const step = live?.label || open?.run?.current_step || "Thinking";
   const view = open ? describeRun(step, open.run?.status || (flight?.sending ? "running" : "idle"), live?.run?.started_at || open.run?.started_at, live?.run?.last_activity_at || open.run?.last_activity_at, live?.heardAt, now) : null;
   const tone = view ? runTone(view.words, running ? "running" : open?.run?.status || "idle") : "thinking";

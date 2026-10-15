@@ -940,13 +940,16 @@ class Store:
             else:
                 bot.pop("situation_title", None)
         if busy_input_set:
-            choice = (busy_input or "steer").strip().lower()
-            if choice not in {"steer", "follow"}:
-                raise StoreError("Choose steer or follow for a message that arrives while a job is running.", 400)
-            if choice == "follow":
-                bot["busy_input"] = "follow"
-            else:
+            choice = (busy_input or "interrupt").strip().lower()
+            if choice not in {"interrupt", "queue", "steer", "follow"}:
+                raise StoreError(
+                    "Choose interrupt, queue, steer, or follow for a message that arrives while a job is running.",
+                    400,
+                )
+            if choice == "interrupt":
                 bot.pop("busy_input", None)
+            else:
+                bot["busy_input"] = choice
         if auto_resume_set:
             if auto_resume:
                 bot["auto_resume"] = True

@@ -23,7 +23,7 @@ export type Bot = {
   safety_mode?: string;
   safety_unlocks?: string[];
   safety_exec_always?: { id: string; tool: string; root: string; label: string }[];
-  busy_input?: "steer" | "follow" | string;
+  busy_input?: "interrupt" | "queue" | "steer" | "follow" | string;
   auto_resume?: boolean;
 };
 
@@ -93,9 +93,10 @@ export type ChatMessage = {
   kind?: string;
   git_repo?: string;
   created_at?: string;
-  chip?: "queued" | "seen" | "answered" | "refused" | string;
+  chip?: "queued" | "seen" | "answered" | "refused" | "unsent" | string;
   seen_step?: number;
   refuse_reason?: string;
+  client_id?: string;
   queued?: boolean;
   about?: string;
 };

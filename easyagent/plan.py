@@ -15,7 +15,7 @@ from pathlib import Path
 
 from easyagent.store import Store, atomic_write_json, new_id, now_iso, read_json
 
-QUEUE_CAP = 10
+QUEUE_CAP = 32
 FOLLOW_CAP = 3
 STUCK_SECONDS = 90
 MAX_STEPS = 12
@@ -441,7 +441,15 @@ def _splice_before_live(messages: list, rows: list) -> None:
     messages.extend(rows)
 
 
-def _user_row(message_id: str, content: str, attachment: dict | None, at: str, chip: str, reason: str) -> dict:
+def _user_row(
+    message_id: str,
+    content: str,
+    attachment: dict | None,
+    at: str,
+    chip: str,
+    reason: str,
+    client_id: str = "",
+) -> dict:
     row = {
         "id": message_id,
         "role": "user",
@@ -450,6 +458,8 @@ def _user_row(message_id: str, content: str, attachment: dict | None, at: str, c
         "chip": chip,
         "steer": True,
     }
+    if client_id:
+        row["client_id"] = client_id
     if chip == "queued":
         row["queued"] = True
     if chip == "refused" and reason:
@@ -483,6 +493,38 @@ def _pickup_row(about: str) -> dict:
 
 REFUSE_REASON = "The queue is full, so that message was not added. The job was not restarted."
 UNSENT_REASON = "Not sent (job stopped)"
+MODES = ("interrupt", "queue", "steer", "follow")
+
+
+def busy_mode(bot: dict | None) -> str:
+    """How a message is handled while a job is running. Missing means interrupt."""
+    raw = ""
+    if isinstance(bot, dict):
+        raw = str(bot.get("busy_input") or "")
+    choice = raw.strip().lower()
+    if choice in MODES:
+        return choice
+    return "interrupt"
+
+
+def waits_for_turn(bot: dict | None) -> bool:
+    """Queue and follow wait until this turn ends. Steer and interrupt fold in."""
+    return busy_mode(bot) in {"queue", "follow"}
+
+
+def reply_is_real(message: dict) -> bool:
+    """A model answer. Stopped, errors, and harness notes do not answer a queued line."""
+    if not isinstance(message, dict) or message.get("role") != "assistant":
+        return False
+    if message.get("error"):
+        return False
+    kind = str(message.get("kind") or "")
+    if kind in {"status", "pickup", "activity", "resume-offer", "resume-note", "resume-dismissed", "connection", "yolo"}:
+        return False
+    text = " ".join(str(message.get("content") or "").split())
+    if not text or text == "Stopped." or text.startswith("Stopped:"):
+        return False
+    return True
 
 
 def park_queued(chat: dict) -> int:
@@ -519,17 +561,57 @@ def _mark_unsent(store: Store, bot_id: str, chat_id: str) -> int:
     return changed
 
 
-def enqueue(store: Store, bot_id: str, chat_id: str, content: str, attachment: dict | None = None) -> dict:
+def enqueue(
+    store: Store,
+    bot_id: str,
+    chat_id: str,
+    content: str,
+    attachment: dict | None = None,
+    client_id: str = "",
+) -> dict:
     """Store one message in the transcript at once, and queue it when there is room."""
     lock = getattr(store, "_lock", None)
     if lock is not None:
         with lock:
-            return _enqueue(store, bot_id, chat_id, content, attachment)
-    return _enqueue(store, bot_id, chat_id, content, attachment)
+            return _enqueue(store, bot_id, chat_id, content, attachment, client_id)
+    return _enqueue(store, bot_id, chat_id, content, attachment, client_id)
 
 
-def _enqueue(store: Store, bot_id: str, chat_id: str, content: str, attachment: dict | None) -> dict:
+def _enqueue(
+    store: Store,
+    bot_id: str,
+    chat_id: str,
+    content: str,
+    attachment: dict | None,
+    client_id: str = "",
+) -> dict:
     chat = store.get_chat(bot_id, chat_id)
+    messages = list(chat.get("messages") or [])
+    if client_id:
+        existing = next(
+            (
+                row for row in messages
+                if isinstance(row, dict) and row.get("role") == "user" and row.get("client_id") == client_id
+            ),
+            None,
+        )
+        if existing is not None:
+            payload = _read_queue(store, bot_id, chat_id)
+            return {
+                "text": str(existing.get("refuse_reason") or "") or last_status(store, bot_id, chat_id),
+                "message": {
+                    "id": existing.get("id"),
+                    "content": existing.get("content") or "",
+                    "at": existing.get("created_at"),
+                    "chip": existing.get("chip") or "",
+                    "refuse_reason": existing.get("refuse_reason") or "",
+                    "client_id": client_id,
+                },
+                "note": None,
+                "full": existing.get("chip") == "refused",
+                "queued": len(payload["items"]),
+                "duplicate": True,
+            }
     plan = load_plan(store, bot_id, chat_id)
     payload = _read_queue(store, bot_id, chat_id)
     items = payload["items"]
@@ -547,13 +629,13 @@ def _enqueue(store: Store, bot_id: str, chat_id: str, content: str, attachment: 
         "status": text,
         "chip": "refused" if full else "queued",
         "refuse_reason": reason,
+        "client_id": client_id,
     }
     note = _status_row(message_id, text)
     if not full:
         items.append(message)
-    messages = list(chat.get("messages") or [])
     _splice_before_live(messages, [
-        _user_row(message_id, content, attachment, at, message["chip"], reason),
+        _user_row(message_id, content, attachment, at, message["chip"], reason, client_id),
         note,
     ])
     chat["messages"] = messages
@@ -577,7 +659,7 @@ def steer_into(store: Store, bot_id: str, chat_id: str, working: list | None) ->
         bot = store.get_bot(bot_id)
     except Exception:
         return 0
-    if (bot.get("busy_input") or "steer") == "follow":
+    if waits_for_turn(bot):
         return 0
     lock = getattr(store, "_lock", None)
     if lock is not None:
@@ -642,13 +724,64 @@ def _steer(store: Store, bot_id: str, chat_id: str, working: list | None) -> int
 
 
 def mark_answered(chat: dict) -> bool:
-    """A finished reply answers every message this run already picked up."""
+    """A real assistant reply answers a picked-up line. Stopped and errors do not."""
+    messages = [item for item in chat.get("messages") or [] if isinstance(item, dict)]
     changed = False
-    for message in chat.get("messages") or []:
-        if isinstance(message, dict) and message.get("chip") == "seen":
+    for index, message in enumerate(messages):
+        if message.get("role") != "user" or message.get("chip") != "seen":
+            continue
+        if any(reply_is_real(later) for later in messages[index + 1:]):
             message["chip"] = "answered"
             changed = True
     return changed
+
+
+def requeue_unanswered(store: Store, bot_id: str, chat_id: str) -> int:
+    """Put an acknowledged line back on the queue when no real reply followed it."""
+    lock = getattr(store, "_lock", None)
+    if lock is not None:
+        with lock:
+            return _requeue_unanswered(store, bot_id, chat_id)
+    return _requeue_unanswered(store, bot_id, chat_id)
+
+
+def _requeue_unanswered(store: Store, bot_id: str, chat_id: str) -> int:
+    chat = store.get_chat(bot_id, chat_id)
+    messages = [item for item in chat.get("messages") or [] if isinstance(item, dict)]
+    payload = _read_queue(store, bot_id, chat_id)
+    items = payload["items"]
+    known = {item.get("id") for item in items}
+    added = 0
+    for index, message in enumerate(messages):
+        if message.get("role") != "user":
+            continue
+        if message.get("chip") not in {"queued", "seen"}:
+            continue
+        if any(reply_is_real(later) for later in messages[index + 1:]):
+            continue
+        message_id = message.get("id")
+        if not message_id or message_id in known:
+            continue
+        items.append({
+            "id": message_id,
+            "content": message.get("content") or "",
+            "attachment": message.get("attachment"),
+            "at": message.get("created_at") or now_iso(),
+        })
+        known.add(message_id)
+        if message.get("chip") == "seen":
+            message["chip"] = "queued"
+            message["queued"] = True
+            message.pop("seen_step", None)
+        added += 1
+    if not added:
+        return 0
+    payload["items"] = items
+    _write_queue(store, bot_id, chat_id, payload)
+    chat["messages"] = messages
+    chat["updated_at"] = now_iso()
+    store.save_chat(chat)
+    return added
 
 
 def force_enqueue(store: Store, bot_id: str, chat_id: str, message_id: str) -> dict:

@@ -2,6 +2,9 @@
 
 ## 0.3.24
 
+- A message that arrives as a job finishes is kept and answered. The same is true after an error, after Stop, and after EasyAgent restarts. A full queue refuses the extra line in the transcript, where Send now can still send it. The queue holds 32 messages.
+- While a job is running, a new message interrupts the model request and is picked up in that job. A command that is already running is left alone until it finishes. `/queue` waits until the job finishes. `/steer` folds the message in after the current step. Stop leaves queued lines in the next turn.
+- If the send does not reach the job, that line shows Not sent with Retry, once. A repeated send with the same id does not add a second copy.
 - While /yolo is on for this chat, every ask-tier action inside this bot's folders, or a folder it already has a grant for, skips the approval card. The sandbox still wraps the command. Each path is resolved again, including a symlink, a junction, .., an environment variable, a UNC path, and a wildcard.
 - A drive wipe, a download-and-run, a disguised command, a git hook, and a .npmrc injection are refused in plain text, with no card. The key store, another bot's files, a message, a bridge send, and a path outside those folders still wait or are blocked.
 - /yolo stays on this chat. It ends after 2 hours, or after 30 minutes with nothing running, and a restart turns it off. Only a person can turn it on. The chat shows a YOLO ON banner with one control to turn it off. Each action it approves is written to the safety audit.

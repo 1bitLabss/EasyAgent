@@ -500,7 +500,7 @@ export function SettingsScreen() {
       model: String(form.get("model") || "") || null,
       context_tokens: context,
       check_enabled: form.get("check_enabled") === "on",
-      busy_input: String(form.get("busy_input") || "steer"),
+      busy_input: String(form.get("busy_input") || "interrupt"),
       auto_resume: form.get("auto_resume") === "on",
     };
     if (face) body.face_color = face;
@@ -654,8 +654,10 @@ export function SettingsScreen() {
             Check replies before sending
           </label>
           <label className="block text-sm">When a message arrives during a job
-            <select name="busy_input" className="mt-1 h-9 w-full rounded-md border border-border bg-card px-2" defaultValue={bot.busy_input || "steer"}>
+            <select name="busy_input" className="mt-1 h-9 w-full rounded-md border border-border bg-card px-2" defaultValue={bot.busy_input || "interrupt"}>
+              <option value="interrupt">Interrupt the model request</option>
               <option value="steer">Steer this job</option>
+              <option value="queue">Wait, then send</option>
               <option value="follow">Wait, then follow up</option>
             </select>
           </label>

@@ -6512,7 +6512,8 @@ async def run_turn(
         return sum(1 for item in narration_hits if _near_line(item, spoken))
 
     while True:
-        turn_mod.raise_if_cancelled()
+        if not turn_mod.take_redirect():
+            turn_mod.raise_if_cancelled()
         if store is not None and bot_id and chat_id:
             from easyagent.plan import steer_into
 
@@ -6605,6 +6606,8 @@ async def run_turn(
                 if ready:
                     yield "delta", ready
         except turn_mod.TurnCancelled:
+            if turn_mod.take_redirect():
+                continue
             for event in _partial_stream(text_bits):
                 yield event
             raise
@@ -6623,6 +6626,8 @@ async def run_turn(
                     for event in close(""):
                         yield event
                     return
+                if turn_mod.take_redirect():
+                    continue
                 if turn_mod.cancelled() or "incomplete chunked read" in str(exc).lower():
                     for event in _partial_stream(text_bits):
                         yield event

@@ -15,6 +15,7 @@ export default defineConfig({
       testMatch: /ios.spec.ts/,
       use: { ...devices["iPhone 14"], baseURL: "http://127.0.0.1:44744" },
     },
+    { name: "swallow", testMatch: /swallow.spec.ts/, use: { ...chrome, baseURL: "http://127.0.0.1:44745" } },
   ],
   webServer: [
     {
@@ -38,6 +39,12 @@ export default defineConfig({
     {
       command: "/usr/bin/python3 e2e/serve.py /tmp/easyagent-e2e-ios 44744",
       url: "http://127.0.0.1:44744/api/health",
+      reuseExistingServer: false,
+      timeout: 30_000,
+    },
+    {
+      command: "/usr/bin/python3 e2e/serve.py /tmp/easyagent-e2e-swallow 44745",
+      url: "http://127.0.0.1:44745/api/health",
       reuseExistingServer: false,
       timeout: 30_000,
     },

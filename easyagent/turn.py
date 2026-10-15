@@ -39,17 +39,30 @@ class Slot:
         self.job_started = ""
         self.follow_chain = 0
         self.resend_id = ""
+        self.redirect = False
+        self.drain_chains = 0
 
 
 _GUARD = threading.Lock()
 _SLOTS: dict[str, Slot] = {}
 _WORKERS: set[asyncio.Task] = set()
+_BOUNDARIES: dict[str, asyncio.Lock] = {}
 _cancel: ContextVar[asyncio.Event | None] = ContextVar("easyagent_turn_cancel", default=None)
 _slot: ContextVar[Slot | None] = ContextVar("easyagent_turn_slot", default=None)
 
 
 def _key(store, chat_id: str) -> str:
     return f"{getattr(store, 'root', '')}:{chat_id}"
+
+
+def boundary(store, chat_id: str) -> asyncio.Lock:
+    """Serializes the busy claim and the idle handoff. The model call does not hold it."""
+    key = _key(store, chat_id)
+    lock = _BOUNDARIES.get(key)
+    if lock is None:
+        lock = asyncio.Lock()
+        _BOUNDARIES[key] = lock
+    return lock
 
 
 def slot_for(store, chat_id: str) -> Slot:
@@ -150,11 +163,15 @@ def tool_env() -> dict[str, str]:
     return os.environ.copy()
 
 
-def bind(store, chat_id: str, bot_id: str = "") -> Slot:
-    """Start a turn on this chat. The previous turn's cancel flag stays set on that task."""
+def bind(store, chat_id: str, bot_id: str = "", *, resume: bool = False) -> Slot:
+    """Start a turn on this chat. The previous turn's cancel flag stays set on that task.
+
+    A resume drops a leftover Stop. That flag belongs to the turn that already ended.
+    """
     slot = slot_for(store, chat_id)
-    stopped = slot.user_stop
+    stopped = False if resume else slot.user_stop
     slot.user_stop = False
+    slot.redirect = False
     slot.cancel = asyncio.Event()
     slot.client = None
     slot.proc = None
@@ -195,33 +212,86 @@ def current_worker(store, chat_id: str) -> asyncio.Task | None:
     return slot_for(store, chat_id).worker
 
 
+def _forget_finished(slot: Slot) -> asyncio.Task | None:
+    """A finished owner is not still working. Busy with no task yet is the claim window."""
+    worker = slot.worker
+    if worker is not None and worker.done():
+        slot.worker = None
+        slot.busy = False
+        return None
+    return worker
+
+
 def is_busy(store, chat_id: str) -> bool:
     """True while this chat's turn is still the one that was started."""
     slot = slot_for(store, chat_id)
     with _GUARD:
-        worker = slot.worker
-        live = worker is not None and not worker.done()
-        return bool(slot.busy or live)
+        worker = _forget_finished(slot)
+        return bool(slot.busy or worker is not None)
 
 
 def try_begin(store, chat_id: str) -> bool:
     """Claim this chat for a new turn. A turn that is already running stays as it is."""
     slot = slot_for(store, chat_id)
     with _GUARD:
-        worker = slot.worker
-        live = worker is not None and not worker.done()
-        if slot.busy or live:
+        worker = _forget_finished(slot)
+        if slot.busy or worker is not None:
             return False
         slot.busy = True
         return True
 
 
 def clear_busy(store, chat_id: str) -> None:
+    """Drop busy when this task owns the turn, or when the owner has already finished."""
     slot = slot_for(store, chat_id)
     with _GUARD:
+        try:
+            current = asyncio.current_task()
+        except RuntimeError:
+            current = None
+        owner = slot.worker
+        if owner is not None and not owner.done() and current is not None and owner is not current:
+            return
         slot.busy = False
-        if slot.worker is not None and slot.worker.done():
+        if owner is None or owner.done() or owner is current:
             slot.worker = None
+
+
+def redirect_model(store, chat_id: str) -> str:
+    """Abort only the in-flight model request. A running command is left alone.
+
+    Returns ``redirect`` when the model call was told to stop, ``hold`` when a
+    command is still running, and ``later`` when nothing is in flight to abort.
+    This is not Stop. ``user_stop`` stays clear.
+    """
+    slot = slot_for(store, chat_id)
+    proc = slot.proc
+    if proc is not None and proc.poll() is None:
+        return "hold"
+    if slot.client is None:
+        return "later"
+    slot.redirect = True
+    slot.user_stop = False
+    slot.reason = "a newer message arrived"
+    slot.cancel.set()
+    client = slot.client
+    try:
+        asyncio.get_running_loop().create_task(_close_client(client))
+    except RuntimeError:
+        return "redirect"
+    return "redirect"
+
+
+def take_redirect() -> bool:
+    """The in-flight model call stopped because a newer message arrived. Keep the turn."""
+    slot = _slot.get()
+    if slot is None or not slot.redirect or slot.user_stop:
+        return False
+    slot.redirect = False
+    slot.reason = ""
+    slot.cancel = asyncio.Event()
+    _cancel.set(slot.cancel)
+    return True
 
 
 def stop_all(reason: str) -> list[asyncio.Task]:

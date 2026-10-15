@@ -83,6 +83,7 @@ def test_steer_marks_seen_and_a_finished_reply_marks_answered(tmp_path):
     assert [item for item in stored["messages"] if item.get("role") == "user" and item.get("content") == "what are you doing?"]
     from easyagent.plan import mark_answered
 
+    stored["messages"].append({"id": "reply-1", "role": "assistant", "content": "Still working on the summary."})
     assert mark_answered(stored) is True
     assert user["chip"] == "answered"
     client.close()
@@ -92,15 +93,17 @@ def test_send_now_queues_a_refused_message(tmp_path):
     app, client, bot, chat = _client(tmp_path)
     store = app.state.store
     _running(store, bot["id"], chat["id"])
+    from easyagent.plan import QUEUE_CAP
+
     url = f"/api/bots/{bot['id']}/chats/{chat['id']}/messages"
-    for number in range(10):
+    for number in range(QUEUE_CAP):
         assert client.post(url, json={"content": f"note {number}"}).status_code == 200
-    refused = client.post(url, json={"content": "eleven"})
+    refused = client.post(url, json={"content": "past the cap"})
     assert "queue is full" in refused.json()["reply"]
     message_id = next(
         item["id"]
         for item in store.get_chat(bot["id"], chat["id"])["messages"]
-        if item.get("content") == "eleven"
+        if item.get("content") == "past the cap"
     )
     sent = client.post(f"/api/bots/{bot['id']}/chats/{chat['id']}/messages/{message_id}/send-now")
     assert sent.status_code == 200
@@ -121,14 +124,13 @@ def test_stop_marks_queued_lines_not_sent_and_send_now_sends_one(tmp_path, monke
     assert stopped.status_code == 200
     users = [item for item in stopped.json()["messages"] if item.get("role") == "user"]
     assert [item["content"] for item in users] == ["first note", "second note"]
-    assert [item["chip"] for item in users] == ["unsent", "unsent"]
-    assert [item.get("refuse_reason") for item in users] == ["Not sent (job stopped)", "Not sent (job stopped)"]
-    assert all(not item.get("queued") for item in users)
+    assert [item["chip"] for item in users] == ["queued", "queued"]
+    assert all(not item.get("refuse_reason") for item in users)
     from easyagent.plan import queued_items
 
-    assert queued_items(store, bot["id"], chat["id"]) == []
+    assert [item["content"] for item in queued_items(store, bot["id"], chat["id"])] == ["first note", "second note"]
     again = client.get(f"/api/bots/{bot['id']}/chats/{chat['id']}").json()
-    assert [item["chip"] for item in again["messages"] if item.get("role") == "user"] == ["unsent", "unsent"]
+    assert [item["chip"] for item in again["messages"] if item.get("role") == "user"] == ["queued", "queued"]
 
     async def complete(**_kwargs):
         return "Sent it."
@@ -140,8 +142,8 @@ def test_stop_marks_queued_lines_not_sent_and_send_now_sends_one(tmp_path, monke
     after = [item for item in body["messages"] if item.get("role") == "user"]
     assert after[0]["chip"] == "answered"
     assert after[0].get("refuse_reason") in {None, ""}
-    assert after[1]["chip"] == "unsent"
-    assert after[1]["refuse_reason"] == "Not sent (job stopped)"
+    assert after[1]["chip"] != "unsent"
+    assert after[1].get("refuse_reason") in {None, ""}
     assert any(item.get("content") == "Sent it." for item in body["messages"])
 
     other = _client(tmp_path)
@@ -162,8 +164,8 @@ def test_stop_marks_queued_lines_not_sent_and_send_now_sends_one(tmp_path, monke
     assert hurried.status_code == 200, hurried.text
     hurried_users = [item for item in hurried.json()["chat"]["messages"] if item.get("role") == "user"]
     by_text = {item["content"]: item for item in hurried_users}
-    assert by_text["keep this"]["chip"] == "unsent"
-    assert by_text["keep this"]["refuse_reason"] == "Not sent (job stopped)"
+    assert by_text["keep this"]["chip"] != "unsent"
+    assert by_text["keep this"].get("refuse_reason") in {None, ""}
     assert by_text["send this"]["chip"] == "answered"
     assert any(item.get("content") == "Sent it." for item in hurried.json()["chat"]["messages"])
     client.close()

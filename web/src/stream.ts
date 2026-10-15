@@ -21,7 +21,7 @@ export type Live = {
   waitAt?: number;
 };
 
-type Flight = {
+export type Flight = {
   botId: string;
   chatId: string;
   runId: string;
@@ -57,14 +57,18 @@ function releaseRun(chat: Chat): Chat {
   };
 }
 
-/** A run we already finished must not keep the transcript polling. */
+/** A run we already finished must not keep the transcript polling. A new run id is a new job. */
 export function runIsFinished(botId: string, chatId: string, status?: string | null, runId?: string | null): boolean {
-  const done = settledRuns.get(flightKey(botId, chatId));
+  const key = flightKey(botId, chatId);
+  const done = settledRuns.get(key);
   if (!done) return false;
+  if (runId && done.runId && runId !== done.runId) {
+    settledRuns.delete(key);
+    return false;
+  }
   if (status !== "running") return true;
-  const same = !runId || !done.runId || runId === done.runId;
-  if (same || Date.now() - done.at < 30_000) return true;
-  settledRuns.delete(flightKey(botId, chatId));
+  if (!runId || !done.runId || runId === done.runId) return true;
+  settledRuns.delete(key);
   return false;
 }
 
@@ -101,14 +105,14 @@ function paint(flight: Flight) {
   );
 }
 
-function eventMatches(event: Record<string, unknown>, flight: Flight) {
+export function eventMatches(event: Record<string, unknown>, flight: Flight) {
   if (event.bot_id && event.bot_id !== flight.botId) return false;
   if (event.chat_id && event.chat_id !== flight.chatId) return false;
   const run = event.run as Run | undefined;
   const runId = String(event.run_id || run?.id || "");
-  if (runId) {
-    if (!flight.runId) flight.runId = runId;
-    else if (runId !== flight.runId) return false;
+  if (runId && runId !== flight.runId) {
+    flight.runId = runId;
+    if (run?.status === "running") flight.settled = false;
   }
   return true;
 }
@@ -142,9 +146,13 @@ function freezeThought(live: Live): number | undefined {
   return Math.max(1, Math.round((Date.now() - live.thoughtAt) / 1000));
 }
 
+export function noteSettled(botId: string, chatId: string, runId: string) {
+  settledRuns.set(flightKey(botId, chatId), { runId, at: Date.now() });
+}
+
 function finish(flight: Flight, chat?: Chat) {
   const runId = flight.runId || flight.live?.run?.id || chat?.run?.id || "";
-  settledRuns.set(flightKey(flight.botId, flight.chatId), { runId, at: Date.now() });
+  noteSettled(flight.botId, flight.chatId, runId);
   flight.settled = true;
   flight.sending = false;
   flight.live = null;
@@ -361,8 +369,13 @@ function placeMessage(flight: Flight, message: ChatMessage, options: { append?: 
     if (!chat) return chat;
     const messages = [...(chat.messages || [])];
     const known = message.id ? messages.findIndex((item) => item.id === message.id) : -1;
+    const byClient = message.client_id
+      ? messages.findIndex((item) => item.client_id === message.client_id)
+      : -1;
     if (known >= 0) {
       messages[known] = { ...messages[known], ...message };
+    } else if (byClient >= 0) {
+      messages[byClient] = { ...messages[byClient], ...message };
     } else if (!options.append) {
       const pending = messages.findIndex((item) => !item.id && item.role === "user" && item.content === message.content);
       if (pending >= 0) messages[pending] = { ...messages[pending], ...message };
@@ -378,23 +391,42 @@ function placeMessage(flight: Flight, message: ChatMessage, options: { append?: 
   });
 }
 
-export function optimisticUser(botId: string, chatId: string, text: string, chip?: ChatMessage["chip"]) {
-  const message: ChatMessage = chip ? { role: "user", content: text, chip } : { role: "user", content: text };
-  queryClient.setQueryData<Chat>(["chat", botId, chatId], (chat) =>
-    chat
-      ? {
-          ...chat,
-          messages: [...(chat.messages || []), message],
-          message_count: (chat.message_count ?? chat.messages.length) + 1,
-        }
-      : chat,
-  );
+export const RETRY_REASON = "Not sent. Retry to send it again.";
+
+export function optimisticUser(botId: string, chatId: string, text: string, chip?: ChatMessage["chip"], clientId?: string) {
+  const client_id = clientId || (typeof crypto !== "undefined" && crypto.randomUUID ? crypto.randomUUID() : `c-${Date.now()}`);
+  const message: ChatMessage = { role: "user", content: text, client_id, ...(chip ? { chip } : {}) };
+  queryClient.setQueryData<Chat>(["chat", botId, chatId], (chat) => {
+    if (!chat) return chat;
+    const messages = [...(chat.messages || [])];
+    const known = messages.findIndex((item) => item.client_id === client_id);
+    if (known >= 0) messages[known] = { ...messages[known], ...message };
+    else messages.push(message);
+    return {
+      ...chat,
+      messages,
+      message_count: Math.max(chat.message_count ?? messages.length, messages.length),
+    };
+  });
+  return client_id;
 }
 
-export async function sendMessage(botId: string, chatId: string, text: string, file?: File | null) {
+function markNotSent(botId: string, chatId: string, clientId: string) {
+  queryClient.setQueryData<Chat>(["chat", botId, chatId], (chat) => {
+    if (!chat) return chat;
+    return {
+      ...chat,
+      messages: (chat.messages || []).map((item) =>
+        item.client_id === clientId ? { ...item, chip: "unsent", refuse_reason: RETRY_REASON } : item,
+      ),
+    };
+  });
+}
+
+export async function sendMessage(botId: string, chatId: string, text: string, file?: File | null, clientId?: string) {
   const existing = flightFor(botId, chatId);
   if (existing?.sending && !existing.replaced) {
-    optimisticUser(botId, chatId, text, "queued");
+    const id = optimisticUser(botId, chatId, text, "queued", clientId);
     try {
       let attachmentId: string | null = null;
       if (file) {
@@ -405,7 +437,7 @@ export async function sendMessage(botId: string, chatId: string, text: string, f
       }
       const response = await streamPost(
         `/api/bots/${botId}/chats/${chatId}/messages`,
-        { content: text, attachment_id: attachmentId },
+        { content: text, attachment_id: attachmentId, client_id: id },
         existing.control.signal,
       );
       const type = response.headers.get("content-type") || "";
@@ -422,12 +454,14 @@ export async function sendMessage(botId: string, chatId: string, text: string, f
       }
       await readEvents(response, existing);
     } catch (error) {
-      if (existing.replaced || (error instanceof DOMException && error.name === "AbortError")) return;
+      if (existing.replaced) return;
+      if (error instanceof DOMException && error.name === "AbortError" && existing.control.signal.aborted) return;
+      markNotSent(botId, chatId, id);
     }
     return;
   }
   const flight = begin(botId, chatId);
-  optimisticUser(botId, chatId, text);
+  const id = optimisticUser(botId, chatId, text, undefined, clientId);
   try {
     let attachmentId: string | null = null;
     if (file) {
@@ -438,7 +472,7 @@ export async function sendMessage(botId: string, chatId: string, text: string, f
     }
     const response = await streamPost(
       `/api/bots/${botId}/chats/${chatId}/messages`,
-      { content: text, attachment_id: attachmentId },
+      { content: text, attachment_id: attachmentId, client_id: id },
       flight.control.signal,
     );
     const type = response.headers.get("content-type") || "";
@@ -600,8 +634,19 @@ export async function stopMessage(botId: string, chatId: string) {
   }
 }
 
+export async function retryUnsent(botId: string, chatId: string, clientId: string) {
+  const current = queryClient.getQueryData<Chat>(["chat", botId, chatId]);
+  const row = (current?.messages || []).find((item) => item.client_id === clientId);
+  if (!row) return;
+  queryClient.setQueryData<Chat>(["chat", botId, chatId], (chat) =>
+    chat ? { ...chat, messages: (chat.messages || []).filter((item) => item.client_id !== clientId) } : chat,
+  );
+  await sendMessage(botId, chatId, row.content || "", null, clientId);
+}
+
 export function canResume(chat: Chat | undefined, flight: Flight | null) {
-  if (flight?.sending && flight.live && flight.live.phase !== "stopped" && flight.live.phase !== "error") {
+  const serverBusy = chat?.run?.status === "running";
+  if (serverBusy && flight?.sending && flight.live && flight.live.phase !== "stopped" && flight.live.phase !== "error") {
     return { retry: false, cont: false };
   }
   const run = chat?.run;

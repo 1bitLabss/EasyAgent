@@ -565,6 +565,7 @@ def show_queued_as_seen(chat: dict) -> int:
         if message.get("chip") != "queued":
             continue
         message["chip"] = "seen"
+        message.pop("queued", None)
         changed += 1
     return changed
 
@@ -941,6 +942,7 @@ def _requeue_unanswered(store: Store, bot_id: str, chat_id: str) -> int:
     items = payload["items"]
     known = {item.get("id") for item in items}
     added = 0
+    changed = False
     for index, message in enumerate(messages):
         if message.get("role") != "user":
             continue
@@ -949,6 +951,10 @@ def _requeue_unanswered(store: Store, bot_id: str, chat_id: str) -> int:
         if any(covers_line(message, later) for later in messages[index + 1:]):
             continue
         message_id = message.get("id")
+        # A line the bot already picked up stays Seen. Putting it back on the
+        # queue must not show it as waiting to be seen again.
+        if message.get("chip") == "seen" and message.pop("queued", None) is not None:
+            changed = True
         if not message_id or message_id in known:
             continue
         items.append({
@@ -958,15 +964,12 @@ def _requeue_unanswered(store: Store, bot_id: str, chat_id: str) -> int:
             "at": message.get("created_at") or now_iso(),
         })
         known.add(message_id)
-        if message.get("chip") == "seen":
-            message["chip"] = "queued"
-            message["queued"] = True
-            message.pop("seen_step", None)
         added += 1
-    if not added:
+    if added:
+        payload["items"] = items
+        _write_queue(store, bot_id, chat_id, payload)
+    if not added and not changed:
         return 0
-    payload["items"] = items
-    _write_queue(store, bot_id, chat_id, payload)
     chat["messages"] = messages
     chat["updated_at"] = now_iso()
     store.save_chat(chat)

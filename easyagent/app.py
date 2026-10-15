@@ -4074,14 +4074,40 @@ def _force_clear_running(store: Store, bot_id: str, chat_id: str, reason: str) -
     _settle_interrupted(store, bot_id, chat_id, reason)
 
 
+def _same_stored_answer(message: dict, text: str) -> bool:
+    if not isinstance(message, dict) or message.get("role") != "assistant":
+        return False
+    if message.get("kind") in {"status", "pickup", "resume-note", "resume-offer", "activity", "connection"}:
+        return False
+    body = " ".join(str(message.get("content") or "").split())
+    return bool(body) and body == text and not body.startswith("Stopped:")
+
+
+def _last_assistant_answer(messages: list) -> dict | None:
+    """The latest model line. Status notes and the pickup card are not that line."""
+    for message in reversed(messages):
+        if not isinstance(message, dict) or message.get("role") != "assistant":
+            continue
+        if message.get("kind") in {"status", "pickup", "resume-note", "resume-offer", "activity", "connection"}:
+            continue
+        return message
+    return None
+
+
 def _stored_resume_answer(messages: list, visible: str) -> dict | None:
-    """The answer already stored before "Picked up where it stopped.", if this reply repeats it.
+    """An answer this restart would store again.
 
     The chat file refuses to drop a finished row. Skipping the second copy is what keeps one answer.
+    A graceful stop can leave the text on a live line, with no interrupted flag and no pickup note.
     """
     text = " ".join((visible or "").split())
-    if not text:
+    if not text or text.startswith("Stopped:"):
         return None
+    for message in messages:
+        if not isinstance(message, dict):
+            continue
+        if (message.get("interrupted") or message.get("live")) and _same_stored_answer(message, text):
+            return message
     note_at = None
     for index, message in enumerate(messages):
         if not isinstance(message, dict):
@@ -4089,18 +4115,30 @@ def _stored_resume_answer(messages: list, visible: str) -> dict | None:
         content = str(message.get("content") or "")
         if message.get("kind") == "resume-note" and "Picked up where it stopped" in content:
             note_at = index
-    if note_at is None:
+    if note_at is not None:
+        found = None
+        for message in messages[:note_at]:
+            if _same_stored_answer(message, text):
+                found = message
+        if found is not None:
+            return found
+    # On a restart or resume the last assistant line may already be this reply,
+    # with no live flag and no interrupted flag. An ordinary chat can say the
+    # same thing twice, so this only applies once a stop or a pickup is in the transcript.
+    if not any(
+        isinstance(message, dict)
+        and (
+            message.get("live")
+            or message.get("interrupted")
+            or message.get("kind") in {"resume-note", "resume-offer"}
+        )
+        for message in messages
+    ):
         return None
-    found = None
-    for message in messages[:note_at]:
-        if (
-            isinstance(message, dict)
-            and message.get("role") == "assistant"
-            and message.get("kind") not in {"status", "pickup", "resume-note", "resume-offer", "activity", "connection"}
-            and " ".join(str(message.get("content") or "").split()) == text
-        ):
-            found = message
-    return found
+    last = _last_assistant_answer(messages)
+    if last is not None and _same_stored_answer(last, text):
+        return last
+    return None
 
 
 def _require_delivery_allowed(store: Store, bot_id: str, record: dict) -> None:
@@ -5317,13 +5355,18 @@ def _finish_reply(
     if not had_words and not kept:
         visible = "(empty reply)"
         blank_reply = True
+    # Read again. A stop can save the reply while this turn is still finishing.
+    chat = store.get_chat(bot_id, chat_id)
+    _drop_activity(chat)
     messages = chat.setdefault("messages", [])
     already = _stored_resume_answer(messages, visible)
     replacing = bool(messages and messages[-1].get("live") and messages[-1].get("role") == "assistant")
     if already is not None:
-        if replacing:
+        if replacing and messages[-1] is not already:
             messages.pop()
         message = already
+        message.pop("live", None)
+        message.pop("interrupted", None)
     elif replacing:
         message = messages[-1]
         message["content"] = visible

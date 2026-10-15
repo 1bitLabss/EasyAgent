@@ -5824,6 +5824,59 @@ def _partial_stream(text_bits: list[str]):
         yield "stage", body
 
 
+def _keep_partial_reply(store, bot_id: str | None, chat_id: str | None, text_bits: list[str]) -> None:
+    """A restart must find the reply that already arrived. Yielding it can be cancelled too."""
+    partial = "".join(text_bits)
+    if not partial.strip() or store is None or not bot_id or not chat_id:
+        return
+    _hidden, answer = llm.peel_thinking(partial)
+    body = (answer or "").strip()
+    if not body or body.startswith("Stopped:"):
+        return
+    from easyagent.store import new_id, now_iso
+
+    try:
+        chat = store.get_chat(bot_id, chat_id)
+    except Exception:
+        return
+    messages = chat.setdefault("messages", [])
+    norm = " ".join(body.split())
+    target = None
+    for message in reversed(messages):
+        if isinstance(message, dict) and message.get("role") == "assistant" and message.get("live"):
+            target = message
+            break
+    if target is None:
+        for message in reversed(messages):
+            if not isinstance(message, dict) or message.get("role") != "assistant":
+                continue
+            if message.get("kind") in {"status", "pickup", "resume-note", "resume-offer", "activity", "connection"}:
+                continue
+            stored = " ".join(str(message.get("content") or "").split())
+            if stored == norm:
+                return
+    if target is None:
+        target = {
+            "id": new_id(),
+            "role": "assistant",
+            "content": "",
+            "live": True,
+            "created_at": now_iso(),
+        }
+        messages.append(target)
+    current = " ".join(str(target.get("content") or "").split())
+    if len(body) >= len(current):
+        target["content"] = body
+    # The process may die before the turn is marked interrupted. The row has to
+    # say so itself, or a restart stores this same reply again.
+    target["interrupted"] = True
+    chat["updated_at"] = now_iso()
+    try:
+        store.save_chat(chat)
+    except Exception:
+        return
+
+
 async def run_turn(
     *,
     base_url: str,
@@ -6650,6 +6703,11 @@ async def run_turn(
                 ready = _take_answer(bit)
                 if ready:
                     yield "delta", ready
+        except asyncio.CancelledError:
+            # The process is stopping. Store the tokens already in hand before the
+            # task dies, so a restart does not ask for the same answer again.
+            _keep_partial_reply(store, bot_id, chat_id, text_bits)
+            raise
         except turn_mod.TurnCancelled:
             if turn_mod.take_redirect():
                 continue

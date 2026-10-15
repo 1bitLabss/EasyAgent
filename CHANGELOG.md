@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.3.31
+
+- Stopping the server while a reply is still arriving keeps that reply. The stop can leave it live, without an interrupted flag. Starting again does not store a second copy when that line, or the last assistant line, already has the same text.
+- A line the bot already picked up stays Seen after a runaway cut. It does not go back to queued.
+
 ## 0.3.30
 
 - A model request that is cut for length, silence, a repeated chunk, or the time limit leaves the job paused and resumable. Queued lines stay in the chat as Seen. The job does not stay running when nothing is in flight. Stop clears a running job even when the worker is already gone. If a job stays marked running with no request and no progress for 60 seconds, it is paused and the chat says so. A card waiting for approval is left alone.

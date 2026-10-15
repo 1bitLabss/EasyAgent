@@ -819,14 +819,25 @@ def _file_request_path(store: Store, raw: str, cwd: Path, bot_id: str | None) ->
 
 
 def _resolve(raw: str, cwd: Path) -> Path:
-    text = _expand(raw).strip().strip('"').strip("'")
-    path = Path(text).expanduser()
-    if not path.is_absolute():
-        path = cwd / path
+    """Resolve one path. A Windows ``\\\\?\\`` prefix is removed first.
+
+    Windows realpath keeps that prefix when the input had it, and drops it
+    when the input did not. Stripping it here makes both spellings one path.
+    ``os.path`` is what decides absolute and realpath, so a test can install
+    ``ntpath`` and see the same decision Windows makes.
+    """
+    from easyagent.strictshell import _strip_extended
+
+    text = _strip_extended(_expand(raw).strip().strip('"').strip("'"))
+    if text.startswith("~"):
+        text = os.path.expanduser(text)
+    if text and not os.path.isabs(text):
+        text = os.path.join(os.fspath(cwd), text)
     try:
-        return path.resolve()
-    except OSError:
-        return path
+        resolved = os.path.realpath(text)
+    except (OSError, ValueError, RuntimeError):
+        resolved = text
+    return Path(resolved)
 
 
 def _workspace_roots(store: Store, bot_id: str | None, user_text: str) -> list[Path]:
@@ -851,31 +862,31 @@ def _workspace_roots(store: Store, bot_id: str | None, user_text: str) -> list[P
 
 def _path_key(path: Path) -> str:
     """One spelling for a path. Windows resolve can differ by case or a \\\\?\\ prefix."""
-    text = os.path.normcase(os.path.abspath(str(path)))
+    from easyagent.strictshell import _strip_extended
+
+    text = _strip_extended(str(path))
+    text = os.path.normcase(os.path.abspath(text))
     text = text.replace("/", "\\") if os.name == "nt" else text
-    if os.name == "nt" and text.startswith("\\\\?\\"):
-        if text.upper().startswith("\\\\?\\UNC\\"):
-            text = "\\\\" + text[8:]
-        else:
-            text = text[4:]
+    if text.upper().startswith("\\\\?\\UNC\\"):
+        text = "\\\\" + text[8:]
+    elif text.startswith("\\\\?\\"):
+        text = text[4:]
     return text.rstrip("\\/")
 
 
 def _inside(path: Path, roots: list[Path]) -> bool:
-    try:
-        resolved = path.resolve()
-    except OSError:
-        resolved = path
-    folded = _path_key(resolved)
+    """True when path is the root or a file inside it.
+
+    Both sides go through realpath and the same fold as a script record.
+    ``/var`` and ``/private/var`` name one directory. macOS realpath keeps the
+    case you passed in, and a casefolded record key is still inside the folder.
+    """
+    from easyagent.strictshell import _canonical_key, _fold_text, _key_under
+
+    path_key = _canonical_key(path) or _fold_text(os.fspath(path))
     for root in roots:
-        try:
-            root_resolved = root.resolve()
-        except OSError:
-            root_resolved = root
-        if resolved == root_resolved or root_resolved in resolved.parents:
-            return True
-        other = _path_key(root_resolved)
-        if folded == other or folded.startswith(other + os.sep):
+        root_key = _canonical_key(root) or _fold_text(os.fspath(root))
+        if _key_under(path_key, root_key):
             return True
     return False
 
@@ -2078,7 +2089,12 @@ def _quoted_words(line: str) -> list[str]:
 
 
 def _wide_place(token: str) -> bool:
-    """A root, a drive, a home directory, a system directory, or a disk device."""
+    """A root, a drive, a home directory, a system directory, or a disk device.
+
+    ``C:/Users`` and ``C:/Users/<name>`` are the users directory and one profile.
+    A folder inside the profile is a specific directory, the same as a folder
+    under ``/tmp``. ``C:/Windows`` and everything under it stays a system directory.
+    """
     text = (token or "").strip().strip("'\"")
     if len(text) >= 2 and text[0] == text[-1] and text[0] in {"'", '"'}:
         text = text[1:-1]
@@ -2094,7 +2110,11 @@ def _wide_place(token: str) -> bool:
         return True
     if re.match(r"(?i)^(?:/etc|/usr|/bin|/boot|/sys|/proc|/System)(?:/|$)", text):
         return True
-    if re.match(r"(?i)^[A-Za-z]:/(?:Windows|WinNT|Users)(?:/|$)", text):
+    if re.match(r"(?i)^[A-Za-z]:/(?:Windows|WinNT)(?:/|$)", text):
+        return True
+    if re.fullmatch(r"(?i)[A-Za-z]:/Users/?", text):
+        return True
+    if re.fullmatch(r"(?i)[A-Za-z]:/Users/[^/]+/?", text):
         return True
     return False
 

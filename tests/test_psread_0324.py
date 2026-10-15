@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import tempfile
 from pathlib import Path
 
 import pytest
@@ -24,6 +25,26 @@ def _release_turn_binding():
     yield
     turn_mod._cancel.set(None)
     turn_mod._slot.set(None)
+
+
+def _outside_dir(*roots: Path) -> Path:
+    """A real directory outside every root. Path('/tmp') is not a directory on Windows."""
+    banned = [os.path.realpath(os.fspath(root)) for root in roots]
+
+    def covered(path: str, root: str) -> bool:
+        try:
+            return os.path.commonpath([path, root]) == root
+        except ValueError:
+            return False
+
+    folder = os.path.realpath(tempfile.mkdtemp(prefix="ea-outside-"))
+    if any(covered(folder, root) for root in banned):
+        os.rmdir(folder)
+        parent = os.path.dirname(banned[0])
+        folder = os.path.realpath(tempfile.mkdtemp(prefix="ea-outside-", dir=parent))
+    if any(covered(folder, root) for root in banned):
+        raise AssertionError(folder)
+    return Path(folder)
 
 
 def _client(tmp_path):
@@ -197,8 +218,7 @@ def test_yolo_allows_an_env_path_inside_and_refuses_one_outside(tmp_path, monkey
     _say(client, bot, chat, "/yolo")
     folder = bot_workspace(store, bot["id"], create=True)
     (folder / "index.html").write_text("inside", encoding="utf-8")
-    outside = Path("/tmp") / f"ea-psread-outside-{tmp_path.name}"
-    outside.mkdir()
+    outside = _outside_dir(tmp_path, folder)
     (outside / "secret.txt").write_text("no", encoding="utf-8")
     try:
         monkeypatch.setenv("EA_IN", str(folder))

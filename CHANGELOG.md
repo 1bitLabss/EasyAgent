@@ -1,5 +1,21 @@
 # Changelog
 
+## 0.3.28
+
+- An inline interpreter that deletes a Windows path is blocked. The check that an outside folder was not touched accepts that block: the folder is still there and nothing was approved. On Linux and macOS those same commands still wait on a card. A relative path stays a card on every system.
+- A granted folder matches a file inside it when the command spells the path with a `\\?\` prefix. The prefix is removed before the path is resolved, so `\\?\C:\...` and `C:\...` are one folder, and `\\?\UNC\...` is the same key as the UNC path. A question mark that is only that prefix is not a wildcard. A real wildcard still waits. A UNC path still waits, because that path cannot be proved.
+
+## 0.3.27
+
+- An approved folder grant is honored for a file inside that folder on Windows: either case of the drive letter, either slash, a `\\?\` prefix, an 8.3 short name, and a trailing separator. The grant and the confinement check use the same resolved path. An alternate data stream, a UNC path, and a path outside the grant still wait.
+- `find` of a specific folder with `-delete` waits on every system. `find` of a drive, `C:\Users`, one profile directory, or `C:\Windows` stays blocked.
+
+## 0.3.26
+
+- A file inside this bot's folder stays inside when one path says `/var` and the other says `/private/var`, and when a script record stores the casefolded path. An in-folder change no longer raises a bot-changed card for that spelling. A symlink that leaves the folder still waits.
+- While /yolo is on, every command is checked again for the files it will actually touch. A file this bot already changed does not approve a later delete, move, copy, or write outside this bot's folders. A symlink, a junction, a glob, an environment variable, a redirect, a cd, a chain, a subshell, xargs, or find -delete that leaves the folder, or that cannot be read, still waits. The same check sits behind a class grant.
+- The Intel Mac desktop runtime installs cryptography 48.0.1 or newer in the 48 series, including when that runtime runs on the Apple silicon builder. 48.0.0 is not used. Linux, Windows, and Apple silicon stay on cryptography 50.
+
 ## 0.3.24
 
 - A queued message with no live worker is picked up by a supervisor. An error marks that line held, with the reason and Retry, and does not call it answered. Stop keeps the queue in order and the next send answers those lines first. Past the 32-message queue, further lines are held on screen instead of dropped. Only a queue that cannot take another line returns 429, and that request writes nothing.

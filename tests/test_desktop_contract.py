@@ -73,3 +73,44 @@ def test_every_installer_carries_the_python_runtime():
     assert "needs: [ui-fresh, windows, macos, linux, smoke-windows, smoke-macos, smoke-linux]" in workflow
     assert "scripts/check_ui_fresh.sh" in workflow
     assert "scripts/check_ui_fresh.sh" in (ROOT / ".github" / "workflows" / "ui-fresh.yml").read_text(encoding="utf-8")
+
+
+def test_intel_mac_runtime_installs_the_last_cryptography_wheel():
+    """cryptography 50 has no Intel Mac wheel. 48.0.0 is not used either.
+
+    The Intel pin applies when that runtime runs on the build machine (a real
+    Intel Mac, or Rosetta on the Apple silicon builder) and when it is cross-installed.
+    """
+    import importlib.util
+
+    path = ROOT / "scripts" / "build_desktop_runtime.py"
+    spec = importlib.util.spec_from_file_location("build_desktop_runtime", path)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    requires = [
+        "cryptography~=50.0",
+        "fastapi~=0.143.0",
+        "pywin32>=306; sys_platform == 'win32'",
+    ]
+    intel = module.cross_requirements(requires, "x86_64-apple-darwin")
+    assert intel == [
+        "cryptography>=48.0.1,<49",
+        "fastapi~=0.143.0",
+        "pywin32>=306; sys_platform == 'win32'",
+    ]
+    normalized = module.cross_requirements(
+        ["cryptography (>=50,<51)", "fastapi (>=0.143,<0.144)"],
+        "x86_64-apple-darwin",
+    )
+    assert normalized[0] == "cryptography>=48.0.1,<49"
+    assert module.cross_requirements(requires, "aarch64-apple-darwin") == requires
+    assert module.cross_requirements(requires, "x86_64-unknown-linux-gnu") == requires
+    assert module.cross_requirements(requires, "x86_64-pc-windows-msvc") == requires
+    source = path.read_text(encoding="utf-8")
+    before, marker, rest = source.partition("if native and args.triple != _INTEL_MAC:")
+    assert marker
+    assert "deps = cross_requirements(requires_dist(wheel), args.triple)" in before
+    assert "*deps" in rest.split("else:", 1)[0]
+    assert "cryptography~=48.0" not in source
+    assert module._INTEL_CRYPTO == "cryptography>=48.0.1,<49"

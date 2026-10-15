@@ -99,9 +99,7 @@ def place_class(path: Path, roots: list[Path]) -> str:
         resolved = path.resolve()
     except OSError:
         resolved = path
-    text = str(resolved).replace("\\", "/")
-    if text.lower().startswith("//?/"):
-        text = text[4:]
+    text = _strip_extended(str(resolved)).replace("\\", "/")
     folded = text.rstrip("/") or "/"
     low = folded.lower()
     if low in {"/", ""} or re.fullmatch(r"[a-z]:", low):
@@ -1226,6 +1224,22 @@ def _strip_extended(text: str) -> str:
     return text
 
 
+def windows_key(text: str) -> str:
+    """One Windows spelling of a path string, without touching the disk.
+
+    ``\\\\?\\C:\\...`` and ``C:\\...`` are one key. ``\\\\?\\UNC\\server\\share``
+    and ``\\\\server\\share`` are one key. This uses ``ntpath``, so the fold is
+    the same on Linux as on Windows.
+    """
+    import ntpath
+
+    stripped = _strip_extended(os.fspath(text))
+    folded = ntpath.normcase(ntpath.normpath(stripped)).replace("\\", "/")
+    if folded != "/" and not (len(folded) == 3 and folded[1:3] == ":/"):
+        folded = folded.rstrip("/")
+    return folded
+
+
 def _fold_text(text: str) -> str:
     """Case, slashes, and the \\\\?\\ prefix, without resolving. Used only when resolve fails.
 
@@ -1240,14 +1254,18 @@ def _fold_text(text: str) -> str:
 
 
 def _canonical_key(path: Path | str) -> str | None:
-    """One key: resolved, case-normalized, no \\\\?\\ prefix, forward slashes.
+    """One key: realpath, case-normalized, no \\\\?\\ prefix, forward slashes.
 
     None means the path could not be resolved. An exec tool then asks.
+    realpath, not abspath, so ``/var`` and ``/private/var`` are one key.
+    The ``\\\\?\\`` prefix is removed first. Windows realpath keeps that prefix
+    when the input had it and drops it otherwise, so the two spellings would
+    not match.
     """
     try:
         stripped = _strip_extended(os.fspath(path))
-        resolved = Path(stripped).resolve()
-        folded = _fold_text(os.fspath(resolved))
+        resolved = os.path.realpath(stripped)
+        folded = _fold_text(resolved)
     except (OSError, ValueError, RuntimeError):
         return None
     return folded or None
@@ -2474,7 +2492,7 @@ def _expand_dirs(token: str, cwd: Path) -> tuple[list[Path], bool]:
     """Directories a cd, -C, or GIT_DIR value names. A glob with no match is unknown."""
     import glob as globmod
 
-    raw = (token or "").strip().strip("'\"")
+    raw = _strip_extended((token or "").strip().strip("'\""))
     if not raw or raw in {".", ""}:
         return [cwd], False
     if raw == "-":

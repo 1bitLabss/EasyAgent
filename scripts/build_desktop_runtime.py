@@ -72,6 +72,46 @@ def runs_here(python: Path) -> bool:
         return False
 
 
+def requires_dist(wheel: Path) -> list[str]:
+    """Requires-Dist lines from a built wheel. Markers stay on the line."""
+    import zipfile
+
+    with zipfile.ZipFile(wheel) as archive:
+        name = next(item for item in archive.namelist() if item.endswith(".dist-info/METADATA"))
+        text = archive.read(name).decode("utf-8")
+    found = []
+    for line in text.splitlines():
+        if line.startswith("Requires-Dist:"):
+            found.append(line.split(":", 1)[1].strip())
+    return found
+
+
+# cryptography 50 has no Intel Mac wheel. 48.0.0 bundles an OpenSSL with
+# CVE-2026-34180, so the Intel runtime starts at 48.0.1.
+_INTEL_MAC = "x86_64-apple-darwin"
+_INTEL_CRYPTO = "cryptography>=48.0.1,<49"
+
+
+def cross_requirements(requires: list[str], triple: str) -> list[str]:
+    """Dependencies for one runtime target.
+
+    The Intel Mac pin applies whether that runtime is cross-installed or
+    installed by a Python that runs on the build machine. Other targets keep
+    the requirement the wheel declared.
+    """
+    if triple != _INTEL_MAC:
+        return list(requires)
+    rewritten: list[str] = []
+    for item in requires:
+        body, _sep, marker = item.partition(";")
+        if body.strip().lower().startswith("cryptography"):
+            extra = f";{marker}" if marker else ""
+            rewritten.append(_INTEL_CRYPTO + extra)
+            continue
+        rewritten.append(item)
+    return rewritten
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--triple", required=True, choices=sorted(SHA256))
@@ -94,13 +134,20 @@ def main() -> int:
         builder = str(python) if native else sys.executable
         subprocess.check_call([builder, "-m", "pip", "wheel", "--no-deps", "-w", str(wheels), str(ROOT)], env=env)
         wheel = next(wheels.glob("easyagent-*.whl"))
-        if native:
-            # Wheels only: nothing is compiled from source on the build machine. A
-            # dependency without a wheel for this target resolves to its newest
-            # version that has one (cryptography has no Intel Mac wheel after 48).
+        # Both the native install and the cross install use this list. An Intel
+        # runtime that runs under Rosetta is still the native branch.
+        deps = cross_requirements(requires_dist(wheel), args.triple)
+        if native and args.triple != _INTEL_MAC:
+            # Wheels only: nothing is compiled from source on the build machine.
             subprocess.check_call([str(python), "-m", "pip", "install", "--no-warn-script-location", "--only-binary=:all:", str(wheel)], env=env)
             subprocess.check_call([str(python), "-c", "import easyagent, easyagent.app, uvicorn, fastapi; print(easyagent.__version__)"], env=env)
+        elif native:
+            subprocess.check_call([str(python), "-m", "pip", "install", "--no-warn-script-location", "--only-binary=:all:", "--no-deps", str(wheel)], env=env)
+            if deps:
+                subprocess.check_call([str(python), "-m", "pip", "install", "--no-warn-script-location", "--only-binary=:all:", *deps], env=env)
+            subprocess.check_call([str(python), "-c", "import easyagent, easyagent.app, uvicorn, fastapi; print(easyagent.__version__)"], env=env)
         else:
+            # This runtime cannot run here, so pip selects wheels by platform tag.
             command = [
                 sys.executable, "-m", "pip", "install", "--no-warn-script-location",
                 "--target", str(site_packages(root, args.triple)),
@@ -110,7 +157,9 @@ def main() -> int:
             ]
             for tag in PIP_PLATFORMS[args.triple]:
                 command += ["--platform", tag]
-            subprocess.check_call(command + [str(wheel)], env=env)
+            subprocess.check_call(command + ["--no-deps", str(wheel)], env=env)
+            if deps:
+                subprocess.check_call(command + deps, env=env)
         (root / "EASYAGENT_RUNTIME").write_text(f"{wheel.name}\npython {PYTHON}+{RELEASE} {args.triple}\n", encoding="utf-8")
         with tarfile.open(out, "w:gz", compresslevel=6) as tar:
             tar.add(root, arcname="python")

@@ -302,7 +302,15 @@ def covers(store: Store, bot_id: str, request, verdict, *, now: datetime | None 
     if refuses(store, bot_id, request, verdict):
         return False
     try:
-        return _inside_scope(store, bot_id, request, verdict)
+        ruled = _inside_scope(store, bot_id, request, verdict)
+    except Exception:
+        return False
+    if not ruled:
+        return False
+    # The rule match is not the scope check. bot-changed only looks at the
+    # files the bot edited, so a later rm of another folder used to ride it.
+    try:
+        return targets_confined(store, bot_id, request)
     except Exception:
         return False
 
@@ -700,6 +708,119 @@ def _inside_scope(store: Store, bot_id: str, request, verdict) -> bool:
     return all(check(store, bot_id, path, roots) for path in paths)
 
 
+def targets_confined(store: Store, bot_id: str, request) -> bool:
+    """True only when every real target of this command stays in the bot's folders.
+
+    This is the last gate. It runs after the rule has matched, so a rule cannot
+    skip it. A path that does not resolve, a symlink or junction that leaves
+    the folder, a glob, an environment variable, a redirect, a cd, a chain, a
+    subshell, xargs, or find -delete that cannot be proved stays a card.
+    A folder grant is one of those folders. Membership uses the same resolved
+    key as every other root: realpath, then the platform's case and slash fold.
+    """
+    kind = getattr(request, "kind", "")
+    roots = _scope_roots(store, bot_id)
+    if not roots:
+        return False
+    if kind == "files":
+        paths = _touched_paths(store, bot_id, request, None)
+        if not paths:
+            return False
+        return all(_safe_inside(store, bot_id, path, roots) for path in paths)
+    if kind != "shell":
+        return False
+    command = getattr(request, "command", "") or ""
+    proved = _readonly_paths(request)
+    if proved is not None:
+        return _covers_readonly(store, bot_id, request)
+    targets = _shell_targets(command)
+    if targets is None:
+        return False
+    if _mutates(command) and not targets:
+        return False
+    check = _safe_inside if _mutates(command) else _read_inside
+    return all(check(store, bot_id, path, roots) for path in targets)
+
+
+def _mutates(command: str) -> bool:
+    text = command or ""
+    if _REDIRECT.search(text):
+        return True
+    return bool(
+        re.search(
+            r"(?i)\b(rm|unlink|del|erase|rd|ri|rmdir|remove-item|mv|move|move-item|"
+            r"cp|copy|copy-item|tee|dd|ln|link|set-content|out-file|add-content|new-item)\b",
+            text,
+        )
+    )
+
+
+def _piece_unanalyzable(text: str) -> bool:
+    """find -delete and find -exec name a search, not the files they will touch."""
+    if re.search(r"(?i)\bfind\b", text or "") and re.search(
+        r"(?i)(?:^|\s)-(?:delete|exec|execdir|ok|okdir)\b", text or ""
+    ):
+        return True
+    return bool(re.search(r"(?i)(?:^|[\s;&|])xargs\b", text or ""))
+
+
+def _shell_targets(command: str):
+    """Resolved targets, or None when the command cannot be fully read."""
+    import os
+    from pathlib import Path
+
+    from easyagent import turn as turn_mod
+    from easyagent.shellexpand import prepared_command, still_unresolved
+    from easyagent.strictshell import _sites
+
+    try:
+        cwd = Path(turn_mod.tool_cwd())
+    except OSError:
+        return None
+    slot = turn_mod.current_slot()
+    env = dict(slot.env) if slot is not None and slot.env else dict(os.environ)
+    expanded = prepared_command(command or "", env)
+    if still_unresolved(expanded) or _shape_hard(expanded):
+        return None
+    try:
+        sites = _sites(expanded, cwd)
+    except Exception:
+        return None
+    if not sites or any(site.get("unknown") or site.get("dir_unknown") for site in sites):
+        return None
+    found = []
+    for site in sites:
+        text = str(site.get("text") or "")
+        if _piece_unanalyzable(text):
+            return None
+        piece_cwd = site.get("cwd") or cwd
+        paths = _piece_targets(text, piece_cwd)
+        if paths is None:
+            return None
+        found.extend(paths)
+    return found
+
+
+def _piece_targets(text: str, cwd):
+    """Paths this one piece names. None when one of them cannot be proved."""
+    from easyagent.safety import _resolve, _wide_token
+
+    paths = _operand_paths(text, cwd)
+    if paths is None:
+        return None
+    from easyagent.strictshell import _strip_extended
+
+    extra = []
+    for match in re.finditer(r"(?i)\b(?:of|if)=(\S+)", text or ""):
+        token = _strip_extended(match.group(1).strip("'\""))
+        if not token or token in {".", "..", "*", "~"} or _wide_token(token):
+            return None
+        if any(mark in token for mark in "*?$%"):
+            return None
+        extra.append(_resolve(token, cwd))
+    return list(paths) + extra
+
+
 def _wide():
     from easyagent.safety import _wide_token
 
@@ -725,6 +846,46 @@ def _readonly_paths(request):
     return prove_readonly(command, cwd, env)
 
 
+def _drive_token(token: str) -> bool:
+    """A Windows absolute path whose only colon is the drive letter.
+
+    ``C:\\a\\b``, ``c:/a/b``, and ``\\\\?\\C:\\a\\b`` can be resolved. An
+    alternate stream (``notes.txt:stream``), a drive-relative ``C:notes.txt``,
+    and a UNC path cannot. Those stay a card. ``\\\\?\\UNC\\`` is a UNC path
+    after the prefix is removed, so it stays a card too.
+    """
+    from easyagent.strictshell import _strip_extended
+
+    text = _strip_extended((token or "").strip().strip("'\""))
+    if text.count(":") != 1:
+        return False
+    return bool(re.match(r"(?i)^[A-Za-z]:[\\/]", text))
+
+
+def _command_unreadable(raw: str) -> bool:
+    """True when a path in this command cannot be proved.
+
+    A variable, ``..``, or an alternate stream is not expanded here. On
+    Windows a drive letter is a real path, and confinement then resolves it
+    with the same key a folder grant uses.
+    """
+    import os
+
+    text = raw or ""
+    if re.search(r"[`$%]|\.\.", text):
+        return True
+    if os.name != "nt":
+        return ":" in text or "\\\\" in text
+    for token in re.findall(r"[^\s|&;<>]+", text):
+        cleaned = token.strip("'\"")
+        if not cleaned:
+            continue
+        if ":" in cleaned or cleaned.startswith("\\\\") or cleaned.startswith("//"):
+            if not _drive_token(cleaned):
+                return True
+    return False
+
+
 def _operand_paths(command: str, cwd) -> list | None:
     """Files a command names, after expansion. None when a path cannot be proved."""
     from pathlib import Path
@@ -735,16 +896,20 @@ def _operand_paths(command: str, cwd) -> list | None:
     raw = command or ""
     # A variable, an alternate stream, or .. is proved by the read parser or not at all.
     # Expanding it here can turn an empty variable into a path inside the folder.
-    if re.search(r"[`$%]|\.\.|:", raw):
+    if _command_unreadable(raw):
         return None
     expanded = prepared_command(raw)
-    if still_unresolved(expanded) or _shape_hard(expanded):
+    if still_unresolved(expanded) or _shape_hard(expanded) or _command_unreadable(expanded):
         return None
-    if re.search(r"(?i)[a-z][a-z0-9+.-]*://", expanded) or "\\\\" in expanded:
+    if re.search(r"(?i)[a-z][a-z0-9+.-]*://", expanded):
         return None
+    from easyagent.strictshell import _strip_extended
+
     paths = []
     for match in _REDIRECT.finditer(expanded):
-        token = match.group(2)
+        token = _strip_extended(match.group(2))
+        if any(mark in token for mark in ("*", "?", "$", "%")):
+            return None
         if _wide_token(token) or token in {".", "..", "*", "~"}:
             return None
         paths.append(_resolve(token, cwd))
@@ -756,11 +921,13 @@ def _operand_paths(command: str, cwd) -> list | None:
         cleaned = token.strip("'\"")
         if not cleaned or cleaned.startswith("-"):
             continue
-        if cleaned in {".", "..", "*", "~"} or _wide_token(cleaned):
+        # \\?\ is an extended-length prefix. Its question mark is not a glob.
+        bare = _strip_extended(cleaned)
+        if bare in {".", "..", "*", "~"} or _wide_token(bare):
             return None
-        if any(mark in cleaned for mark in ("*", "?", "$", "%")):
+        if any(mark in bare for mark in ("*", "?", "$", "%")):
             return None
-        looks = "/" in cleaned or "\\" in cleaned or cleaned.startswith(".") or "." in Path(cleaned).name
+        looks = "/" in bare or "\\" in bare or bare.startswith(".") or "." in Path(bare).name
         if not looks:
             try:
                 looks = (cwd / cleaned).exists()
@@ -768,7 +935,7 @@ def _operand_paths(command: str, cwd) -> list | None:
                 looks = False
         if not looks:
             continue
-        paths.append(_resolve(cleaned, cwd))
+        paths.append(_resolve(bare, cwd))
     program = _command_program(expanded, cwd)
     if program is not None:
         key = _path_key(program)
@@ -844,15 +1011,13 @@ def _safe_inside(store: Store, bot_id: str, path, roots: list) -> bool:
         return False
     if not _inside(path, roots):
         return False
-    try:
-        resolved = path.resolve()
-    except OSError:
+    from easyagent.strictshell import _canonical_key
+
+    path_key = _canonical_key(path)
+    if not path_key:
         return False
     for root in roots:
-        try:
-            if resolved == root.resolve():
-                return False
-        except OSError:
+        if _canonical_key(root) == path_key:
             return False
     return True
 

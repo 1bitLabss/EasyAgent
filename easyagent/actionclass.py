@@ -141,6 +141,13 @@ def covers(store, bot_id: str, request, verdict, *, now: datetime | None = None)
     found = match(store, bot_id, request, verdict)
     if found is None:
         return False
+    from easyagent.yolo import targets_confined
+
+    try:
+        if not targets_confined(store, bot_id, request):
+            return False
+    except Exception:
+        return False
     try:
         chat = store.get_chat(bot_id, slot.chat_id)
     except Exception:

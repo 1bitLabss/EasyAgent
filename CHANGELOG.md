@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.3.24
+
+- In a chat with /yolo on, a read-only PowerShell pipeline skips the approval card when every statement is a read. The reads are Get-Content, Get-ChildItem, Select-String, Measure-Object, Test-Path, Get-Item, Select-Object, Where-Object, Sort-Object, Out-String, and string reads such as .Length, .Substring, .Split, and .Trim, including an assignment from one of those.
+- The decision is a parse of the pipeline, not a text search. Each path is resolved, including symlinks, .., environment variables, UNC, alternate data streams, and wildcards. A path outside this bot's workspace or a folder it already has a grant for still waits. So does a secret or another bot's files.
+- A write, Invoke-Expression, a nested -Command, Start-Process, a download, redirection, a pipe into any other command, a subexpression that is not a read, an encoded command, a backtick-obfuscated command, and an alias of a dangerous cmdlet still wait. With /yolo off, nothing about this changes.
+
 ## 0.3.23
 
 - When the model server rejects a tool call because the arguments are not one JSON object, EasyAgent tries that request again, up to twice. The retry asks for exactly one tool call with valid JSON, and sends parallel_tool_calls off when the server accepts that field.

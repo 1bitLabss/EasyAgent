@@ -32,6 +32,12 @@ _ELIGIBLE = frozenset({
     "write-outside",
 })
 
+# Ask rules a proved read-only pipeline may skip. A block never moves.
+_READ_RULES = frozenset({
+    "unlisted-command",
+    "dynamic-command",
+})
+
 _DURATION = re.compile(r"^(\d+(?:\.\d+)?)([hm])$", re.IGNORECASE)
 _REDIRECT = re.compile(r"(?i)(?<![0-9&])>{1,2}\s*(['\"]?)([^'\"\s|&;]+)\1")
 
@@ -207,7 +213,8 @@ def covers(store: Store, bot_id: str, request, verdict, *, now: datetime | None 
 
     The current turn's chat must be the one YOLO was turned on for. Paths that
     cannot be proved to sit inside the workspace, or a folder that already has
-    a grant, stay on the card. A block is never this function's job.
+    a grant, stay on the card. A read-only PowerShell pipeline can skip its
+    card on the same terms. A block is never this function's job.
     """
     from easyagent.helpers import in_helper
     from easyagent.safety import is_unattended
@@ -215,7 +222,8 @@ def covers(store: Store, bot_id: str, request, verdict, *, now: datetime | None 
 
     if is_unattended() or in_helper():
         return False
-    if getattr(verdict, "tier", "") != "ask" or getattr(verdict, "rule", "") not in _ELIGIBLE:
+    rule = getattr(verdict, "rule", "")
+    if getattr(verdict, "tier", "") != "ask" or rule not in _ELIGIBLE | _READ_RULES:
         return False
     slot = turn_mod.current_slot()
     if slot is None or slot.bot_id != bot_id or not slot.chat_id:
@@ -226,6 +234,11 @@ def covers(store: Store, bot_id: str, request, verdict, *, now: datetime | None 
         return False
     if not public_view(chat, now=now)["on"]:
         return False
+    if rule in _READ_RULES:
+        try:
+            return _covers_readonly(store, bot_id, request)
+        except Exception:
+            return False
     try:
         paths = _prove_paths(store, bot_id, request, verdict)
     except Exception:
@@ -441,6 +454,58 @@ def _unique(paths: list) -> list:
         seen.add(key)
         found.append(path)
     return found
+
+
+def _covers_readonly(store: Store, bot_id: str, request) -> bool:
+    """A parsed read whose paths stay in this bot's folders. Anything else waits."""
+    import os
+    from pathlib import Path
+
+    from easyagent import turn as turn_mod
+    from easyagent.psread import prove_readonly
+    from easyagent.secrets import command_targets_secret
+
+    if getattr(request, "kind", "") != "shell":
+        return False
+    command = getattr(request, "command", "") or ""
+    if command_targets_secret(store, command):
+        return False
+    try:
+        cwd = Path(turn_mod.tool_cwd())
+    except OSError:
+        return False
+    slot = turn_mod.current_slot()
+    env = dict(slot.env) if slot is not None and slot.env else dict(os.environ)
+    proved = prove_readonly(command, cwd, env)
+    if proved is None:
+        return False
+    if not proved:
+        return True
+    roots = _scope_roots(store, bot_id)
+    if not roots:
+        return False
+    return all(_read_inside(store, bot_id, path, roots) for path in proved)
+
+
+def _read_inside(store: Store, bot_id: str, path, roots: list) -> bool:
+    """A read may name the workspace itself. A secret or another bot's file may not."""
+    from easyagent.safety import (
+        _foreign_bot_data,
+        _inside,
+        _is_guardrail,
+        _is_profile_root,
+        _secret_kind,
+        saved_data_blocked,
+    )
+    from easyagent.secrets import is_protected_secret
+
+    if _secret_kind(path) or _is_profile_root(path) or _is_guardrail(path):
+        return False
+    if is_protected_secret(store, path):
+        return False
+    if saved_data_blocked(store, path, bot_id) or _foreign_bot_data(store, path, bot_id):
+        return False
+    return _inside(path, roots)
 
 
 def _safe_inside(store: Store, bot_id: str, path, roots: list) -> bool:

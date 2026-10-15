@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { moodForBadge, moodForReaction } from "./mood";
-import { activityLine, contextNote, describeRun, faceStateFor, runTone, workingLine } from "./run";
+import { activityLine, contextNote, describeRun, faceStateFor, runPresence, runTone, workingLine } from "./run";
 
 describe("run tone", () => {
   it("names waiting, reconnecting, tools, and a halt", () => {
@@ -33,6 +33,23 @@ describe("run tone", () => {
     expect(moodForReaction("👍")).toBe("glad");
     expect(moodForReaction("❤️")).toBe("glad");
     expect(moodForReaction("👎")).toBe("sad");
+  });
+
+  it("names idle, working, and waiting on the model", () => {
+    const start = Date.parse("2026-10-08T12:00:00Z");
+    expect(runPresence({ active: false, now: start }).text).toBe("Idle");
+    expect(runPresence({
+      active: true,
+      step: "Waiting on model",
+      startedAt: "2026-10-08T12:00:00Z",
+      now: start + 8_000,
+    })).toEqual({ kind: "waiting", text: "Waiting on model, 8s" });
+    expect(runPresence({
+      active: true,
+      step: "Reading index.html",
+      startedAt: "2026-10-08T12:00:00Z",
+      now: start + 12_000,
+    })).toEqual({ kind: "working", text: "Working, 12s · Reading index.html" });
   });
 
   it("names a live wait and a running command", () => {

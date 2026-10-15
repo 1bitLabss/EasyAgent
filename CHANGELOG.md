@@ -2,6 +2,7 @@
 
 ## 0.3.24
 
+- The message box grows with the text and stops at eight lines, then scrolls. Sending or clearing it returns the box to one line. The chat always shows Idle, Working with the elapsed time, or Waiting on model with the elapsed time.
 - The activity log shows each tool step once. That line moves from running to done or failed. The same step repeated in a row shows a count. The last line says who was asked, whether a reply came back, and how long it took.
 - A message that arrives as a job finishes is kept and answered. The same is true after an error, after Stop, and after EasyAgent restarts. A full queue refuses the extra line in the transcript, where Send now can still send it. The queue holds 32 messages.
 - While a job is running, a new message interrupts the model request and is picked up in that job. A command that is already running is left alone until it finishes. `/queue` waits until the job finishes. `/steer` folds the message in after the current step. Stop leaves queued lines in the next turn.

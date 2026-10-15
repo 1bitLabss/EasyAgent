@@ -89,6 +89,30 @@ function formatTokens(tokens: number): string {
   return `${tokens} tokens`;
 }
 
+export type RunPresence = "idle" | "working" | "waiting";
+
+/** Idle, a tool step, or the model. Active states include the elapsed time. */
+export function runPresence(input: {
+  active: boolean;
+  step?: string;
+  startedAt?: string | null;
+  now: number;
+}): { kind: RunPresence; text: string } {
+  if (!input.active) return { kind: "idle", text: "Idle" };
+  const step = activityBase((input.step || "").trim());
+  const started = Date.parse(input.startedAt || "");
+  const elapsed = formatElapsed((input.now - (Number.isNaN(started) ? input.now : started)) / 1000);
+  const waiting = !step
+    || step === "Thinking"
+    || step === "Waiting"
+    || step.startsWith("Waiting on model")
+    || step.startsWith("Model not answering")
+    || step.startsWith("still waiting")
+    || step === "Revising";
+  if (waiting) return { kind: "waiting", text: `Waiting on model, ${elapsed}` };
+  return { kind: "working", text: `Working, ${elapsed}${step ? ` · ${step}` : ""}` };
+}
+
 /** The line under the transcript while a job is running. It ticks with `now`. */
 export function activityLine(input: {
   step?: string;

@@ -130,6 +130,7 @@ describe("activity log", () => {
       "Writing states.html — failed",
     ]);
     expect(screen.getByTestId("asked-line").textContent).toBe("Asked LLM3 → got reply (4s)");
+    expect(screen.getByTestId("run-state").textContent).toBe("Idle");
     expect(screen.queryByText(/Messaged/)).toBeNull();
   });
 

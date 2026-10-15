@@ -101,6 +101,9 @@ describe("busy chips", () => {
     expect(screen.getByTestId("send-now").textContent).toBe("Send now");
     expect(screen.getByTestId("stop-and-send-message").textContent).toBe("Stop and send");
     expect(screen.getByTestId("activity-line").textContent).toContain("Writing index.html");
+    expect(screen.getByTestId("run-state").getAttribute("data-state")).toBe("working");
+    expect(screen.getByTestId("run-state").textContent).toContain("Working");
+    expect(screen.getByTestId("run-state").textContent).toContain("Writing index.html");
     expect(screen.getByPlaceholderText("Add to the current job")).toBeTruthy();
     expect(screen.getByTestId("stop-and-send").textContent).toBe("Stop and send");
     expect(screen.getByText("what are you doing?")).toBeTruthy();

@@ -11,7 +11,8 @@ import { moodForReaction, pokeFace } from "@/lib/mood";
 import { chipText } from "@/lib/chips";
 import { yoloClock, yoloRemaining } from "@/lib/yolo";
 import { activityLabel, askedLine } from "@/lib/activity";
-import { activityLine, describeRun, faceStateFor, runTone, workingLine } from "@/lib/run";
+import { fitComposer, resetComposer } from "@/lib/composer";
+import { activityLine, describeRun, faceStateFor, runPresence, runTone, workingLine } from "@/lib/run";
 import { hideWhileSending, messageHasBubble, reactionWho } from "@/lib/transcript";
 import { cn } from "@/lib/utils";
 import { keepLoadedHistory, mergeChat, sameMessage, shareChat, type MessagePage } from "@/lib/window";
@@ -461,6 +462,13 @@ export function ChatPane() {
     box.current?.focus();
   }, [botId, chatId]);
 
+  useLayoutEffect(() => {
+    const el = box.current;
+    if (!el) return;
+    if (!draft) resetComposer(el);
+    else fitComposer(el);
+  }, [draft]);
+
   useEffect(() => {
     setMenu(false);
   }, [botId]);
@@ -507,6 +515,13 @@ export function ChatPane() {
     tokens: Math.floor((live?.chars || 0) / 4),
   });
   const checklist = (open?.plan?.steps || []).filter((step) => step && step.text);
+  const active = Boolean(open && (running || (flight?.sending && live && live.phase !== "error" && live.phase !== "stopped")));
+  const presenceStep = live?.label || open?.run?.current_step || "";
+  const presenceWaiting = !presenceStep || /^(Thinking|Waiting|Revising)\b/.test(presenceStep) || presenceStep.startsWith("Waiting on model") || presenceStep.startsWith("Model not answering");
+  const presenceStarted = presenceWaiting
+    ? (live?.waitAt ? new Date(live.waitAt).toISOString() : (open?.run?.activity_started_at || open?.run?.started_at || live?.run?.started_at))
+    : (open?.run?.activity_started_at || live?.run?.activity_started_at || open?.run?.started_at || live?.run?.started_at);
+  const presence = runPresence({ active, step: presenceStep, startedAt: presenceStarted, now });
 
   chooseRef.current = (choice) => {
     void submit(choice);
@@ -725,6 +740,7 @@ export function ChatPane() {
             ) : null}
           </div>
           {running ? <p className="mb-1 text-center text-xs text-muted">Add to the current job</p> : null}
+          <p className="mb-1 text-center text-xs text-muted" role="status" data-testid="run-state" data-state={presence.kind}>{presence.text}</p>
           <div className="composer">
             <button type="button" className="mb-1 flex h-8 w-8 items-center justify-center rounded-full text-foreground" aria-label="Attach" onClick={() => fileRef.current?.click()}>
               <Plus className="h-5 w-5" />
@@ -737,11 +753,7 @@ export function ChatPane() {
               rows={1}
               value={draft}
               placeholder={listening ? "Listening" : running ? "Add to the current job" : asking && asking.length > 1 ? "Or type an answer" : "Message"}
-              onChange={(event) => {
-                setDraft(event.target.value);
-                event.target.style.height = "auto";
-                event.target.style.height = `${Math.min(event.target.scrollHeight, 160)}px`;
-              }}
+              onChange={(event) => setDraft(event.target.value)}
               onKeyDown={(event) => {
                 if (event.key === "Enter" && !event.shiftKey) {
                   event.preventDefault();

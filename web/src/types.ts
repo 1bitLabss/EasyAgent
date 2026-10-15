@@ -6,6 +6,8 @@ export type Endpoint = {
   model: string | null;
   max_parallel: number;
   max_tokens?: number;
+  stall_seconds?: number;
+  first_token_seconds?: number;
 };
 
 export type Bot = {

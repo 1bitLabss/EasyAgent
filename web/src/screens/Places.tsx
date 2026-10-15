@@ -46,6 +46,8 @@ export function ConnectionsScreen() {
             clear_api_key: data.get("clear_api_key") === "on",
             max_parallel: Number(data.get("max_parallel") || 1),
             max_tokens: Number(data.get("max_tokens") || 4096),
+            stall_seconds: Number(data.get("stall_seconds") || 45),
+            first_token_seconds: Number(data.get("first_token_seconds") || 120),
           };
           const request = editing
             ? api(`/api/endpoints/${editing.id}`, { method: "PATCH", json: body })
@@ -70,7 +72,13 @@ export function ConnectionsScreen() {
           <label className="block text-sm">Reply length <span className="text-muted">tokens, default 4096</span>
             <Input name="max_tokens" type="number" min={256} max={32768} required defaultValue={editing?.max_tokens || 4096} className="mt-1" />
           </label>
-          <p className="text-xs text-muted">EasyAgent sends each message to this address. Leave the key blank to keep the one already saved. At once is how many replies may use this connection together. Extra chats wait in line. Reply length stops a model that keeps generating.</p>
+          <label className="block text-sm">First token <span className="text-muted">seconds, default 120</span>
+            <Input name="first_token_seconds" type="number" min={5} max={600} required defaultValue={editing?.first_token_seconds || 120} className="mt-1" />
+          </label>
+          <label className="block text-sm">Silence between tokens <span className="text-muted">seconds, default 45</span>
+            <Input name="stall_seconds" type="number" min={5} max={600} required defaultValue={editing?.stall_seconds || 45} className="mt-1" />
+          </label>
+          <p className="text-xs text-muted">EasyAgent sends each message to this address. Leave the key blank to keep the one already saved. At once is how many replies may use this connection together. Extra chats wait in line. Reply length stops a model that keeps generating. The first token can take longer than the gap between later tokens.</p>
           {error ? <p className="text-sm text-danger" role="alert">{error}</p> : null}
           <div className="flex gap-2">
             <Button type="submit">Save</Button>

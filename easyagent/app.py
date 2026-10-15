@@ -149,6 +149,8 @@ def public_endpoint(endpoint: dict) -> dict:
         "model": endpoint.get("model") or None,
         "max_parallel": gate.clamp_parallel(endpoint.get("max_parallel")),
         "max_tokens": _public_max_tokens(endpoint),
+        "stall_seconds": _public_stall_seconds(endpoint),
+        "first_token_seconds": _public_first_token_seconds(endpoint),
         "n_ctx": clean_tokens(endpoint.get("n_ctx")),
         "created_at": endpoint.get("created_at"),
     }
@@ -322,6 +324,40 @@ def clean_max_tokens(value) -> int | None:
     return value
 
 
+def _public_stall_seconds(endpoint: dict) -> int:
+    from easyagent.generation import limits_from_endpoint
+
+    return int(limits_from_endpoint(endpoint).stall_seconds)
+
+
+def _public_first_token_seconds(endpoint: dict) -> int:
+    from easyagent.generation import limits_from_endpoint
+
+    return int(limits_from_endpoint(endpoint).first_token_seconds)
+
+
+def clean_stall_seconds(value) -> int | None:
+    """Silence between tokens. Blank keeps 45 seconds."""
+    if value is None or value == "":
+        return None
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise StoreError("Silence between tokens must be a whole number of seconds from 5 to 600.", 400)
+    if value < 5 or value > 600:
+        raise StoreError("Silence between tokens must be a whole number of seconds from 5 to 600.", 400)
+    return value
+
+
+def clean_first_token_seconds(value) -> int | None:
+    """How long to wait for the first token. Blank keeps 120 seconds."""
+    if value is None or value == "":
+        return None
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise StoreError("The wait for the first token must be a whole number of seconds from 5 to 600.", 400)
+    if value < 5 or value > 600:
+        raise StoreError("The wait for the first token must be a whole number of seconds from 5 to 600.", 400)
+    return value
+
+
 def clean_max_parallel(value) -> int:
     """How many replies may use this connection at once."""
     if isinstance(value, bool) or not isinstance(value, int):
@@ -350,6 +386,8 @@ class EndpointIn(BaseModel):
     model: str | None = None
     max_parallel: int | None = None
     max_tokens: int | None = None
+    stall_seconds: int | None = None
+    first_token_seconds: int | None = None
     n_ctx: int | None = None
 
 
@@ -362,6 +400,8 @@ class EndpointPatch(BaseModel):
     clear_api_key: bool = False
     max_parallel: int | None = None
     max_tokens: int | None = None
+    stall_seconds: int | None = None
+    first_token_seconds: int | None = None
     n_ctx: int | None = None
 
 
@@ -855,6 +895,8 @@ def create_app(data_dir: str | Path | None = None) -> FastAPI:
             max_parallel=1 if body.max_parallel is None else clean_max_parallel(body.max_parallel),
             n_ctx=clean_n_ctx(body.n_ctx) if "n_ctx" in body.model_fields_set else None,
             max_tokens=clean_max_tokens(body.max_tokens) if "max_tokens" in body.model_fields_set else None,
+            stall_seconds=clean_stall_seconds(body.stall_seconds) if "stall_seconds" in body.model_fields_set else None,
+            first_token_seconds=clean_first_token_seconds(body.first_token_seconds) if "first_token_seconds" in body.model_fields_set else None,
         )
         return public_endpoint(record)
 
@@ -877,6 +919,10 @@ def create_app(data_dir: str | Path | None = None) -> FastAPI:
             n_ctx_set="n_ctx" in fields,
             max_tokens=clean_max_tokens(body.max_tokens) if "max_tokens" in fields else None,
             max_tokens_set="max_tokens" in fields,
+            stall_seconds=clean_stall_seconds(body.stall_seconds) if "stall_seconds" in fields else None,
+            stall_seconds_set="stall_seconds" in fields,
+            first_token_seconds=clean_first_token_seconds(body.first_token_seconds) if "first_token_seconds" in fields else None,
+            first_token_seconds_set="first_token_seconds" in fields,
         )
         if _snapshot_bots(store) != bots_before:
             raise HTTPException(500, "Saving a connection changed a bot or a chat.")
@@ -1291,7 +1337,9 @@ def create_app(data_dir: str | Path | None = None) -> FastAPI:
     def create_schedule(bot_id: str, body: ScheduleIn):
         chats_before = _snapshot_chats(store, bot_id)
         rooms_before = _snapshot_rooms(store)
-        schedule = store.add_schedule(bot_id, _schedule_record(body))
+        record = _schedule_record(body)
+        _require_delivery_allowed(store, bot_id, record)
+        schedule = store.add_schedule(bot_id, record)
         if not _legacy_schedule(body):
             store.note_first_routine()
         if _snapshot_chats(store, bot_id) != chats_before or _snapshot_rooms(store) != rooms_before:
@@ -1631,6 +1679,7 @@ def create_app(data_dir: str | Path | None = None) -> FastAPI:
             chat["updated_at"] = now_iso()
             store.save_chat(chat)
         hold_for_send(store, bot_id, chat_id)
+        _force_clear_running(store, bot_id, chat_id, "you pressed Stop")
         if worker is None or worker.done():
             turn_mod.clear_busy(store, chat_id)
             turn_mod.slot_for(store, chat_id).user_stop = False
@@ -3783,6 +3832,9 @@ def _write_live(
     start: bool = False,
 ) -> dict | None:
     """Persist the running step. A locked chat file does not stop the reply."""
+    slot = turn_mod.slot_for(store, chat_id)
+    if status == "running" and (slot.user_stop or slot.sealed):
+        return None
     if not _due_live(store, chat_id, force=force or start):
         return None
     lock = getattr(store, "_lock", None)
@@ -3912,10 +3964,163 @@ def _drop_activity(chat: dict) -> None:
     chat["messages"] = messages
 
 
+WEDGE_TEXT = "This job was still marked running, but nothing was in flight, so I paused it. Resume it, or dismiss it."
+WEDGE_SECONDS = 60
+
+
+def _run_age_seconds(chat: dict) -> float:
+    from datetime import datetime, timezone
+
+    run = chat.get("run") if isinstance(chat.get("run"), dict) else {}
+    raw = str(run.get("last_activity_at") or run.get("started_at") or "")
+    if not raw:
+        return float(WEDGE_SECONDS)
+    try:
+        moment = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+    except ValueError:
+        return float(WEDGE_SECONDS)
+    if moment.tzinfo is None:
+        moment = moment.replace(tzinfo=timezone.utc)
+    return (datetime.now(timezone.utc) - moment).total_seconds()
+
+
+def _pause_wedged(store: Store, bot_id: str, chat_id: str) -> None:
+    """A run marked running with nothing in flight becomes resumable."""
+    from easyagent.plan import release_uncovered, show_queued_as_seen
+
+    try:
+        chat = store.get_chat(bot_id, chat_id)
+    except StoreError:
+        return
+    run = chat.get("run") if isinstance(chat.get("run"), dict) else {}
+    if run.get("status") != "running":
+        return
+    _drop_activity(chat)
+    messages = chat.setdefault("messages", [])
+    for message in messages:
+        if isinstance(message, dict) and message.get("role") == "assistant" and message.get("live"):
+            message["interrupted"] = True
+            message.pop("live", None)
+    if not any(
+        isinstance(item, dict) and item.get("kind") == "resume-offer" and item.get("content") == WEDGE_TEXT
+        for item in messages
+    ):
+        messages.append({
+            "id": new_id(),
+            "role": "assistant",
+            "kind": "resume-offer",
+            "content": WEDGE_TEXT,
+            "created_at": now_iso(),
+        })
+    release_uncovered(chat)
+    show_queued_as_seen(chat)
+    _apply_run(chat, status="paused", reason=WEDGE_TEXT, step="")
+    chat["updated_at"] = now_iso()
+    try:
+        _save_chat_final(store, chat)
+    except HTTPException:
+        _log.warning("Could not record that the idle run was paused.")
+        return
+    slot = turn_mod.slot_for(store, chat_id)
+    slot.deliver_queue = False
+    slot.sealed = True
+
+
+def _seal_wedged_run(store: Store, bot_id: str, chat_id: str, *, force: bool) -> None:
+    """Leave a defined state. A live model socket or command is left alone."""
+    if turn_mod.request_in_flight(store, chat_id):
+        return
+    try:
+        chat = store.get_chat(bot_id, chat_id)
+    except StoreError:
+        return
+    run = chat.get("run") if isinstance(chat.get("run"), dict) else {}
+    if run.get("status") != "running":
+        return
+    if not force:
+        from easyagent.safety import list_pending
+
+        if list_pending(bot_id):
+            return
+        if _run_age_seconds(chat) < WEDGE_SECONDS:
+            return
+    _pause_wedged(store, bot_id, chat_id)
+
+
+def _watch_wedged(store: Store) -> None:
+    """Running, quiet, and no request in flight becomes paused."""
+    try:
+        bots = store.list_bots()
+    except StoreError:
+        return
+    for bot in bots:
+        try:
+            chats = store.list_chats(bot["id"])
+        except StoreError:
+            continue
+        for summary in chats:
+            _seal_wedged_run(store, bot["id"], summary["id"], force=False)
+
+
+def _force_clear_running(store: Store, bot_id: str, chat_id: str, reason: str) -> None:
+    """Stop leaves the chat not running, even when the worker is already gone."""
+    try:
+        chat = store.get_chat(bot_id, chat_id)
+    except StoreError:
+        return
+    run = chat.get("run") if isinstance(chat.get("run"), dict) else {}
+    if run.get("status") != "running":
+        return
+    _settle_interrupted(store, bot_id, chat_id, reason)
+
+
+def _stored_resume_answer(messages: list, visible: str) -> dict | None:
+    """The answer already stored before "Picked up where it stopped.", if this reply repeats it.
+
+    The chat file refuses to drop a finished row. Skipping the second copy is what keeps one answer.
+    """
+    text = " ".join((visible or "").split())
+    if not text:
+        return None
+    note_at = None
+    for index, message in enumerate(messages):
+        if not isinstance(message, dict):
+            continue
+        content = str(message.get("content") or "")
+        if message.get("kind") == "resume-note" and "Picked up where it stopped" in content:
+            note_at = index
+    if note_at is None:
+        return None
+    found = None
+    for message in messages[:note_at]:
+        if (
+            isinstance(message, dict)
+            and message.get("role") == "assistant"
+            and message.get("kind") not in {"status", "pickup", "resume-note", "resume-offer", "activity", "connection"}
+            and " ".join(str(message.get("content") or "").split()) == text
+        ):
+            found = message
+    return found
+
+
+def _require_delivery_allowed(store: Store, bot_id: str, record: dict) -> None:
+    """A routine delivery chat has to be on this bot's bridge allow list before it is saved."""
+    kind = str(record.get("deliver") or "").strip().lower()
+    target = str(record.get("deliver_chat") or "").strip()
+    if kind not in {"telegram", "discord"} or not target:
+        return
+    from easyagent.bridges import admitted, bridge_for
+
+    label = "Discord" if kind == "discord" else "Telegram"
+    row = bridge_for(store, bot_id, kind)
+    if row is None or not admitted(row, target):
+        raise HTTPException(400, f"That chat is not on this bot's {label} allow list. The routine was not saved.")
+
+
 def _pause_for_runaway(store: Store, bot_id: str, chat_id: str) -> dict:
     """Stop this request. The job stays resumable and the queue still gets a turn."""
     from easyagent.generation import RUNAWAY_TEXT
-    from easyagent.plan import release_uncovered, requeue_unanswered
+    from easyagent.plan import release_uncovered, requeue_unanswered, show_queued_as_seen
 
     chat = store.get_chat(bot_id, chat_id)
     _drop_activity(chat)
@@ -3934,12 +4139,15 @@ def _pause_for_runaway(store: Store, bot_id: str, chat_id: str) -> dict:
     target.pop("live", None)
     target.pop("error", None)
     release_uncovered(chat)
+    show_queued_as_seen(chat)
     _apply_run(chat, status="paused", reason=RUNAWAY_TEXT, step="")
     chat["updated_at"] = now_iso()
     _save_chat_final(store, chat)
     requeue_unanswered(store, bot_id, chat_id)
     poke(store, "message")
-    turn_mod.slot_for(store, chat_id).deliver_queue = True
+    slot = turn_mod.slot_for(store, chat_id)
+    slot.deliver_queue = False
+    slot.sealed = True
     chat = store.get_chat(bot_id, chat_id)
     return {"reply": RUNAWAY_TEXT, "skills_saved": [], "chat": _public_chat(store, chat)}
 
@@ -4160,6 +4368,10 @@ async def _finish_turn(store: Store, bot_id: str, chat_id: str) -> None:
             hold_for_send(store, bot_id, chat_id)
             turn_mod.clear_busy(store, chat_id)
             slot.user_stop = False
+            _force_clear_running(store, bot_id, chat_id, "you pressed Stop")
+            return
+        if _run_paused(store, bot_id, chat_id) and not slot.deliver_queue:
+            turn_mod.clear_busy(store, chat_id)
             return
         waiting = _queue_waiting(store, bot_id, chat_id)
         if _FINISH_GAP is not None:
@@ -4169,6 +4381,9 @@ async def _finish_turn(store: Store, bot_id: str, chat_id: str) -> None:
             return
         turn_mod.slot_for(store, chat_id).deliver_queue = False
         turn_mod.clear_busy(store, chat_id)
+        _seal_wedged_run(store, bot_id, chat_id, force=True)
+        if _run_paused(store, bot_id, chat_id):
+            return
         if _queue_waiting(store, bot_id, chat_id) and turn_mod.try_begin(store, chat_id):
             _spawn_drain(store, bot_id, chat_id)
 
@@ -4582,6 +4797,7 @@ async def _supervise(store: Store, stop: asyncio.Event) -> None:
     while not stop.is_set():
         try:
             await kick(store)
+            _watch_wedged(store)
         except Exception as exc:
             _log.warning("Supervisor kick failed: %s", exc)
         try:
@@ -5102,8 +5318,13 @@ def _finish_reply(
         visible = "(empty reply)"
         blank_reply = True
     messages = chat.setdefault("messages", [])
+    already = _stored_resume_answer(messages, visible)
     replacing = bool(messages and messages[-1].get("live") and messages[-1].get("role") == "assistant")
-    if replacing:
+    if already is not None:
+        if replacing:
+            messages.pop()
+        message = already
+    elif replacing:
         message = messages[-1]
         message["content"] = visible
         message.pop("live", None)

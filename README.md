@@ -8,7 +8,7 @@ The pixel drawing is traced from [mascot-original.jpg](assets/mascot-original.jp
 
 EasyAgent is a free local agent harness for any OpenAI-compatible model. You run it on your own computer. It gives you multiple bots, real tools, markdown memory, and a goal, plan, build, and check loop. It does not include a model, an account, or a cloud copy of your chats.
 
-Version 0.3.29. [MIT license](LICENSE). Copyright Nathan / 1bitLabs.
+Version 0.3.30. [MIT license](LICENSE). Copyright Nathan / 1bitLabs.
 
 I built this for myself, and I'm sharing it free. It is the harness I wanted on my own machine: a few bots, the model I already run, and the files on that computer.
 
@@ -144,7 +144,7 @@ Each bot has its own MCP servers, under that bot's settings, in Connectors. The 
 
 ### Telegram and Discord
 
-A bridge is Telegram or Discord for your own account. Save one with `POST /api/bridges`: the kind (`telegram` or `discord`), a name, the bot, your user id, and the token. An empty allow list is refused. The token is sealed in `secrets.db`. The master key is in the OS keychain. The saved record stores that a token exists, not the token itself. Telegram is read by long poll. Discord connects as a bot to the gateway. A message from any other id is ignored and written to the bridge log. It does not enter the chat. The reply goes back to the person who wrote, through the same tools and Strict checks, and that turn does not mark the chat running. The model is told the bridge reaches you. Messaging anyone else waits for an approval card.
+A bridge is Telegram or Discord for your own account. Save one with `POST /api/bridges`: the kind (`telegram` or `discord`), a name, the bot, your user id, and the token. An empty allow list is refused. A routine can post its result to that bridge. `POST /api/bots/<id>/schedules` takes `deliver` of `telegram` or `discord` and `deliver_chat` set to one id on that bot's allow list. Any other chat is rejected with 400 and the routine is not saved. The send checks the allow list again. A chat that is not on the list is not sent. The token is sealed in `secrets.db`. The master key is in the OS keychain. The saved record stores that a token exists, not the token itself. Telegram is read by long poll. Discord connects as a bot to the gateway. A message from any other id is ignored and written to the bridge log. It does not enter the chat. The reply goes back to the person who wrote, through the same tools and Strict checks, and that turn does not mark the chat running. The model is told the bridge reaches you. Messaging anyone else waits for an approval card.
 
 ### Memory notes
 
@@ -240,7 +240,7 @@ A lesson, a nightly proposal, a playbook, or a note cannot turn the guardrails d
 6. React from the message itself when a reply is useful or wrong. You do not have to send a new message for that.
 7. For a page or a file, name the folder when you care where it goes. Otherwise it lands in the app-data folder above. The last line of a finished page names the title, the path, and that you can open it.
 8. Open the bot's settings for its name, connection, token budget, memory, schedules, and skills. Connections, rooms, and saved computers are their own screens.
-9. A schedule runs a saved prompt on a timer and appends the result to that bot's job log. It does not write a chat. A missed slot runs once on the next start. Older missed minutes are not replayed.
+9. A schedule runs a saved prompt on a timer and appends the result to that bot's job log. It does not write a chat. A missed slot runs once on the next start. Older missed minutes are not replayed. A routine can also post that result to Telegram or Discord, only to a chat on that bot's allow list. The connection waits 120 seconds for the first token and 45 seconds between tokens, unless that connection sets another wait. The first wait is never shorter than the gap between tokens.
 10. Tell me when arms one notice for a new message, or for a job that failed. It fires once.
 
 Removing a bot asks you to type its name. Only that bot's folder is deleted. There is no control that wipes every chat.

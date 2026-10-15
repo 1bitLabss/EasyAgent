@@ -361,7 +361,13 @@ def test_stall_guard_keeps_native_tool_call_ids(monkeypatch):
             return Context()
 
     monkeypatch.setattr(llm.httpx, "AsyncClient", SilentClient)
-    token = _limits.set(Limits(max_tokens=256, stall_seconds=0.05, wall_seconds=10, hard_seconds=20))
+    token = _limits.set(Limits(
+        max_tokens=256,
+        stall_seconds=0.05,
+        first_token_seconds=0.05,
+        wall_seconds=10,
+        hard_seconds=20,
+    ))
 
     async def stall():
         async for _piece in llm._stream_attempt(
@@ -376,6 +382,6 @@ def test_stall_guard_keeps_native_tool_call_ids(monkeypatch):
     try:
         with pytest.raises(GenerationLimit) as stalled:
             asyncio.run(stall())
-        assert stalled.value.reason == "stall"
+        assert stalled.value.reason == "first_token"
     finally:
         _limits.reset(token)

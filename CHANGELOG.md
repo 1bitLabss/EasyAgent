@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.3.30
+
+- A model request that is cut for length, silence, a repeated chunk, or the time limit leaves the job paused and resumable. Queued lines stay in the chat as Seen. The job does not stay running when nothing is in flight. Stop clears a running job even when the worker is already gone. If a job stays marked running with no request and no progress for 60 seconds, it is paused and the chat says so. A card waiting for approval is left alone.
+- Each connection can set how long to wait for the first token and how long to wait between tokens. The defaults are 120 seconds and 45 seconds. The first wait is never shorter than the gap between tokens.
+- After a restart, picking the job back up does not add a second copy of the answer that was already in the chat.
+- Saving a routine that posts to Telegram or Discord rejects a chat that is not on that bot's allow list. The routine is not saved.
+
 ## 0.3.29
 
 - A model request stops when it passes the reply length, when no tokens arrive for 45 seconds, when it runs past the time limit without progress, or when the same chunk repeats. The chat says "The model kept generating without finishing; stopped it. Try again or lower the length." The job stays resumable and queued messages are still delivered. The waiting line shows the elapsed time and the tokens so far. Each connection has a reply length, 4096 tokens unless you set another. The stall cap waits in the same task as the stream, so a native tool-call id is kept on Python 3.11 and 3.12.

@@ -15,6 +15,7 @@ RUNAWAY_TEXT = "The model kept generating without finishing; stopped it. Try aga
 
 DEFAULT_MAX_TOKENS = 4096
 DEFAULT_STALL_SECONDS = 45.0
+DEFAULT_FIRST_TOKEN_SECONDS = 120.0
 DEFAULT_WALL_SECONDS = 180.0
 DEFAULT_HARD_SECONDS = 480.0
 MIN_MAX_TOKENS = 256
@@ -36,6 +37,7 @@ class GenerationLimit(Exception):
 class Limits:
     max_tokens: int = DEFAULT_MAX_TOKENS
     stall_seconds: float = DEFAULT_STALL_SECONDS
+    first_token_seconds: float = DEFAULT_FIRST_TOKEN_SECONDS
     wall_seconds: float = DEFAULT_WALL_SECONDS
     hard_seconds: float = DEFAULT_HARD_SECONDS
 
@@ -70,12 +72,16 @@ def effective_max_tokens(endpoint: dict | None) -> int:
 def limits_from_endpoint(endpoint: dict | None) -> Limits:
     """Connection settings, or the defaults. A missing length is 4096."""
     source = endpoint if isinstance(endpoint, dict) else {}
-    stall = _whole(source.get("stall_seconds"), DEFAULT_STALL_SECONDS, 1.0, 600.0)
+    stall = _whole(source.get("stall_seconds"), DEFAULT_STALL_SECONDS, 5.0, 600.0)
+    first = _whole(source.get("first_token_seconds"), DEFAULT_FIRST_TOKEN_SECONDS, 5.0, 600.0)
+    if first < stall:
+        first = stall
     wall = _whole(source.get("wall_seconds"), DEFAULT_WALL_SECONDS, 5.0, 3600.0)
     hard = _whole(source.get("hard_seconds"), DEFAULT_HARD_SECONDS, wall, 7200.0)
     return Limits(
         max_tokens=effective_max_tokens(source),
         stall_seconds=stall,
+        first_token_seconds=first,
         wall_seconds=wall,
         hard_seconds=hard,
     )
@@ -110,6 +116,7 @@ class GenerationWatch:
         self.started = now
         self.last_token_at = now
         self.tokens = 0
+        self.saw_token = False
         self._last = ""
         self._same = 0
         self._buf = ""
@@ -119,6 +126,7 @@ class GenerationWatch:
         if piece:
             self.tokens += max(1, len(piece) // 4)
             self.last_token_at = now
+            self.saw_token = True
             self._repeat(piece)
         self._check(now)
 
@@ -134,9 +142,10 @@ class GenerationWatch:
         if elapsed >= limits.hard_seconds:
             raise GenerationLimit("hard")
         silent = now - self.last_token_at
-        if silent >= limits.stall_seconds:
-            raise GenerationLimit("stall")
-        if elapsed >= limits.wall_seconds and silent >= limits.stall_seconds:
+        quiet = limits.stall_seconds if self.saw_token else limits.first_token_seconds
+        if silent >= quiet:
+            raise GenerationLimit("stall" if self.saw_token else "first_token")
+        if elapsed >= limits.wall_seconds and silent >= limits.stall_seconds and self.saw_token:
             raise GenerationLimit("wall")
 
     def _repeat(self, piece: str) -> None:

@@ -556,6 +556,19 @@ def covers_line(user: dict, later: dict) -> bool:
     return gen > prior
 
 
+def show_queued_as_seen(chat: dict) -> int:
+    """The bot saw these lines. They stay in the queue file so a later turn can answer them."""
+    changed = 0
+    for message in chat.get("messages") or []:
+        if not isinstance(message, dict) or message.get("role") != "user":
+            continue
+        if message.get("chip") != "queued":
+            continue
+        message["chip"] = "seen"
+        changed += 1
+    return changed
+
+
 def release_uncovered(chat: dict) -> int:
     """Answered, before any real reply, goes back to Seen. The queue file stays."""
     messages = [item for item in chat.get("messages") or [] if isinstance(item, dict)]

@@ -580,6 +580,8 @@ class Store:
         endpoint_id: str | None = None,
         n_ctx: int | None = None,
         max_tokens: int | None = None,
+        stall_seconds: int | None = None,
+        first_token_seconds: int | None = None,
     ) -> dict:
         record = {
             "id": self._parse_id(endpoint_id) if endpoint_id else new_id(),
@@ -595,6 +597,10 @@ class Store:
             record["n_ctx"] = int(n_ctx)
         if max_tokens is not None:
             record["max_tokens"] = int(max_tokens)
+        if stall_seconds is not None:
+            record["stall_seconds"] = int(stall_seconds)
+        if first_token_seconds is not None:
+            record["first_token_seconds"] = int(first_token_seconds)
         has_key = self._store_endpoint_key(record["id"], api_key)
         record["has_api_key"] = has_key
         with self._lock:
@@ -636,6 +642,10 @@ class Store:
         n_ctx_set: bool = False,
         max_tokens: int | None = None,
         max_tokens_set: bool = False,
+        stall_seconds: int | None = None,
+        stall_seconds_set: bool = False,
+        first_token_seconds: int | None = None,
+        first_token_seconds_set: bool = False,
     ) -> dict:
         """Change one saved connection. Bot directories and chats are not opened."""
         endpoint_id = self._parse_id(endpoint_id)
@@ -669,6 +679,16 @@ class Store:
                     match.pop("max_tokens", None)
                 else:
                     match["max_tokens"] = int(max_tokens)
+            if stall_seconds_set:
+                if stall_seconds is None:
+                    match.pop("stall_seconds", None)
+                else:
+                    match["stall_seconds"] = int(stall_seconds)
+            if first_token_seconds_set:
+                if first_token_seconds is None:
+                    match.pop("first_token_seconds", None)
+                else:
+                    match["first_token_seconds"] = int(first_token_seconds)
             match.pop("detected_n_ctx", None)
             atomic_write_json(self.endpoints_path, endpoints)
         return self._hydrate_endpoint(match)

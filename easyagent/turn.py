@@ -42,6 +42,7 @@ class Slot:
         self.redirect = False
         self.drain_chains = 0
         self.deliver_queue = False
+        self.sealed = False
 
 
 _GUARD = threading.Lock()
@@ -173,6 +174,7 @@ def bind(store, chat_id: str, bot_id: str = "", *, resume: bool = False) -> Slot
     stopped = False if resume else slot.user_stop
     slot.user_stop = False
     slot.redirect = False
+    slot.sealed = False
     slot.cancel = asyncio.Event()
     slot.client = None
     slot.proc = None
@@ -221,6 +223,15 @@ def _forget_finished(slot: Slot) -> asyncio.Task | None:
         slot.busy = False
         return None
     return worker
+
+
+def request_in_flight(store, chat_id: str) -> bool:
+    """A model socket or a command is open. A chat marked running is not that."""
+    slot = slot_for(store, chat_id)
+    if slot.client is not None:
+        return True
+    proc = slot.proc
+    return proc is not None and proc.poll() is None
 
 
 def is_busy(store, chat_id: str) -> bool:

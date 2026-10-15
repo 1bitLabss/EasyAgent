@@ -662,9 +662,10 @@ export function SettingsScreen() {
             </select>
           </label>
           <label className="flex items-center gap-2 text-sm">
-            <input name="auto_resume" type="checkbox" defaultChecked={Boolean(bot.auto_resume)} />
-            Resume a job after EasyAgent restarts
+            <input name="auto_resume" type="checkbox" defaultChecked={bot.auto_resume !== false} />
+            Pick up an interrupted job after EasyAgent restarts
           </label>
+          <Note>On unless you turn it off. The chat says “Picked up where it stopped.”</Note>
           <Note>EasyAgent uses your connected model to review and learn — no extra model needed.</Note>
           <fieldset>
             <legend className="text-sm">Face color</legend>
@@ -895,6 +896,7 @@ export function SettingsScreen() {
                       <strong>{item.name || item.prompt}</strong>
                       {item.paused ? " · paused" : ""}
                       {item.quiet ? " · quiet" : ""}
+                      {item.deliver ? ` · ${item.deliver}` : ""}
                     </span>
                     <span className="flex shrink-0 gap-2">
                       <button type="button" className="text-xs underline" onClick={() => void api(`/api/bots/${botId}/schedules/${item.id}/run`, { method: "POST" }).then(() => queryClient.invalidateQueries({ queryKey: ["schedules", botId] })).then(() => queryClient.invalidateQueries({ queryKey: ["jobs", botId] })).then(() => queryClient.invalidateQueries({ queryKey: ["unread"] })).catch((reason: Error) => setError(reason.message))}>Run now</button>
@@ -1009,7 +1011,13 @@ function RoutineForm({ botId, onError }: { botId: string; onError: (message: str
         const prompt = String(data.get("prompt") || "").trim();
         const timezone = String(data.get("timezone") || "").trim();
         const quiet = data.get("quiet") === "on";
+        const deliver = String(data.get("deliver") || "").trim();
+        const deliverChat = String(data.get("deliver_chat") || "").trim();
         const body: Record<string, unknown> = { name, prompt, quiet };
+        if (deliver && deliver !== "chat") {
+          body.deliver = deliver;
+          body.deliver_chat = deliverChat;
+        }
         if (timezone) body.timezone = timezone;
         if (when === "weekdays") body.weekdays = String(data.get("time") || "8:00 AM");
         else if (when === "daily") body.daily = String(data.get("time") || "8:00 AM");
@@ -1041,6 +1049,14 @@ function RoutineForm({ botId, onError }: { botId: string; onError: (message: str
           <input name="quiet" type="checkbox" />
           Quiet. “Nothing new” does not post or light the unread dot.
         </label>
+        <label className="block text-sm">Also post the result
+          <select name="deliver" className="mt-1 h-9 w-full rounded-md border border-border bg-card px-2" defaultValue="chat">
+            <option value="chat">In this chat only</option>
+            <option value="telegram">Telegram, allowlisted chat</option>
+            <option value="discord">Discord, allowlisted chat</option>
+          </select>
+        </label>
+        <Input name="deliver_chat" maxLength={40} placeholder="Allowlisted chat id, if you post out" />
         <Note>The line under a saved routine is the next run in your local time. A gap under 5 minutes is refused.</Note>
         <div className="flex gap-2">
           <Button type="submit" size="sm">Save routine</Button>

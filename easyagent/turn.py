@@ -41,6 +41,7 @@ class Slot:
         self.resend_id = ""
         self.redirect = False
         self.drain_chains = 0
+        self.deliver_queue = False
 
 
 _GUARD = threading.Lock()

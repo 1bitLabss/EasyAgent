@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.3.29
+
+- A model request stops when it passes the reply length, when no tokens arrive for 45 seconds, when it runs past the time limit without progress, or when the same chunk repeats. The chat says "The model kept generating without finishing; stopped it. Try again or lower the length." The job stays resumable and queued messages are still delivered. The waiting line shows the elapsed time and the tokens so far. Each connection has a reply length, 4096 tokens unless you set another. The stall cap waits in the same task as the stream, so a native tool-call id is kept on Python 3.11 and 3.12.
+- After Stop, a message the bot had only seen reads Seen until a real assistant reply covers it. It does not read Answered before that reply.
+- Resume right after a restart no longer fails because the chat was still marked running. EasyAgent picks up an interrupted job on its own unless that bot turns it off. The chat says "Picked up where it stopped."
+- A routine can post its result to Telegram or Discord, only to a chat on that bot's bridge allowlist. A missing bridge or a chat that is not allowlisted is not sent, and the chat says so. A send that fails is tried once more, then the chat says it was not sent.
+
 ## 0.3.28
 
 - An inline interpreter that deletes a Windows path is blocked. The check that an outside folder was not touched accepts that block: the folder is still there and nothing was approved. On Linux and macOS those same commands still wait on a card. A relative path stays a card on every system.

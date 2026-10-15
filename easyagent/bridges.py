@@ -513,6 +513,41 @@ async def _lane_holding(store: Store, bot_id: str) -> bool:
     return lane_busy(str(endpoint.get("id") or ""))
 
 
+class BridgeDenied(Exception):
+    """This chat is not on the bridge allow list, or the bridge is not configured."""
+
+
+def bridge_for(store: Store, bot_id: str, kind: str) -> dict | None:
+    """This bot's enabled bridge of one kind. A stranger's bridge is not used."""
+    for row in list_records(store):
+        if row.get("enabled") is False:
+            continue
+        if str(row.get("bot_id") or "") != str(bot_id or ""):
+            continue
+        if str(row.get("kind") or "") != kind:
+            continue
+        return row
+    return None
+
+
+async def post_allowlisted(store: Store, row: dict, recipient: str, text: str) -> None:
+    """Send only to an allowlisted chat. Anything else is refused before the network."""
+    target = str(recipient or "").strip()
+    if not admitted(row, target):
+        raise BridgeDenied("not allowlisted")
+    body = scrub(text or "", store).strip()
+    if not body:
+        raise BridgeDenied("empty")
+    token = get_secret(secret_account(row["id"]), store)
+    if not token:
+        raise RuntimeError("no token")
+    if row.get("kind") == "discord":
+        await discord_send(token, target, body)
+    else:
+        await telegram_send(token, target, body)
+    log_event(store, row.get("kind") or "", target, "sent")
+
+
 async def deliver(store: Store, request, bot_id: str | None = None) -> str:
     row = find(store, getattr(request, "path", "") or "", bot_id)
     if row is None:

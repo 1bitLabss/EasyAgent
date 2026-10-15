@@ -6552,8 +6552,13 @@ async def run_turn(
         return sum(1 for item in narration_hits if _near_line(item, spoken))
 
     while True:
-        if not turn_mod.take_redirect():
+        redirected = turn_mod.take_redirect()
+        if not redirected:
             turn_mod.raise_if_cancelled()
+        elif store is not None and bot_id and chat_id:
+            from easyagent.plan import note_new_generation
+
+            note_new_generation(store, bot_id, chat_id)
         if store is not None and bot_id and chat_id:
             from easyagent.plan import steer_into
 

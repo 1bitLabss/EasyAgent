@@ -324,6 +324,16 @@
               <input id="schedule-zone" placeholder="Local time, or America/Chicago" />
             </label>
             <label class="check-line"><input id="schedule-quiet" type="checkbox" /> Quiet. Nothing new does not post.</label>
+            <label>Also post the result
+              <select id="schedule-deliver">
+                <option value="chat">In this chat only</option>
+                <option value="telegram">Telegram, allowlisted chat</option>
+                <option value="discord">Discord, allowlisted chat</option>
+              </select>
+            </label>
+            <label>Allowlisted chat id
+              <input id="schedule-deliver-chat" maxlength="40" placeholder="Only if you post out" />
+            </label>
             <p class="form-note">The saved line is the next run in your local time. A gap under 5 minutes is refused. You can also ask in the chat; that waits for a confirm card.</p>
             <div class="form-actions">
               <button type="submit">Save routine</button>

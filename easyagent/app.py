@@ -148,6 +148,7 @@ def public_endpoint(endpoint: dict) -> dict:
         "has_api_key": bool(endpoint.get("has_api_key")) or bool(endpoint.get("api_key")),
         "model": endpoint.get("model") or None,
         "max_parallel": gate.clamp_parallel(endpoint.get("max_parallel")),
+        "max_tokens": _public_max_tokens(endpoint),
         "n_ctx": clean_tokens(endpoint.get("n_ctx")),
         "created_at": endpoint.get("created_at"),
     }
@@ -204,7 +205,7 @@ def public_bot(store: Store, bot: dict) -> dict:
         "situation": bot.get("situation") is True,
         "situation_title": bot.get("situation_title") is True,
         "busy_input": bot.get("busy_input") or "interrupt",
-        "auto_resume": bot.get("auto_resume") is True,
+        "auto_resume": bot.get("auto_resume") is not False,
     }
 
 
@@ -304,6 +305,23 @@ def clean_n_ctx(value) -> int | None:
     return cleaned
 
 
+def _public_max_tokens(endpoint: dict) -> int:
+    from easyagent.generation import effective_max_tokens
+
+    return effective_max_tokens(endpoint)
+
+
+def clean_max_tokens(value) -> int | None:
+    """How long one reply may run. Blank keeps the default."""
+    if value is None or value == "":
+        return None
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise StoreError("Reply length must be a whole number from 256 to 32768.", 400)
+    if value < 256 or value > 32768:
+        raise StoreError("Reply length must be a whole number from 256 to 32768.", 400)
+    return value
+
+
 def clean_max_parallel(value) -> int:
     """How many replies may use this connection at once."""
     if isinstance(value, bool) or not isinstance(value, int):
@@ -331,6 +349,7 @@ class EndpointIn(BaseModel):
     api_key: str | None = None
     model: str | None = None
     max_parallel: int | None = None
+    max_tokens: int | None = None
     n_ctx: int | None = None
 
 
@@ -342,6 +361,7 @@ class EndpointPatch(BaseModel):
     model: str | None = None
     clear_api_key: bool = False
     max_parallel: int | None = None
+    max_tokens: int | None = None
     n_ctx: int | None = None
 
 
@@ -584,6 +604,8 @@ class ScheduleIn(BaseModel):
     weekly_time: str | None = None
     once: str | None = None
     preset: str | None = None
+    deliver: str | None = None
+    deliver_chat: str | None = None
 
 
 class SchedulePauseIn(BaseModel):
@@ -832,6 +854,7 @@ def create_app(data_dir: str | Path | None = None) -> FastAPI:
             model=clean_model(body.model),
             max_parallel=1 if body.max_parallel is None else clean_max_parallel(body.max_parallel),
             n_ctx=clean_n_ctx(body.n_ctx) if "n_ctx" in body.model_fields_set else None,
+            max_tokens=clean_max_tokens(body.max_tokens) if "max_tokens" in body.model_fields_set else None,
         )
         return public_endpoint(record)
 
@@ -852,6 +875,8 @@ def create_app(data_dir: str | Path | None = None) -> FastAPI:
             max_parallel_set="max_parallel" in fields and body.max_parallel is not None,
             n_ctx=clean_n_ctx(body.n_ctx) if "n_ctx" in fields else None,
             n_ctx_set="n_ctx" in fields,
+            max_tokens=clean_max_tokens(body.max_tokens) if "max_tokens" in fields else None,
+            max_tokens_set="max_tokens" in fields,
         )
         if _snapshot_bots(store) != bots_before:
             raise HTTPException(500, "Saving a connection changed a bot or a chat.")
@@ -1596,8 +1621,15 @@ def create_app(data_dir: str | Path | None = None) -> FastAPI:
         if worker is not None and not worker.done():
             with suppress(asyncio.TimeoutError):
                 await asyncio.wait_for(asyncio.shield(worker), timeout=8)
-        from easyagent.plan import hold_for_send
+        from easyagent.plan import hold_for_send, release_uncovered
 
+        chat = store.get_chat(bot_id, chat_id)
+        for message in chat.get("messages") or []:
+            if isinstance(message, dict) and message.get("role") == "assistant" and message.get("live"):
+                message["interrupted"] = True
+        if release_uncovered(chat):
+            chat["updated_at"] = now_iso()
+            store.save_chat(chat)
         hold_for_send(store, bot_id, chat_id)
         if worker is None or worker.done():
             turn_mod.clear_busy(store, chat_id)
@@ -1699,8 +1731,9 @@ def create_app(data_dir: str | Path | None = None) -> FastAPI:
         chat = store.get_chat(bot_id, chat_id)
         if not _can_resume_job(chat):
             raise HTTPException(400, "This chat is not waiting to resume.")
-        if not turn_mod.try_begin(store, chat_id):
-            raise HTTPException(409, "This job is still running. Stop is what cancels it.")
+        claim = await _claim_for_resume(store, chat_id)
+        if claim == "owned":
+            return _public_chat(store, store.get_chat(bot_id, chat_id))
         from easyagent.plan import undismiss_plan
         from easyagent.yolo import clear as clear_yolo
 
@@ -3306,6 +3339,9 @@ async def _complete_for_chat(store: Store, bot_id: str, chat: dict) -> tuple[str
     await _refresh_window(store, bot, endpoint)
     endpoint, messages = _turn_messages(store, bot_id, chat)
     conn = gate.bind_connection(endpoint, bot.get("name") or "")
+    from easyagent.generation import bind_limits, reset_limits
+
+    length = bind_limits(endpoint)
     try:
         settled = await complete_with_tools(
             base_url=endpoint["base_url"],
@@ -3317,6 +3353,7 @@ async def _complete_for_chat(store: Store, bot_id: str, chat: dict) -> tuple[str
             chat_id=chat.get("id"),
         )
     finally:
+        reset_limits(length)
         gate.reset_connection(conn)
     visible, skills = extract_skills(settled.text)
     saved: list[str] = []
@@ -3875,6 +3912,38 @@ def _drop_activity(chat: dict) -> None:
     chat["messages"] = messages
 
 
+def _pause_for_runaway(store: Store, bot_id: str, chat_id: str) -> dict:
+    """Stop this request. The job stays resumable and the queue still gets a turn."""
+    from easyagent.generation import RUNAWAY_TEXT
+    from easyagent.plan import release_uncovered, requeue_unanswered
+
+    chat = store.get_chat(bot_id, chat_id)
+    _drop_activity(chat)
+    messages = chat.setdefault("messages", [])
+    target = None
+    for message in reversed(messages):
+        if isinstance(message, dict) and message.get("role") == "assistant" and message.get("live"):
+            target = message
+            break
+    if target is None:
+        target = {"id": new_id(), "role": "assistant", "created_at": now_iso()}
+        messages.append(target)
+    target["content"] = RUNAWAY_TEXT
+    target["kind"] = "resume-offer"
+    target["interrupted"] = True
+    target.pop("live", None)
+    target.pop("error", None)
+    release_uncovered(chat)
+    _apply_run(chat, status="paused", reason=RUNAWAY_TEXT, step="")
+    chat["updated_at"] = now_iso()
+    _save_chat_final(store, chat)
+    requeue_unanswered(store, bot_id, chat_id)
+    poke(store, "message")
+    turn_mod.slot_for(store, chat_id).deliver_queue = True
+    chat = store.get_chat(bot_id, chat_id)
+    return {"reply": RUNAWAY_TEXT, "skills_saved": [], "chat": _public_chat(store, chat)}
+
+
 def _pause_for_repeat(store: Store, bot_id: str, chat_id: str, text: str) -> dict:
     """Stop a run that repeated itself. One harness line, and Resume."""
     from easyagent.tools import LOOP_TEXT
@@ -4000,6 +4069,32 @@ def _overlay_queue(store: Store, chat: dict, public: dict) -> None:
         public["message_count"] = int(public.get("message_count") or 0) + added
 
 
+async def _claim_for_resume(store: Store, chat_id: str) -> str:
+    """``ready`` when this call owns the turn. ``owned`` when a live worker already does.
+
+    Resume right after a restart can meet a stale busy flag, or the auto-resume
+    turn that just claimed the chat. A live worker is not a 409. A flag with no
+    worker is cleared.
+    """
+    for _ in range(8):
+        if turn_mod.try_begin(store, chat_id):
+            return "ready"
+        worker = turn_mod.current_worker(store, chat_id)
+        if worker is not None and not worker.done():
+            return "owned"
+        await asyncio.sleep(0.05)
+    worker = turn_mod.current_worker(store, chat_id)
+    if worker is not None and not worker.done():
+        return "owned"
+    slot = turn_mod.slot_for(store, chat_id)
+    slot.busy = False
+    if slot.worker is not None and slot.worker.done():
+        slot.worker = None
+    if turn_mod.try_begin(store, chat_id):
+        return "ready"
+    return "owned"
+
+
 def _can_resume_job(chat: dict) -> bool:
     run = chat.get("run") if isinstance(chat.get("run"), dict) else {}
     if run.get("status") == "paused":
@@ -4061,6 +4156,7 @@ async def _finish_turn(store: Store, bot_id: str, chat_id: str) -> None:
         if slot.user_stop:
             from easyagent.plan import hold_for_send
 
+            slot.deliver_queue = False
             hold_for_send(store, bot_id, chat_id)
             turn_mod.clear_busy(store, chat_id)
             slot.user_stop = False
@@ -4071,6 +4167,7 @@ async def _finish_turn(store: Store, bot_id: str, chat_id: str) -> None:
         if waiting or _queue_waiting(store, bot_id, chat_id):
             _spawn_drain(store, bot_id, chat_id)
             return
+        turn_mod.slot_for(store, chat_id).deliver_queue = False
         turn_mod.clear_busy(store, chat_id)
         if _queue_waiting(store, bot_id, chat_id) and turn_mod.try_begin(store, chat_id):
             _spawn_drain(store, bot_id, chat_id)
@@ -4167,6 +4264,13 @@ def _take_follow(store: Store, chat_id: str) -> bool:
     return True
 
 
+def _hold_drain(store: Store, bot_id: str, chat_id: str) -> bool:
+    """A paused job waits, except the runaway stop that still owes the queue a turn."""
+    if not _run_paused(store, bot_id, chat_id):
+        return False
+    return not turn_mod.slot_for(store, chat_id).deliver_queue
+
+
 def _run_paused(store: Store, bot_id: str, chat_id: str) -> bool:
     try:
         chat = store.get_chat(bot_id, chat_id)
@@ -4180,7 +4284,7 @@ async def _continue_queued(store: Store, bot_id: str, chat_id: str):
     from easyagent.plan import pop_item, steer_into
 
     while True:
-        if turn_mod.cancelled() or _follow_capped(store, chat_id) or _run_paused(store, bot_id, chat_id):
+        if turn_mod.cancelled() or _follow_capped(store, chat_id) or _hold_drain(store, bot_id, chat_id):
             return
         try:
             bot = store.get_bot(bot_id)
@@ -4216,7 +4320,7 @@ async def _drain_queued_json(store: Store, bot_id: str, chat_id: str) -> dict | 
 
     last = None
     while True:
-        if turn_mod.cancelled() or _follow_capped(store, chat_id) or _run_paused(store, bot_id, chat_id):
+        if turn_mod.cancelled() or _follow_capped(store, chat_id) or _hold_drain(store, bot_id, chat_id):
             break
         try:
             bot = store.get_bot(bot_id)
@@ -4264,7 +4368,7 @@ async def _deliver_queued_first(store: Store, bot_id: str, chat_id: str) -> None
     release_hold_for_send(store, bot_id, chat_id)
     delivered = 0
     while delivered < QUEUE_CAP and queued_items(store, bot_id, chat_id):
-        if turn_mod.cancelled() or _run_paused(store, bot_id, chat_id):
+        if turn_mod.cancelled() or _hold_drain(store, bot_id, chat_id):
             return
         before = len(queued_items(store, bot_id, chat_id))
         turn_mod.slot_for(store, chat_id).follow_chain = 0
@@ -4296,13 +4400,13 @@ def _pause_for_resume(store: Store, bot_id: str, chat_id: str) -> None:
     plan = load_plan(store, bot_id, chat_id)
     index, total, label = progress(plan)
     run = dict(chat.get("run") or {})
-    if bot.get("auto_resume"):
+    if _auto_resume_on(bot):
         if total and index:
-            text = f"Resuming after restart at step {index} of {total}: {label}."
+            text = f"Picked up where it stopped. Step {index} of {total}: {label}."
         elif total:
-            text = f"Resuming after restart. The checklist still has {total} steps."
+            text = f"Picked up where it stopped. The checklist still has {total} steps."
         else:
-            text = "Resuming after restart."
+            text = "Picked up where it stopped."
         kind = "resume-note"
         chat["resume_now"] = True
     else:
@@ -4339,14 +4443,19 @@ def _pause_for_resume(store: Store, bot_id: str, chat_id: str) -> None:
         _log.warning("Could not record that the job can resume.")
 
 
+def _auto_resume_on(bot: dict | None) -> bool:
+    """On unless this bot was turned off. A missing key is on."""
+    return isinstance(bot, dict) and bot.get("auto_resume") is not False
+
+
 async def _kick_auto_resume(store: Store) -> None:
-    """Opt-in only. A fresh run starts at the saved step. Cards are not restored."""
+    """Default on. A fresh run starts at the saved step. Cards are not restored."""
     try:
         bots = store.list_bots()
     except StoreError:
         return
     for bot in bots:
-        if not bot.get("auto_resume"):
+        if not _auto_resume_on(bot):
             continue
         try:
             chats = store.list_chats(bot["id"])
@@ -4548,6 +4657,7 @@ def _settle_interrupted(store: Store, bot_id: str, chat_id: str, reason: str = "
             continue
         if not (message.get("content") or "").strip():
             message["content"] = line
+        message["interrupted"] = True
         message.pop("live", None)
         message.pop("error", None)
         changed = True
@@ -4561,6 +4671,9 @@ def _settle_interrupted(store: Store, bot_id: str, chat_id: str, reason: str = "
             }
         )
         changed = True
+    from easyagent.plan import release_uncovered
+
+    release_uncovered(chat)
     if not changed:
         if (chat.get("run") or {}).get("status") == "running":
             _apply_run(chat, status="stopped", reason=reason, step="")
@@ -5108,6 +5221,8 @@ def _sse_stopped(store: Store, bot_id: str, chat_id: str, detail: str) -> str:
 
 
 async def _reply_json(store: Store, bot_id: str, chat_id: str, *, continue_run: bool = False) -> dict:
+    from easyagent.generation import GenerationLimit
+
     chat = store.get_chat(bot_id, chat_id)
     await _propose_if_corrected(store, bot_id, chat)
     _write_live(store, bot_id, chat_id, step="Waiting on model", start=not continue_run, force=True)
@@ -5122,6 +5237,8 @@ async def _reply_json(store: Store, bot_id: str, chat_id: str, *, continue_run: 
         return _append_error(store, bot_id, chat_id, str(exc))
     except ToolError as exc:
         return _append_error(store, bot_id, chat_id, str(exc))
+    except GenerationLimit:
+        return _pause_for_runaway(store, bot_id, chat_id)
     return await _finish_and_maybe_ask(
         store,
         bot_id,
@@ -5159,6 +5276,9 @@ async def _stream_reply(
         yield _sse({"type": "run", "run": opened})
     yield _sse({"type": "status", "text": "Waiting on model"})
     conn = gate.bind_connection(endpoint, bot.get("name") or "")
+    from easyagent.generation import GenerationLimit, bind_limits, reset_limits
+
+    length = bind_limits(endpoint)
     try:
         final = None
         choices: list[str] = []
@@ -5330,6 +5450,10 @@ async def _stream_reply(
                 pass
         if emit_done:
             yield _sse({"type": "done", "chat": result["chat"]})
+    except GenerationLimit:
+        saved = _pause_for_runaway(store, bot_id, chat_id)
+        yield _sse({"type": "done", "chat": saved["chat"]})
+        return
     except llm.ProviderError as exc:
         if turn_mod.cancelled():
             reason = turn_mod.cancel_reason() or "you pressed Stop"
@@ -5370,6 +5494,7 @@ async def _stream_reply(
         _settle_interrupted(store, bot_id, chat_id, reason)
         yield _sse_stopped(store, bot_id, chat_id, _stopped_text(reason))
     finally:
+        reset_limits(length)
         gate.reset_connection(conn)
         if turn_mod.cancelled():
             _settle_interrupted(store, bot_id, chat_id, turn_mod.cancel_reason() or "you pressed Stop")

@@ -5,6 +5,7 @@ export type Endpoint = {
   has_api_key: boolean;
   model: string | null;
   max_parallel: number;
+  max_tokens?: number;
 };
 
 export type Bot = {
@@ -169,6 +170,8 @@ export type Schedule = {
   timezone?: string;
   preview?: string;
   label?: string;
+  deliver?: string;
+  deliver_chat?: string;
 };
 
 export type Job = {

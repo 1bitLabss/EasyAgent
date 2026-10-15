@@ -655,6 +655,7 @@ def _completion_payload(
     grammar: str | None = None,
     tools: bool = True,
     parallel_tool_calls: bool | None = None,
+    max_tokens: int | None = None,
 ) -> dict:
     """A schema or a grammar never rides along with the tool list. llama.cpp rejects that pair."""
     payload: dict = {"messages": messages}
@@ -673,6 +674,8 @@ def _completion_payload(
         }
     if grammar:
         payload["grammar"] = grammar
+    if max_tokens:
+        payload["max_tokens"] = int(max_tokens)
     return payload
 
 
@@ -1006,6 +1009,8 @@ async def _complete_attempt(
     _native_calls.set(None)
     url = base_url.rstrip("/") + "/chat/completions"
     sent_flag = parallel_tool_calls is False
+    from easyagent.generation import current_limits
+
     payload = _completion_payload(
         messages,
         model,
@@ -1014,6 +1019,7 @@ async def _complete_attempt(
         grammar=grammar,
         tools=tools,
         parallel_tool_calls=parallel_tool_calls,
+        max_tokens=current_limits().max_tokens,
     )
     headers = {"Content-Type": "application/json"}
     if api_key:
@@ -1465,15 +1471,20 @@ async def _stream_attempt(
     parallel_tool_calls: bool | None = None,
 ) -> AsyncIterator[str]:
     """One streaming POST. A pause after the headers is not a failure."""
+    from easyagent.generation import GenerationLimit, GenerationWatch, current_limits
+
     started = time.perf_counter()
     url = base_url.rstrip("/") + "/chat/completions"
     sent_flag = parallel_tool_calls is False
+    limits = current_limits()
     payload = _completion_payload(
         messages,
         model,
         stream=True,
         parallel_tool_calls=parallel_tool_calls,
+        max_tokens=limits.max_tokens,
     )
+    watch = GenerationWatch(limits)
     headers = {"Content-Type": "application/json"}
     if api_key:
         headers["Authorization"] = f"Bearer {api_key}"
@@ -1498,11 +1509,29 @@ async def _stream_attempt(
                     raise _ToolParseAgain()
                 detail = full[:300]
                 raise ProviderError(f"{response.status_code} from {base_url}: {detail}")
-            async for piece in _iter_completion_body(response, started=started, messages=messages):
+            body = _iter_completion_body(response, started=started, messages=messages).__aiter__()
+            while True:
+                try:
+                    # Stay in this task. Python 3.11's wait_for copies the context
+                    # into another task, so tool-call ids set while reading are lost.
+                    async with asyncio.timeout(watch.limits.stall_seconds):
+                        piece = await body.__anext__()
+                except StopAsyncIteration:
+                    break
+                except TimeoutError as exc:
+                    closer = getattr(body, "aclose", None)
+                    if closer is not None:
+                        await closer()
+                    raise GenerationLimit("stall") from exc
+                except GenerationLimit:
+                    raise
+                watch.observe(piece or "")
                 turn_mod.raise_if_cancelled()
                 if piece:
                     yielded = True
                     yield piece
+        except GenerationLimit:
+            raise
         except (httpx.HTTPError, asyncio.TimeoutError) as exc:
             _raise_transport(exc, base_url)
         finally:

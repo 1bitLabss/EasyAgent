@@ -110,6 +110,13 @@ const MessageRow = memo(function MessageRow({
   const setScreen = useApp((state) => state.setScreen);
   if (hideWhileSending(message, sending)) return null;
   if (message.about === "activity") return null;
+  if (message.kind === "resume-note" && (message.content || "").includes("Picked up where it stopped")) {
+    return (
+      <li className="message-row" data-kind="resume-note">
+        <p className="sys-line" data-testid="pickup-card">{message.content}</p>
+      </li>
+    );
+  }
   if (message.kind === "status" || message.kind === "pickup") {
     return (
       <li className="message-row" data-kind={message.kind}>

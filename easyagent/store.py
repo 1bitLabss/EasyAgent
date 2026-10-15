@@ -579,6 +579,7 @@ class Store:
         max_parallel: int = 1,
         endpoint_id: str | None = None,
         n_ctx: int | None = None,
+        max_tokens: int | None = None,
     ) -> dict:
         record = {
             "id": self._parse_id(endpoint_id) if endpoint_id else new_id(),
@@ -592,6 +593,8 @@ class Store:
         }
         if n_ctx is not None:
             record["n_ctx"] = int(n_ctx)
+        if max_tokens is not None:
+            record["max_tokens"] = int(max_tokens)
         has_key = self._store_endpoint_key(record["id"], api_key)
         record["has_api_key"] = has_key
         with self._lock:
@@ -631,6 +634,8 @@ class Store:
         max_parallel_set: bool = False,
         n_ctx: int | None = None,
         n_ctx_set: bool = False,
+        max_tokens: int | None = None,
+        max_tokens_set: bool = False,
     ) -> dict:
         """Change one saved connection. Bot directories and chats are not opened."""
         endpoint_id = self._parse_id(endpoint_id)
@@ -659,6 +664,11 @@ class Store:
                     match.pop("n_ctx", None)
                 else:
                     match["n_ctx"] = int(n_ctx)
+            if max_tokens_set:
+                if max_tokens is None:
+                    match.pop("max_tokens", None)
+                else:
+                    match["max_tokens"] = int(max_tokens)
             match.pop("detected_n_ctx", None)
             atomic_write_json(self.endpoints_path, endpoints)
         return self._hydrate_endpoint(match)
@@ -951,10 +961,7 @@ class Store:
             else:
                 bot["busy_input"] = choice
         if auto_resume_set:
-            if auto_resume:
-                bot["auto_resume"] = True
-            else:
-                bot.pop("auto_resume", None)
+            bot["auto_resume"] = bool(auto_resume)
         if workspace_set and workspace is not None:
             from easyagent.workspace import assign_workspace
 

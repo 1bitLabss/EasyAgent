@@ -45,6 +45,7 @@ export function ConnectionsScreen() {
             model: String(data.get("model") || ""),
             clear_api_key: data.get("clear_api_key") === "on",
             max_parallel: Number(data.get("max_parallel") || 1),
+            max_tokens: Number(data.get("max_tokens") || 4096),
           };
           const request = editing
             ? api(`/api/endpoints/${editing.id}`, { method: "PATCH", json: body })
@@ -66,7 +67,10 @@ export function ConnectionsScreen() {
           <label className="block text-sm">At once <span className="text-muted">1–32</span>
             <Input name="max_parallel" type="number" min={1} max={32} required defaultValue={editing?.max_parallel || 1} className="mt-1" />
           </label>
-          <p className="text-xs text-muted">EasyAgent sends each message to this address. Leave the key blank to keep the one already saved. At once is how many replies may use this connection together. Extra chats wait in line.</p>
+          <label className="block text-sm">Reply length <span className="text-muted">tokens, default 4096</span>
+            <Input name="max_tokens" type="number" min={256} max={32768} required defaultValue={editing?.max_tokens || 4096} className="mt-1" />
+          </label>
+          <p className="text-xs text-muted">EasyAgent sends each message to this address. Leave the key blank to keep the one already saved. At once is how many replies may use this connection together. Extra chats wait in line. Reply length stops a model that keeps generating.</p>
           {error ? <p className="text-sm text-danger" role="alert">{error}</p> : null}
           <div className="flex gap-2">
             <Button type="submit">Save</Button>

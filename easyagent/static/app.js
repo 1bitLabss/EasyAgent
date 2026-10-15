@@ -1564,6 +1564,7 @@ function renderThread() {
         onclick: () => openPlainScreen("connections"),
       }, ["Connection settings"]));
     }
+    const pickedUp = message.kind === "resume-note" && String(message.content || "").includes("Picked up where it stopped");
     if (message.kind === "resume-offer") {
       main.append(el("div", { class: "resume-card" }, [
         el("button", { type: "button", "data-testid": "resume-job", onclick: () => void resumeSavedJob() }, ["Resume"]),
@@ -1577,7 +1578,9 @@ function renderThread() {
     if (badge) row.append(badge);
     const learned = learnNote(message);
     if (learned) main.append(learned);
-    const item = el("li", { class: `message ${message.role}${failed ? " error" : ""}` }, [
+    const itemAttrs = { class: `message ${message.role}${failed ? " error" : ""}${pickedUp ? " pickup-card" : ""}` };
+    if (pickedUp) itemAttrs["data-testid"] = "pickup-card";
+    const item = el("li", itemAttrs, [
       row,
       main,
     ]);
@@ -3409,6 +3412,12 @@ function wire() {
       prompt: $("schedule-prompt").value,
       quiet: $("schedule-quiet").checked,
     };
+    const deliver = $("schedule-deliver") ? $("schedule-deliver").value : "chat";
+    const deliverChat = $("schedule-deliver-chat") ? $("schedule-deliver-chat").value.trim() : "";
+    if (deliver && deliver !== "chat") {
+      body.deliver = deliver;
+      body.deliver_chat = deliverChat;
+    }
     const zone = $("schedule-zone").value.trim();
     if (zone) body.timezone = zone;
     if (kind === "weekdays") body.weekdays = $("schedule-time").value;

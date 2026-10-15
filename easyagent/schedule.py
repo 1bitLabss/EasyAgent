@@ -232,7 +232,7 @@ async def _run_one(store: Store, bot: dict, schedule: dict, slot: str) -> dict:
         endpoint = None
     if endpoint is None:
         entry = {**base, "status": "error", "output": "", "result": "", "error": "This bot's endpoint is missing.", "finished_at": now_iso()}
-        _deliver(store, bot, schedule, entry)
+        await _deliver(store, bot, schedule, entry)
         return entry
     direction = (store.read_direction() or "").strip()
     if len(direction) > DIRECTION_CAP:
@@ -310,7 +310,7 @@ async def _run_one(store: Store, bot: dict, schedule: dict, slot: str) -> dict:
             "why": routine_name,
             "detail": status,
         })
-        _deliver(store, bot, schedule, entry)
+        await _deliver(store, bot, schedule, entry)
         return entry
     finally:
         attend(token)
@@ -572,7 +572,7 @@ def _remember_run(store: Store, bot_id: str, schedule: dict, entry: dict, now: d
     store.save_schedules(bot_id, rows)
 
 
-def _deliver(store: Store, bot: dict, schedule: dict, entry: dict) -> None:
+async def _deliver(store: Store, bot: dict, schedule: dict, entry: dict) -> None:
     """Post a finished routine into the ongoing chat. Quiet runs stay in the log only."""
     status = entry.get("status")
     if status == "nothing new":
@@ -590,6 +590,52 @@ def _deliver(store: Store, bot: dict, schedule: dict, entry: dict) -> None:
         routine_id=str(schedule.get("id") or ""),
         routine_name=name,
     )
+    await _post_outside(store, bot, schedule, text, name)
+
+
+async def _post_outside(store: Store, bot: dict, schedule: dict, text: str, name: str) -> None:
+    """Optional post to this bot's Telegram or Discord, allowlisted chat only. One retry."""
+    from easyagent.bridges import BridgeDenied, bridge_for, post_allowlisted
+
+    kind = str(schedule.get("deliver") or "").strip().lower()
+    chat_id = str(schedule.get("deliver_chat") or "").strip()
+    if kind not in {"telegram", "discord"} or not chat_id:
+        return
+    label = "Discord" if kind == "discord" else "Telegram"
+    row = bridge_for(store, str(bot.get("id") or ""), kind)
+
+    async def once() -> None:
+        if row is None:
+            raise BridgeDenied("missing")
+        await post_allowlisted(store, row, chat_id, text)
+
+    notice = ""
+    try:
+        await once()
+        return
+    except BridgeDenied as exc:
+        if str(exc) == "missing":
+            notice = f"The routine did not post to {label}. This bot has no {label} bridge."
+        else:
+            notice = f"The routine did not post to {label}. That chat is not on the allow list."
+    except Exception:
+        try:
+            await once()
+            return
+        except BridgeDenied as exc:
+            if str(exc) == "missing":
+                notice = f"The routine did not post to {label}. This bot has no {label} bridge."
+            else:
+                notice = f"The routine did not post to {label}. That chat is not on the allow list."
+        except Exception:
+            notice = f"The routine could not post to {label}. It was not sent."
+    if notice:
+        store.append_routine_message(
+            bot["id"],
+            notice,
+            routine_id=str(schedule.get("id") or ""),
+            routine_name=name,
+        )
 
 
 def active_routines(bot_id: str) -> list[dict]:
@@ -844,6 +890,7 @@ def compile_routine(fields: dict, *, created_at: str | None = None) -> dict:
         raise ScheduleError("That timezone is not recognized.")
     quiet = _as_bool(fields.get("quiet"))
     paused = _as_bool(fields.get("paused"))
+    outside = _delivery_fields(fields)
     record: dict = {
         "id": (fields.get("id") or "").strip() or new_id(),
         "name": name,
@@ -855,6 +902,7 @@ def compile_routine(fields: dict, *, created_at: str | None = None) -> dict:
         "last_run_at": fields.get("last_run_at"),
         "created_at": created_at or fields.get("created_at") or now_iso(),
     }
+    record.update(outside)
     if template is not None:
         if template.get("kind") == "cron":
             record["kind"] = "cron"
@@ -922,6 +970,19 @@ def compile_routine(fields: dict, *, created_at: str | None = None) -> dict:
         raise ScheduleError("Choose a schedule: every few minutes, a time of day, weekdays, a weekday, once, or a 5-field cron.")
     stamp_next(record, datetime.now().astimezone())
     return record
+
+
+def _delivery_fields(fields: dict) -> dict:
+    """Optional Telegram or Discord target. The chat id is one allowlisted id."""
+    kind = str(fields.get("deliver") or "").strip().lower()
+    chat = str(fields.get("deliver_chat") or "").strip()
+    if kind in {"", "none", "off", "chat"}:
+        return {}
+    if kind not in {"telegram", "discord"}:
+        raise ScheduleError("A routine can post to Telegram or Discord, or stay in this chat.")
+    if not chat or len(chat) > 40 or any(ch.isspace() for ch in chat):
+        raise ScheduleError("Name the allowlisted chat that should receive this routine.")
+    return {"deliver": kind, "deliver_chat": chat}
 
 
 def _as_bool(value) -> bool:

@@ -193,7 +193,7 @@ def test_steer_note_is_untrusted_and_keeps_the_plan(tmp_path):
 def test_restart_resumes_at_the_same_step(tmp_path, monkeypatch):
     app, client, bot, chat = _client(tmp_path)
     store = app.state.store
-    client.patch(f"/api/bots/{bot['id']}", json={"check_enabled": False})
+    client.patch(f"/api/bots/{bot['id']}", json={"check_enabled": False, "auto_resume": False})
     _checklist(store, bot["id"], chat["id"])
     chat_doc = store.get_chat(bot["id"], chat["id"])
     chat_doc["run"] = {
@@ -256,11 +256,11 @@ def test_restart_resumes_at_the_same_step(tmp_path, monkeypatch):
     assert kept["steps"][1]["state"] == "doing"
 
 
-def test_auto_resume_is_off_until_the_bot_opts_in(tmp_path, monkeypatch):
+def test_auto_resume_is_on_unless_the_bot_turns_it_off(tmp_path, monkeypatch):
     app, client, bot, chat = _client(tmp_path)
     store = app.state.store
-    assert bot["auto_resume"] is False
-    client.patch(f"/api/bots/{bot['id']}", json={"auto_resume": True, "check_enabled": False})
+    assert bot["auto_resume"] is True
+    client.patch(f"/api/bots/{bot['id']}", json={"check_enabled": False})
     _checklist(store, bot["id"], chat["id"])
     chat_doc = store.get_chat(bot["id"], chat["id"])
     chat_doc["run"] = {
@@ -287,6 +287,7 @@ def test_auto_resume_is_off_until_the_bot_opts_in(tmp_path, monkeypatch):
     _pause_for_resume(store, bot["id"], chat["id"])
     paused = store.get_chat(bot["id"], chat["id"])
     assert paused.get("resume_now") is True
+    assert any("Picked up where it stopped" in str(item.get("content") or "") for item in paused["messages"])
     assert not any(item.get("kind") == "resume-offer" for item in paused["messages"])
     assert "card-auto" not in _PENDING
     seen = []

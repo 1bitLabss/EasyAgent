@@ -1567,6 +1567,7 @@ def test_ls_on_windows_does_not_prove_a_sample_hotel_page(tmp_path, monkeypatch)
     client, bot, chat, recorder = _world(tmp_path, monkeypatch)
     recorder.reply = [
         "```shell\nls\n```",
+        f"```files\nread\n{target}\n```",
         f"```files\nwrite\n{target}\n{page}\n```",
         "The sample page is ready and C1 is proven.",
     ]
@@ -1965,6 +1966,7 @@ def test_a_rejected_windows_command_still_writes_the_hotel_page(tmp_path, monkey
     page = _model_hotel_html("Northline Hotel")
     recorder.reply = [
         "```shell\ndir /b C:\\work &\n```",
+        "```files\nread\nC:\\work\\landing.html\n```",
         f"```files\nwrite\nC:\\work\\landing.html\n{page}\n```",
         "The syntax of the command is incorrect.",
     ]
@@ -2046,6 +2048,7 @@ def test_pwd_on_windows_still_writes_the_hotel_page(tmp_path, monkeypatch):
     client, bot, chat, recorder = _world(tmp_path, monkeypatch)
     recorder.reply = [
         "```shell\npwd\n```",
+        "```files\nread\nC:\\work\\landing.html\n```",
         f"```files\nwrite\nindex.html\n{page}\n```",
         "'pwd' is not recognized as an internal or external command,\noperable program or batch file.",
     ]
@@ -2106,6 +2109,7 @@ def test_a_decidable_question_does_not_end_the_turn(tmp_path, monkeypatch):
         "```question\nWhich hotel should the page be for?\n"
         "A made-up one (I'll pick a name and details)\n"
         "Your real hotel (tell me the name and any details)\n```",
+        "```files\nread\nC:\\work\\landing.html\n```",
         "A small hotel on the water. I'll name it in the page.\n"
         f"```files\nwrite\nindex.html\n{page}\n```",
         "The page is ready.",
@@ -2161,6 +2165,7 @@ def test_a_decidable_question_does_not_end_the_turn(tmp_path, monkeypatch):
         "```question\nWhich bakery should the page be for?\n"
         "A made-up one\n"
         "The one on the corner\n```",
+        "```files\nread\nC:\\work\\landing.html\n```",
         f"```files\nwrite\nindex.html\n{bakery_page}\n```",
         "The page is ready.",
     ]
@@ -3004,7 +3009,11 @@ def test_a_timeout_after_the_page_is_written_answers_from_the_file(tmp_path, mon
     text = (folder / "landing.html").read_text(encoding="utf-8")
     assert "Where the ocean meets calm." in text
     assert "unsplash.com" in text
-    roles = [item["role"] for item in sent.json()["chat"]["messages"]]
+    roles = [
+        item["role"]
+        for item in sent.json()["chat"]["messages"]
+        if item.get("kind") != "status"
+    ]
     assert roles == ["user", "assistant", "user", "assistant"]
 
 
@@ -3084,7 +3093,9 @@ def test_the_goal_is_in_the_chat_before_the_model_replies(tmp_path, monkeypatch)
     assert _written_page() in answer
     assert "you can open it" in answer.lower()
     assert "plain page" not in answer.lower()
-    assert [item["role"] for item in stored["messages"]] == ["user", "assistant", "user", "assistant"]
+    assert [
+        item["role"] for item in stored["messages"] if item.get("kind") != "status"
+    ] == ["user", "assistant", "user", "assistant"]
     notes = tmp_path / "bots" / bot["id"] / "notes" / "chats" / chat["id"]
     assert not (notes / "goal.md").exists()
 
@@ -3875,7 +3886,13 @@ def test_ten_notes_are_read_and_the_summary_path_stays_a_file(tmp_path, monkeypa
     assert "C1" not in answer
     assert len(recorder.seen) > before + 1
     stored = client.get(f"/api/bots/{bot['id']}/chats/{chat['id']}").json()
-    roles = [item["role"] for item in stored["messages"] if item["content"] != "keep-this-line" and item["content"] != "ack"]
+    roles = [
+        item["role"]
+        for item in stored["messages"]
+        if item.get("kind") != "status"
+        and item["content"] != "keep-this-line"
+        and item["content"] != "ack"
+    ]
     assert roles == ["user", "assistant"]
 
 

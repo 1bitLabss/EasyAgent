@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import json
+import os
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
 
 from fastapi.testclient import TestClient
 
@@ -108,7 +110,8 @@ def setup_function():
 
 
 def test_detector_requires_a_5xx_and_the_parse_phrase():
-    assert tool_parse_failure(500, '{"error":{"message":"parse_error: unexpected \'{\'"}}')
+    assert tool_parse_failure(500, '{"error":{"message":"parse_error: unexpected \'{\'"}}') is False
+    assert tool_parse_failure(500, "parse_error while reading a tool call")
     assert tool_parse_failure(500, PARSE.decode())
     assert tool_parse_failure(400, "Failed to parse tool call") is False
     assert tool_parse_failure(500, "disk blew up") is False
@@ -150,6 +153,8 @@ def test_stub_retries_a_tool_parse_500_then_answers(tmp_path):
         assert "parallel_tool_calls" not in Handler.payloads[0]
         assert Handler.payloads[1]["parallel_tool_calls"] is False
         assert Handler.payloads[2]["parallel_tool_calls"] is False
+        assert [item["temperature"] for item in Handler.payloads] == [0.6, 0.3, 0.1]
+        assert all("tools" in item for item in Handler.payloads)
         first = json.dumps(Handler.payloads[0])
         second = json.dumps(Handler.payloads[1])
         assert TOOL_PARSE_NUDGE not in first
@@ -174,15 +179,21 @@ def test_stub_gives_a_resumable_message_when_the_parse_error_persists(tmp_path):
         assert len(Handler.payloads) == 3
         body = response.json()
         chat_body = body.get("chat") or body
-        assert body.get("reply") == MALFORMED_TOOL_TEXT
+        assert MALFORMED_TOOL_TEXT in (body.get("reply") or "")
+        assert "Failed to parse tool call" in (body.get("reply") or "")
         assert chat_body["run"]["status"] == "paused"
         assert chat_body["run"]["status"] != "stopped"
         offer = [item for item in chat_body["messages"] if item.get("kind") == "resume-offer"]
-        assert offer[-1]["content"] == MALFORMED_TOOL_TEXT
+        assert MALFORMED_TOOL_TEXT in offer[-1]["content"]
+        assert "Failed to parse tool call" in offer[-1]["content"]
         blob = json.dumps(offer[-1])
         assert "Stopped" not in blob
-        assert "Failed to parse" not in blob
         assert "127.0.0.1" not in blob
+        assert all("tools" in item for item in Handler.payloads)
+        assert [item["temperature"] for item in Handler.payloads] == [0.6, 0.3, 0.1]
+        saved = (Path(os.environ["EASYAGENT_DATA"]) / "debug-raw.txt").read_text(encoding="utf-8")
+        assert "retry=1" in saved and "retry=2" in saved and "retry=3" in saved
+        assert "Failed to parse tool call" in saved
         resumed = client.post(f"/api/bots/{bot['id']}/chats/{chat['id']}/resume")
         assert resumed.status_code == 200, resumed.text
         assert any(item.get("content") == "Noted." for item in _messages(resumed.json()))
@@ -227,6 +238,7 @@ def test_unsupported_parallel_flag_is_dropped_and_the_nudge_remains(tmp_path):
         assert len(Handler.payloads) == 3
         assert Handler.payloads[1]["parallel_tool_calls"] is False
         assert "parallel_tool_calls" not in Handler.payloads[2]
+        assert all("tools" in item for item in Handler.payloads)
         assert TOOL_PARSE_NUDGE in json.dumps(Handler.payloads[2])
         assert any(item.get("content") == "Noted." for item in _messages(response.json()))
     finally:

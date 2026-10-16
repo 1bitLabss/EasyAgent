@@ -107,6 +107,196 @@ class ToolError(Exception):
     """The action did not run. The chat keeps the error."""
 
 
+_edit_reads: ContextVar[dict | None] = ContextVar("easyagent_edit_reads", default=None)
+_turn_changes: ContextVar[list | None] = ContextVar("easyagent_turn_changes", default=None)
+_turn_checked: ContextVar[bool | None] = ContextVar("easyagent_turn_checked", default=None)
+_turn_effect: ContextVar[bool | None] = ContextVar("easyagent_turn_effect", default=None)
+_turn_notes: ContextVar[list | None] = ContextVar("easyagent_turn_notes", default=None)
+
+_CHECK_COMMAND = re.compile(
+    r"(?i)\b(pytest|unittest|cargo\s+(?:test|build)|go\s+test|npm\s+test|npm\s+run\s+build|"
+    r"dotnet\s+test|mvn\s+test|gradle\s+test)\b|(?:^|[;&|]\s*)make(?:\s|$)"
+)
+_DONE_CLAIM = re.compile(r"(?i)\b(?:done|fixed)\b")
+_UNVERIFIED_NOTE = "This was not verified."
+
+
+def begin_turn_checks() -> None:
+    """One turn: reads, file changes, and whether a check already ran."""
+    _edit_reads.set({})
+    _turn_changes.set([])
+    _turn_checked.set(False)
+    _turn_effect.set(False)
+    _turn_notes.set([])
+
+
+def end_turn_checks() -> None:
+    _edit_reads.set(None)
+    _turn_changes.set(None)
+    _turn_checked.set(None)
+    _turn_effect.set(None)
+    _turn_notes.set(None)
+
+
+def note_turn_effect() -> None:
+    """This turn wrote a file or started a command, so a done claim can be checked."""
+    if _turn_effect.get() is not None:
+        _turn_effect.set(True)
+
+
+def mark_turn_checked() -> None:
+    if _turn_checked.get() is not None:
+        _turn_checked.set(True)
+
+
+def command_is_check(command: str) -> bool:
+    return bool(_CHECK_COMMAND.search(command or ""))
+
+
+def apply_verify_note(text: str) -> str:
+    """A done or fixed claim names that it was not checked, unless this turn ran a check.
+
+    A short reply that did not write a file or start a command is left as it is.
+    """
+    if _turn_checked.get() is None:
+        return text or ""
+    body = text or ""
+    if not _turn_effect.get():
+        return body
+    if not _DONE_CLAIM.search(body) or _UNVERIFIED_NOTE in body:
+        return body
+    if re.search(r"(?i)\b(not verified|did not verify|didn't verify|without verifying)\b", body):
+        return body
+    if _turn_checked.get():
+        return body
+    return (body.rstrip() + "\n\n" + _UNVERIFIED_NOTE).strip()
+
+
+def take_turn_notes() -> list[tuple[str, str]]:
+    notes = _turn_notes.get()
+    _turn_notes.set([])
+    if not notes:
+        return []
+    return [(str(about), str(text)) for about, text in notes if text]
+
+
+def _queue_turn_note(about: str, text: str) -> None:
+    notes = _turn_notes.get()
+    if notes is None or not text:
+        return
+    notes.append((about, text))
+
+
+def _file_stamp(path: Path) -> tuple[int, int] | None:
+    try:
+        stat = path.stat()
+    except OSError:
+        return None
+    return (int(getattr(stat, "st_mtime_ns", int(stat.st_mtime * 1_000_000_000))), int(stat.st_size))
+
+
+def _remember_read(path: Path) -> None:
+    stamps = _edit_reads.get()
+    if not isinstance(stamps, dict):
+        return
+    stamp = _file_stamp(path)
+    if stamp is None:
+        return
+    key = _path_key(str(path))
+    stamps[key] = stamp
+    changes = _turn_changes.get() or []
+    if any(_path_key(str(item.get("path") or "")) == key for item in changes):
+        mark_turn_checked()
+
+
+def _require_fresh_read(path: Path) -> None:
+    """An existing file is written only from a read of its current bytes."""
+    stamps = _edit_reads.get()
+    if not isinstance(stamps, dict):
+        return
+    if not path.exists() or path.is_dir():
+        return
+    key = _path_key(str(path))
+    stamp = stamps.get(key)
+    if stamp is None:
+        raise ToolError(
+            f"Read {path} before writing it. The write was refused because this turn has not read the current file."
+        )
+    current = _file_stamp(path)
+    if current != stamp:
+        raise ToolError(f"Read {path} again before writing it. The file changed since it was last read.")
+
+
+def _line_change(before: str, after: str) -> tuple[int, int]:
+    from collections import Counter
+
+    old = Counter((before or "").splitlines())
+    new = Counter((after or "").splitlines())
+    removed = sum((old - new).values())
+    added = sum((new - old).values())
+    return added, removed
+
+
+def _remember_write(path: Path, *, existed: bool, before: str, after: str, binary: bool = False) -> None:
+    changes = _turn_changes.get()
+    if not isinstance(changes, list):
+        return
+    key = _path_key(str(path))
+    if existed and binary:
+        row = {"path": str(path), "new": False, "added": 0, "removed": 0, "binary": True}
+    elif existed:
+        added, removed = _line_change(before, after)
+        row = {"path": str(path), "new": False, "added": added, "removed": removed}
+    else:
+        row = {"path": str(path), "new": True, "added": 0, "removed": 0}
+    changes[:] = [item for item in changes if _path_key(str(item.get("path") or "")) != key]
+    changes.append(row)
+    note_turn_effect()
+    stamp = _file_stamp(path)
+    stamps = _edit_reads.get()
+    if isinstance(stamps, dict) and stamp is not None:
+        stamps[key] = stamp
+
+
+def diff_summary(changes: list[dict]) -> str:
+    parts = []
+    for item in changes:
+        path = str(item.get("path") or "")
+        if not path:
+            continue
+        if item.get("new"):
+            parts.append(f"{path} (new)")
+            continue
+        if item.get("binary"):
+            parts.append(f"{path} (changed)")
+            continue
+        parts.append(f"{path} (+{int(item.get('added') or 0)} -{int(item.get('removed') or 0)})")
+    if not parts:
+        return ""
+    return "Files changed: " + ", ".join(parts) + "."
+
+
+def flush_turn_notes(store: Store | None = None, bot_id: str | None = None, chat_id: str | None = None) -> None:
+    """Queue the file list and a card for a file the checklist never named."""
+    changes = list(_turn_changes.get() or [])
+    summary = diff_summary(changes)
+    if summary:
+        _queue_turn_note("diff", summary)
+    _turn_changes.set([])
+    if not store or not bot_id or not chat_id or not changes:
+        return
+    from easyagent.plan import load_plan, plan_mentions_path
+
+    plan = load_plan(store, bot_id, chat_id)
+    missed = [str(item.get("path") or "") for item in changes if not plan_mentions_path(plan, str(item.get("path") or ""))]
+    missed = [path for path in missed if path]
+    if missed:
+        _queue_turn_note(
+            "unplanned",
+            "Edited a file the checklist did not mention: " + ", ".join(missed) + ".",
+        )
+
+
 @dataclass(frozen=True)
 class ToolRequest:
     kind: str
@@ -1426,6 +1616,7 @@ def _read_path(path: Path) -> str:
         raise ToolError(f"Could not read {path}. {exc}") from exc
     if len(text) > _READ_CAP:
         text = text[: _READ_CAP - 20].rstrip() + "\n[file truncated]"
+    _remember_read(path)
     return text
 
 
@@ -1583,6 +1774,14 @@ def _write_path(path: Path, body: str) -> str:
         raise ToolError(f"The file was not written. {path} is a folder.")
     if len(body) > _WRITE_CAP:
         raise ToolError(f"The file was not written. {path} is too long to write.")
+    existed = path.is_file()
+    before = ""
+    if existed:
+        _require_fresh_read(path)
+        try:
+            before = path.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            before = ""
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(body, encoding="utf-8", newline="\n")
@@ -1590,6 +1789,7 @@ def _write_path(path: Path, body: str) -> str:
         raise ToolError(f"The file was not written. {path}: {exc}") from exc
     if not _file_is_present(path):
         raise ToolError(f"The file was not written. {path} is not on disk.")
+    _remember_write(path, existed=existed, before=before, after=body)
     return f"Wrote {len(body)} characters to {path}"
 
 
@@ -1602,6 +1802,9 @@ def _write_bytes(path: Path, data: bytes) -> str:
         raise ToolError(f"The file was not written. {path} is a folder.")
     if not data:
         raise ToolError(f"The file was not written. {path} had nothing to write.")
+    existed = path.is_file()
+    if existed:
+        _require_fresh_read(path)
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_bytes(data)
@@ -1609,6 +1812,7 @@ def _write_bytes(path: Path, data: bytes) -> str:
         raise ToolError(f"The file was not written. {path}: {exc}") from exc
     if not _file_is_present(path):
         raise ToolError(f"The file was not written. {path} is not on disk.")
+    _remember_write(path, existed=existed, before="", after="", binary=True)
     return f"Wrote {len(data)} bytes to {path}"
 
 
@@ -1746,6 +1950,9 @@ def _run_shell(store: Store, command: str) -> str:
     from easyagent.honesty import note_shell_started
 
     note_shell_started(original)
+    note_turn_effect()
+    if command_is_check(original):
+        mark_turn_checked()
     turn_mod.attach_proc(proc)
     try:
         if turn_mod.cancelled():
@@ -4327,6 +4534,9 @@ def describe_written_page(path: str) -> str:
         html = file.read_text(encoding="utf-8", errors="replace")
     except OSError:
         html = ""
+    if html.strip():
+        _remember_read(file)
+        mark_turn_checked()
     if not html.strip():
         return f"The file at {path} was checked against the goal. It is empty, so the build continues."
     if page_is_plain(html):
@@ -5891,6 +6101,7 @@ async def run_turn(
     """Keep one send alive across tools until the work is checked, or the loop is stuck."""
     from easyagent import honesty
 
+    begin_turn_checks()
     search_mod.bind_store(store)
     working = list(messages)
     lines: list[str] = []
@@ -6123,6 +6334,7 @@ async def run_turn(
                 file.write_text(best, encoding="utf-8")
             except OSError:
                 return
+            _remember_read(file)
             _note_heuristic(
                 "_keep_fuller",
                 "a shorter page does not replace a fuller page already written",

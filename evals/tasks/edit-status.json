@@ -8,8 +8,8 @@
     }
   },
   "mock": [
-    "```files\nwrite\n{workspace}/status.txt\nThe status is GREEN-NEW.\n\n```",
     "```files\nread\n{workspace}/status.txt\n```",
+    "```files\nwrite\n{workspace}/status.txt\nThe status is GREEN-NEW.\n\n```",
     "The status line now says GREEN-NEW.",
     "The status line now says GREEN-NEW."
   ],

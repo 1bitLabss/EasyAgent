@@ -1,7 +1,7 @@
 {
   "name": "easyagent-desktop",
   "private": true,
-  "version": "0.3.31",
+  "version": "0.3.32",
   "description": "AI agents, made easy.",
   "scripts": {
     "dev": "tauri dev",

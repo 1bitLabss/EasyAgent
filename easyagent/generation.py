@@ -18,6 +18,7 @@ DEFAULT_STALL_SECONDS = 45.0
 DEFAULT_FIRST_TOKEN_SECONDS = 120.0
 DEFAULT_WALL_SECONDS = 180.0
 DEFAULT_HARD_SECONDS = 480.0
+DEFAULT_TOOL_TEMPERATURE = 0.6
 MIN_MAX_TOKENS = 256
 MAX_MAX_TOKENS = 32768
 REPEAT_CHUNK = 6
@@ -40,6 +41,7 @@ class Limits:
     first_token_seconds: float = DEFAULT_FIRST_TOKEN_SECONDS
     wall_seconds: float = DEFAULT_WALL_SECONDS
     hard_seconds: float = DEFAULT_HARD_SECONDS
+    tool_temperature: float = DEFAULT_TOOL_TEMPERATURE
 
 
 def _whole(value, default: float, low: float, high: float) -> float:
@@ -69,6 +71,32 @@ def effective_max_tokens(endpoint: dict | None) -> int:
     return number
 
 
+def effective_tool_temperature(endpoint: dict | None) -> float:
+    """Sampling for a request that includes tools. Blank keeps 0.6."""
+    raw = None if not isinstance(endpoint, dict) else endpoint.get("tool_temperature")
+    if raw in (None, ""):
+        return DEFAULT_TOOL_TEMPERATURE
+    try:
+        number = float(raw)
+    except (TypeError, ValueError):
+        return DEFAULT_TOOL_TEMPERATURE
+    if number < 0:
+        return 0.0
+    if number > 2:
+        return 2.0
+    return number
+
+
+def tool_try_temperature(base: float, index: int) -> float:
+    """First tool request uses the connection value. The next try is half. Later tries are 0.1."""
+    number = effective_tool_temperature({"tool_temperature": base})
+    if index <= 0:
+        return round(number, 4)
+    if index == 1:
+        return round(number / 2.0, 4)
+    return 0.1
+
+
 def limits_from_endpoint(endpoint: dict | None) -> Limits:
     """Connection settings, or the defaults. A missing length is 4096."""
     source = endpoint if isinstance(endpoint, dict) else {}
@@ -84,6 +112,7 @@ def limits_from_endpoint(endpoint: dict | None) -> Limits:
         first_token_seconds=first,
         wall_seconds=wall,
         hard_seconds=hard,
+        tool_temperature=effective_tool_temperature(source),
     )
 
 

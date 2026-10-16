@@ -158,8 +158,31 @@ def grammar_rejected(detail: str) -> bool:
 TOOL_PARSE_RETRIES = 2
 TOOL_PARSE_NUDGE = "emit exactly one tool call with valid JSON"
 MALFORMED_TOOL_TEXT = "The model produced a malformed tool call. Try again or use a different model."
+EMPTY_TOOL_TEXT = "The model returned no text and no tool call."
+STREAM_ERROR_TEXT = "The model stream reported an error."
+CUT_TOOL_TEXT = "The model cut a tool call off before it finished."
+THINK_ARG_TEXT = "The model put thinking text inside a tool call."
+_EXCERPT_CHARS = 180
+_THINK_IN_ARGS = re.compile(r"(?i)<\s*/?\s*think(?:ing)?\s*>")
 
 _PARALLEL_TOOLS: dict[str, bool] = {}
+
+
+def _short_excerpt(body: str, limit: int = _EXCERPT_CHARS) -> str:
+    text = " ".join((body or "").split())
+    if len(text) > limit:
+        text = text[: limit - 1].rstrip() + "…"
+    return text
+
+
+def _body_is_tool_parse(body: str) -> bool:
+    """The server failed to parse a tool call. A bare parse_error is not enough."""
+    lowered = (body or "").lower()
+    if "failed to parse tool call" in lowered:
+        return True
+    if "parse_error" not in lowered:
+        return False
+    return "tool call" in lowered or "tool_call" in lowered or "tool-call" in lowered
 
 
 def tool_parse_failure(status: int, body: str) -> bool:
@@ -170,8 +193,7 @@ def tool_parse_failure(status: int, body: str) -> bool:
         return False
     if code < 500 or code > 599:
         return False
-    lowered = (body or "").lower()
-    return "failed to parse tool call" in lowered or "parse_error" in lowered
+    return _body_is_tool_parse(body)
 
 
 def malformed_tool_call(detail: str) -> bool:
@@ -179,7 +201,82 @@ def malformed_tool_call(detail: str) -> bool:
     lowered = (detail or "").lower()
     if MALFORMED_TOOL_TEXT.lower() in lowered:
         return True
-    return "failed to parse tool call" in lowered or "parse_error" in lowered
+    return _body_is_tool_parse(detail)
+
+
+def malformed_with_excerpt(excerpt: str) -> str:
+    extra = _short_excerpt(excerpt)
+    if not extra:
+        return MALFORMED_TOOL_TEXT
+    return f"{MALFORMED_TOOL_TEXT} Server said: {extra}"
+
+
+def is_resumable_model_error(detail: str) -> bool:
+    """A tool reply the user can resume. It is not a finished answer."""
+    lowered = (detail or "").lower()
+    for sentence in (
+        MALFORMED_TOOL_TEXT,
+        EMPTY_TOOL_TEXT,
+        STREAM_ERROR_TEXT,
+        CUT_TOOL_TEXT,
+        THINK_ARG_TEXT,
+    ):
+        if sentence.lower() in lowered:
+            return True
+    return _body_is_tool_parse(detail)
+
+
+def resumable_shown(detail: str) -> str:
+    """The sentence the chat keeps, including a short server excerpt when there is one."""
+    text = " ".join((detail or "").split())
+    for sentence in (
+        MALFORMED_TOOL_TEXT,
+        EMPTY_TOOL_TEXT,
+        STREAM_ERROR_TEXT,
+        CUT_TOOL_TEXT,
+        THINK_ARG_TEXT,
+    ):
+        start = text.lower().find(sentence.lower())
+        if start < 0:
+            continue
+        kept = text[start:]
+        if len(kept) > 420:
+            kept = kept[:419].rstrip() + "…"
+        return kept
+    if _body_is_tool_parse(text):
+        return malformed_with_excerpt(text)
+    return MALFORMED_TOOL_TEXT
+
+
+def _server_failure_path() -> Path:
+    env = os.environ.get("EASYAGENT_DATA", "").strip()
+    root = Path(env) if env else Path.cwd() / "data"
+    return root / "debug-raw.txt"
+
+
+def note_server_failure(status: int, body: str, retry: int) -> str:
+    """Store a short 5xx excerpt and the try number before any plain sentence replaces it."""
+    excerpt = _short_excerpt(body)
+    line = f"http {int(status)} retry={int(retry)} {excerpt}".strip()
+    print(f"model call: {line}", flush=True)
+    path = _server_failure_path()
+    with _raw_lock:
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            previous = ""
+            if path.is_file():
+                previous = path.read_text(encoding="utf-8", errors="replace")
+            blob = previous + line + "\n"
+            raw = blob.encode("utf-8")
+            if len(raw) > _RAW_BYTES:
+                blob = raw[-_RAW_BYTES:].decode("utf-8", "replace")
+                cut = blob.find("\n")
+                if cut >= 0:
+                    blob = blob[cut + 1 :]
+            path.write_text(blob, encoding="utf-8")
+        except OSError:
+            pass
+    return excerpt
 
 
 def parallel_tool_calls_supported(base_url: str) -> bool:
@@ -231,10 +328,14 @@ def split_json_values(text: str) -> list:
 
 
 class _ToolParseAgain(Exception):
-    """The completion should be sent again. `drop_flag` means omit parallel_tool_calls."""
+    """The completion should be sent again. `drop_flag` means omit parallel_tool_calls.
 
-    def __init__(self, drop_flag: bool = False) -> None:
+    Tools stay on the request. Dropping them would let a plain reply look finished.
+    """
+
+    def __init__(self, drop_flag: bool = False, excerpt: str = "") -> None:
         self.drop_flag = drop_flag
+        self.excerpt = excerpt
 
 
 def _tool_http_action(status: int, body: str, *, sent_parallel_flag: bool) -> str | None:
@@ -305,8 +406,8 @@ def connection_error_text(detail: str, endpoint: dict | None, model: str | None 
     An unreachable model is the harness sentence. The model does not write it.
     """
     text = (detail or "").strip() or "The model server did not answer."
-    if malformed_tool_call(text):
-        return MALFORMED_TOOL_TEXT
+    if is_resumable_model_error(text):
+        return resumable_shown(text)
     url = ((endpoint or {}).get("base_url") or "").strip()
     if retry.is_unreachable_message(text) or retry.retryable_before_token(text):
         return retry.unreachable_text(url or retry.url_from_detail(text))
@@ -656,6 +757,7 @@ def _completion_payload(
     tools: bool = True,
     parallel_tool_calls: bool | None = None,
     max_tokens: int | None = None,
+    temperature: float | None = None,
 ) -> dict:
     """A schema or a grammar never rides along with the tool list. llama.cpp rejects that pair."""
     payload: dict = {"messages": messages}
@@ -663,6 +765,8 @@ def _completion_payload(
         payload["tools"] = native_tools()
         if parallel_tool_calls is False:
             payload["parallel_tool_calls"] = False
+        if temperature is not None:
+            payload["temperature"] = float(temperature)
     if stream:
         payload["stream"] = True
     if model:
@@ -948,6 +1052,94 @@ async def _watch_for_chat(client: httpx.AsyncClient) -> None:
             return
 
 
+def _tool_temperature(tools: bool, response_schema, grammar, attempt: int) -> float | None:
+    """EasyAgent's temperature on a tool request. Structured calls keep the server default."""
+    if not tools or response_schema or grammar:
+        return None
+    from easyagent.generation import current_limits, tool_try_temperature
+
+    return tool_try_temperature(current_limits().tool_temperature, attempt)
+
+
+def _arguments_usable(raw: str) -> bool:
+    """One or more JSON objects, with nothing left over and no think markup."""
+    text = raw or ""
+    if _THINK_IN_ARGS.search(text):
+        return False
+    values = split_json_values(text)
+    if not any(isinstance(value, dict) for value in values):
+        return False
+    decoder = json.JSONDecoder()
+    index = 0
+    length = len(text)
+    while index < length:
+        while index < length and text[index].isspace():
+            index += 1
+        if index >= length:
+            return True
+        try:
+            _value, end = decoder.raw_decode(text, index)
+        except json.JSONDecodeError:
+            return False
+        index = end
+    return True
+
+
+def _arguments_have_think(bucket: dict) -> bool:
+    for slot in bucket.values():
+        if _THINK_IN_ARGS.search(str(slot.get("arguments") or "")):
+            return True
+    return False
+
+
+def _arguments_cut(bucket: dict) -> bool:
+    if not bucket:
+        return False
+    for slot in bucket.values():
+        if not _arguments_usable(str(slot.get("arguments") or "")):
+            return True
+    return False
+
+
+def _has_usable_call(bucket: dict) -> bool:
+    for slot in bucket.values():
+        if not str(slot.get("name") or "").strip():
+            continue
+        if _arguments_usable(str(slot.get("arguments") or "")):
+            return True
+    return False
+
+
+def raise_if_bad_tool_reply(*, prose: str, bucket: dict, finish_reason: str, tools: bool) -> None:
+    """A tool reply that cannot be run stays a visible error. It is not executed."""
+    if not tools:
+        return
+    if _arguments_have_think(bucket):
+        raise ProviderError(THINK_ARG_TEXT)
+    if str(finish_reason or "") == "length" and _arguments_cut(bucket):
+        raise ProviderError(CUT_TOOL_TEXT)
+    if not (prose or "").strip() and not _has_usable_call(bucket):
+        raise ProviderError(EMPTY_TOOL_TEXT)
+
+
+def _fail_http(status: int, body: str, *, sent_parallel_flag: bool, attempt: int, base_url: str) -> None:
+    """Log a 5xx, then retry a tool-parse failure or raise the ordinary error."""
+    full = " ".join((body or "").split())
+    try:
+        code = int(status)
+    except (TypeError, ValueError):
+        code = 0
+    if 500 <= code <= 599:
+        note_server_failure(code, full, retry=attempt + 1)
+    action = _tool_http_action(code, full, sent_parallel_flag=sent_parallel_flag)
+    if action == "drop-flag":
+        raise _ToolParseAgain(drop_flag=True, excerpt=_short_excerpt(full))
+    if action == "retry":
+        raise _ToolParseAgain(excerpt=_short_excerpt(full))
+    detail = full[:300]
+    raise ProviderError(f"{code} from {base_url}: {detail}")
+
+
 async def _complete_once(
     *,
     base_url: str,
@@ -960,11 +1152,16 @@ async def _complete_once(
     tools: bool = True,
     yield_to_chats: bool = False,
 ) -> str:
-    """One non-streaming completion. A tool-call parse 500 is tried again here."""
+    """One non-streaming completion. A tool-call parse 500 is tried again here.
+
+    Every try still sends the tool list. The last try does not drop tools.
+    """
     working = [dict(item) for item in messages if isinstance(item, dict)]
     single = False
     flag_off = not parallel_tool_calls_supported(base_url)
     left = TOOL_PARSE_RETRIES
+    attempt = 0
+    last_excerpt = ""
     while True:
         try:
             return await _complete_attempt(
@@ -978,15 +1175,19 @@ async def _complete_once(
                 tools=tools,
                 yield_to_chats=yield_to_chats,
                 parallel_tool_calls=False if single and not flag_off else None,
+                attempt=attempt,
             )
         except _ToolParseAgain as exc:
+            last_excerpt = exc.excerpt or last_excerpt
             if exc.drop_flag:
                 flag_off = True
                 remember_parallel_tool_calls(base_url, False)
+                attempt += 1
                 continue
             if left <= 0:
-                raise ProviderError(MALFORMED_TOOL_TEXT) from exc
+                raise ProviderError(malformed_with_excerpt(last_excerpt)) from exc
             left -= 1
+            attempt += 1
             single = True
             working = nudge_single_tool(working)
 
@@ -1003,6 +1204,7 @@ async def _complete_attempt(
     tools: bool = True,
     yield_to_chats: bool = False,
     parallel_tool_calls: bool | None = None,
+    attempt: int = 0,
 ) -> str:
     """One POST. A tool-call parse failure raises `_ToolParseAgain`."""
     started = time.perf_counter()
@@ -1020,6 +1222,7 @@ async def _complete_attempt(
         tools=tools,
         parallel_tool_calls=parallel_tool_calls,
         max_tokens=current_limits().max_tokens,
+        temperature=_tool_temperature(tools, response_schema, grammar, attempt),
     )
     headers = {"Content-Type": "application/json"}
     if api_key:
@@ -1045,14 +1248,13 @@ async def _complete_attempt(
         turn_mod.detach_client(client)
         await client.aclose()
     if response.status_code >= 400:
-        full = " ".join(response.text.split())
-        action = _tool_http_action(response.status_code, full, sent_parallel_flag=sent_flag)
-        if action == "drop-flag":
-            raise _ToolParseAgain(drop_flag=True)
-        if action == "retry":
-            raise _ToolParseAgain()
-        detail = full[:300]
-        raise ProviderError(f"{response.status_code} from {base_url}: {detail}")
+        _fail_http(
+            response.status_code,
+            response.text,
+            sent_parallel_flag=sent_flag,
+            attempt=attempt,
+            base_url=base_url,
+        )
     try:
         data = response.json()
     except ValueError as exc:
@@ -1069,9 +1271,17 @@ async def _complete_attempt(
     calls: dict[int, dict] = {}
     if isinstance(message, dict):
         _collect_calls(calls, {"message": message})
+    prose = answer.strip()
+    finish = ""
+    try:
+        finish = str(data["choices"][0].get("finish_reason") or "")
+    except (KeyError, IndexError, TypeError, AttributeError):
+        finish = ""
+    sending_tools = bool(tools and not response_schema and not grammar)
+    if sending_tools:
+        raise_if_bad_tool_reply(prose=prose, bucket=calls, finish_reason=finish, tools=True)
     _store_native_calls(calls)
     fence = calls_to_fences(list(calls.values()))
-    prose = answer.strip()
     if fence and prose:
         return prose + "\n" + fence
     if fence:
@@ -1358,9 +1568,11 @@ async def _iter_completion_body(response: httpx.Response, *, started: float | No
         if text:
             held.extend(_answer_pieces(splitter, text, saw_field=saw_field))
         held.extend(_finish_pieces(splitter, saw_field=saw_field))
+        prose = "".join(held).strip()
+        finish = str(choice.get("finish_reason") or "") if isinstance(choice, dict) else ""
+        raise_if_bad_tool_reply(prose=prose, bucket=calls, finish_reason=finish, tools=True)
         _store_native_calls(calls)
         fence = calls_to_fences(list(calls.values()))
-        prose = "".join(held).strip()
         _log_model_call(usage_body, clock, messages)
         if fence and prose:
             yield prose + "\n" + fence
@@ -1372,6 +1584,8 @@ async def _iter_completion_body(response: httpx.Response, *, started: float | No
             yield prose
         return
     raw_kept = 0
+    finish_reason = ""
+    saw_answer = False
     async for line in response.aiter_lines():
         if not line or line.startswith(":"):
             continue
@@ -1389,11 +1603,20 @@ async def _iter_completion_body(response: httpx.Response, *, started: float | No
             continue
         if isinstance(obj, dict) and isinstance(obj.get("usage"), dict):
             usage_body = obj
+        if isinstance(obj, dict) and obj.get("error") is not None and "choices" not in obj:
+            err = obj.get("error")
+            if isinstance(err, dict):
+                err = err.get("message") or err.get("type") or ""
+            excerpt = _short_excerpt(str(err or ""))
+            shown = STREAM_ERROR_TEXT if not excerpt else f"{STREAM_ERROR_TEXT} Server said: {excerpt}"
+            raise ProviderError(shown)
         try:
             choice = obj["choices"][0]
         except (KeyError, IndexError, TypeError):
             continue
         if isinstance(choice, dict):
+            if choice.get("finish_reason"):
+                finish_reason = str(choice.get("finish_reason") or "")
             take_field(choice)
             _collect_calls(calls, choice)
         text = _choice_text(choice if isinstance(choice, dict) else {})
@@ -1404,15 +1627,21 @@ async def _iter_completion_body(response: httpx.Response, *, started: float | No
             held.extend(pieces)
         else:
             for piece in pieces:
+                if piece:
+                    saw_answer = True
                 yield piece
     for piece in _finish_pieces(splitter, saw_field=saw_field):
         if calls:
             held.append(piece)
         else:
+            if piece:
+                saw_answer = True
             yield piece
+    prose = "".join(held).strip()
+    if calls or not saw_answer:
+        raise_if_bad_tool_reply(prose=prose, bucket=calls, finish_reason=finish_reason, tools=True)
     _store_native_calls(calls)
     fence = calls_to_fences(list(calls.values()))
-    prose = "".join(held).strip()
     if fence and prose:
         yield prose + "\n"
     if fence:
@@ -1432,11 +1661,16 @@ async def _stream_once(
     messages: list[dict],
     timeout: float,
 ) -> AsyncIterator[str]:
-    """One streaming attempt. A tool-call parse 500 is tried again before the first token."""
+    """One streaming attempt. A tool-call parse 500 is tried again before the first token.
+
+    Every try still sends the tool list. The last try does not drop tools.
+    """
     working = [dict(item) for item in messages if isinstance(item, dict)]
     single = False
     flag_off = not parallel_tool_calls_supported(base_url)
     left = TOOL_PARSE_RETRIES
+    attempt = 0
+    last_excerpt = ""
     while True:
         try:
             async for piece in _stream_attempt(
@@ -1446,17 +1680,21 @@ async def _stream_once(
                 messages=working,
                 timeout=timeout,
                 parallel_tool_calls=False if single and not flag_off else None,
+                attempt=attempt,
             ):
                 yield piece
             return
         except _ToolParseAgain as exc:
+            last_excerpt = exc.excerpt or last_excerpt
             if exc.drop_flag:
                 flag_off = True
                 remember_parallel_tool_calls(base_url, False)
+                attempt += 1
                 continue
             if left <= 0:
-                raise ProviderError(MALFORMED_TOOL_TEXT) from exc
+                raise ProviderError(malformed_with_excerpt(last_excerpt)) from exc
             left -= 1
+            attempt += 1
             single = True
             working = nudge_single_tool(working)
 
@@ -1469,6 +1707,7 @@ async def _stream_attempt(
     messages: list[dict],
     timeout: float,
     parallel_tool_calls: bool | None = None,
+    attempt: int = 0,
 ) -> AsyncIterator[str]:
     """One streaming POST. A pause after the headers is not a failure."""
     from easyagent.generation import GenerationLimit, GenerationWatch, current_limits
@@ -1481,8 +1720,10 @@ async def _stream_attempt(
         messages,
         model,
         stream=True,
+        tools=True,
         parallel_tool_calls=parallel_tool_calls,
         max_tokens=limits.max_tokens,
+        temperature=_tool_temperature(True, None, None, attempt),
     )
     watch = GenerationWatch(limits)
     headers = {"Content-Type": "application/json"}
@@ -1501,14 +1742,14 @@ async def _stream_attempt(
             _raise_transport(exc, base_url)
         try:
             if response.status_code >= 400:
-                full = " ".join((await response.aread()).decode("utf-8", "replace").split())
-                action = _tool_http_action(response.status_code, full, sent_parallel_flag=sent_flag)
-                if action == "drop-flag":
-                    raise _ToolParseAgain(drop_flag=True)
-                if action == "retry":
-                    raise _ToolParseAgain()
-                detail = full[:300]
-                raise ProviderError(f"{response.status_code} from {base_url}: {detail}")
+                full = (await response.aread()).decode("utf-8", "replace")
+                _fail_http(
+                    response.status_code,
+                    full,
+                    sent_parallel_flag=sent_flag,
+                    attempt=attempt,
+                    base_url=base_url,
+                )
             body = _iter_completion_body(response, started=started, messages=messages).__aiter__()
             wait = watch.limits.first_token_seconds
             while True:
@@ -1545,7 +1786,7 @@ async def _stream_attempt(
         turn_mod.detach_client(client)
         await client.aclose()
     if not yielded:
-        raise ProviderError("Endpoint returned an empty message.")
+        raise ProviderError(EMPTY_TOOL_TEXT)
 
 
 async def _stream_window(

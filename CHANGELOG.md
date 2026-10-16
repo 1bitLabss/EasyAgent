@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.3.32
+- A tool-call failure from the model server keeps a short excerpt of the server body, in the activity log and in the resumable error. Tool requests send EasyAgent's own temperature, starting at 0.6 and stepping down on each retry, and the tool list stays on every try.
+- A reply with no text and no tool call, a stream error, a tool call cut off by length, or thinking text inside a tool call stays a visible resumable error.
+- After a turn that writes files, the chat names those files. A write to an existing file waits for a read of its current bytes. A done or fixed claim says when this turn did not run a check. A long request is saved as a checklist, and a file that checklist never named is shown on a card.
+
 ## 0.3.31
 
 - Stopping the server while a reply is still arriving keeps that reply. The stop can leave it live, without an interrupted flag. Starting again does not store a second copy when that line, or the last assistant line, already has the same text.

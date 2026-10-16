@@ -151,6 +151,7 @@ def public_endpoint(endpoint: dict) -> dict:
         "max_tokens": _public_max_tokens(endpoint),
         "stall_seconds": _public_stall_seconds(endpoint),
         "first_token_seconds": _public_first_token_seconds(endpoint),
+        "tool_temperature": _public_tool_temperature(endpoint),
         "n_ctx": clean_tokens(endpoint.get("n_ctx")),
         "created_at": endpoint.get("created_at"),
     }
@@ -347,6 +348,24 @@ def clean_stall_seconds(value) -> int | None:
     return value
 
 
+def _public_tool_temperature(endpoint: dict) -> float:
+    from easyagent.generation import effective_tool_temperature
+
+    return effective_tool_temperature(endpoint)
+
+
+def clean_tool_temperature(value) -> float | None:
+    """Sampling for tool requests. Blank keeps 0.6."""
+    if value is None or value == "":
+        return None
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise StoreError("Tool temperature must be a number from 0 to 2.", 400)
+    number = float(value)
+    if number < 0 or number > 2:
+        raise StoreError("Tool temperature must be a number from 0 to 2.", 400)
+    return round(number, 4)
+
+
 def clean_first_token_seconds(value) -> int | None:
     """How long to wait for the first token. Blank keeps 120 seconds."""
     if value is None or value == "":
@@ -388,6 +407,7 @@ class EndpointIn(BaseModel):
     max_tokens: int | None = None
     stall_seconds: int | None = None
     first_token_seconds: int | None = None
+    tool_temperature: float | None = None
     n_ctx: int | None = None
 
 
@@ -402,6 +422,7 @@ class EndpointPatch(BaseModel):
     max_tokens: int | None = None
     stall_seconds: int | None = None
     first_token_seconds: int | None = None
+    tool_temperature: float | None = None
     n_ctx: int | None = None
 
 
@@ -897,6 +918,7 @@ def create_app(data_dir: str | Path | None = None) -> FastAPI:
             max_tokens=clean_max_tokens(body.max_tokens) if "max_tokens" in body.model_fields_set else None,
             stall_seconds=clean_stall_seconds(body.stall_seconds) if "stall_seconds" in body.model_fields_set else None,
             first_token_seconds=clean_first_token_seconds(body.first_token_seconds) if "first_token_seconds" in body.model_fields_set else None,
+            tool_temperature=clean_tool_temperature(body.tool_temperature) if "tool_temperature" in body.model_fields_set else None,
         )
         return public_endpoint(record)
 
@@ -923,6 +945,8 @@ def create_app(data_dir: str | Path | None = None) -> FastAPI:
             stall_seconds_set="stall_seconds" in fields,
             first_token_seconds=clean_first_token_seconds(body.first_token_seconds) if "first_token_seconds" in fields else None,
             first_token_seconds_set="first_token_seconds" in fields,
+            tool_temperature=clean_tool_temperature(body.tool_temperature) if "tool_temperature" in fields else None,
+            tool_temperature_set="tool_temperature" in fields,
         )
         if _snapshot_bots(store) != bots_before:
             raise HTTPException(500, "Saving a connection changed a bot or a chat.")
@@ -3137,8 +3161,9 @@ def _turn_messages(store: Store, bot_id: str, chat: dict) -> tuple[dict, list[di
         connectors=_connectors_prompt(store, bot_id),
         bridges=_bridges_prompt(store),
     )
-    from easyagent.plan import load_plan, prompt_block
+    from easyagent.plan import ensure_request_checklist, load_plan, prompt_block
 
+    ensure_request_checklist(store, bot_id, chat.get("id") or "", _last_user_text(chat.get("messages") or []))
     system = system + "\n\n" + prompt_block(load_plan(store, bot_id, chat.get("id") or ""))
     from easyagent.nctx import note_system_tokens
     from easyagent.situation import attach_desktop
@@ -4945,6 +4970,27 @@ def _settle_interrupted(store: Store, bot_id: str, chat_id: str, reason: str = "
         _log.warning("Could not record that the run stopped.")
 
 
+def _stick_turn_notes(store: Store, chat: dict) -> None:
+    """A diff and an unplanned-file card sit after the reply. They do not pause the job."""
+    from easyagent.plan import _status_row
+    from easyagent.tools import end_turn_checks, flush_turn_notes, take_turn_notes
+
+    flush_turn_notes(store, chat.get("bot_id"), chat.get("id"))
+    messages = chat.setdefault("messages", [])
+    rows = [_status_row(about, redact(store, text)) for about, text in take_turn_notes()]
+    if rows:
+        if (
+            messages
+            and messages[-1].get("role") == "assistant"
+            and messages[-1].get("kind") not in {"status", "resume-offer", "pickup", "activity"}
+        ):
+            index = len(messages) - 1
+            messages[index:index] = rows
+        else:
+            messages.extend(rows)
+    end_turn_checks()
+
+
 def _append_error(store: Store, bot_id: str, chat_id: str, detail: str) -> dict:
     """Keep every stored turn and append the error. The transcript is not shortened.
 
@@ -4956,9 +5002,9 @@ def _append_error(store: Store, bot_id: str, chat_id: str, detail: str) -> dict:
     before = len(chat.get("messages") or [])
     cleaned = " ".join((redact(store, detail) or "").split())
     harness = retry.is_unreachable_message(cleaned)
-    malformed = llm.malformed_tool_call(cleaned)
+    malformed = llm.is_resumable_model_error(cleaned)
     if malformed:
-        shown = llm.MALFORMED_TOOL_TEXT
+        shown = llm.resumable_shown(cleaned)
     elif harness:
         shown = cleaned
     else:
@@ -4987,6 +5033,7 @@ def _append_error(store: Store, bot_id: str, chat_id: str, detail: str) -> dict:
             if not malformed:
                 _hold_failed_turn(store, bot_id, chat_id, chat)
             _settle_chips(chat)
+            _stick_turn_notes(store, chat)
             _save_chat_final(store, chat)
             poke(store, "message")
             public = _public_chat(store, chat)
@@ -5012,6 +5059,7 @@ def _append_error(store: Store, bot_id: str, chat_id: str, detail: str) -> dict:
     if not malformed:
         _hold_failed_turn(store, bot_id, chat_id, chat)
     _settle_chips(chat)
+    _stick_turn_notes(store, chat)
     _save_chat_final(store, chat)
     poke(store, "message")
     if len(chat.get("messages") or []) < before:
@@ -5302,6 +5350,9 @@ def _finish_reply(
     chat = store.get_chat(bot_id, chat_id)
     _drop_activity(chat)
     visible = redact(store, visible)
+    from easyagent.tools import apply_verify_note
+
+    visible = apply_verify_note(visible)
     visible = keep_lessons(store, bot_id, visible)
     visible, handed = take_file(visible)
     attachment = _preview_attachment(store, bot_id, chat_id, made, visible)
@@ -5347,6 +5398,7 @@ def _finish_reply(
         _apply_run(chat, status="idle")
         _record_turn_meter(chat, clear_overflow=True)
         _settle_chips(chat)
+        _stick_turn_notes(store, chat)
         store.save_chat(chat)
         public = _public_chat(store, chat)
         return {"reply": "", "skills_saved": saved, "chat": public, "context": public["context"]}
@@ -5468,6 +5520,7 @@ def _finish_reply(
     else:
         _apply_run(chat, status="idle")
     _settle_chips(chat)
+    _stick_turn_notes(store, chat)
     _save_chat_final(store, chat)
     poke(store, "message")
     public = _public_chat(store, chat)

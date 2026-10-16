@@ -19,6 +19,15 @@ def remote_assets_answer(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def turn_checks_start_clear():
+    from easyagent.tools import end_turn_checks
+
+    end_turn_checks()
+    yield
+    end_turn_checks()
+
+
+@pytest.fixture(autouse=True)
 def safety_starts_clean():
     from easyagent.safety import reset_for_tests
 

@@ -582,6 +582,7 @@ class Store:
         max_tokens: int | None = None,
         stall_seconds: int | None = None,
         first_token_seconds: int | None = None,
+        tool_temperature: float | None = None,
     ) -> dict:
         record = {
             "id": self._parse_id(endpoint_id) if endpoint_id else new_id(),
@@ -601,6 +602,8 @@ class Store:
             record["stall_seconds"] = int(stall_seconds)
         if first_token_seconds is not None:
             record["first_token_seconds"] = int(first_token_seconds)
+        if tool_temperature is not None:
+            record["tool_temperature"] = float(tool_temperature)
         has_key = self._store_endpoint_key(record["id"], api_key)
         record["has_api_key"] = has_key
         with self._lock:
@@ -646,6 +649,8 @@ class Store:
         stall_seconds_set: bool = False,
         first_token_seconds: int | None = None,
         first_token_seconds_set: bool = False,
+        tool_temperature: float | None = None,
+        tool_temperature_set: bool = False,
     ) -> dict:
         """Change one saved connection. Bot directories and chats are not opened."""
         endpoint_id = self._parse_id(endpoint_id)
@@ -689,6 +694,11 @@ class Store:
                     match.pop("first_token_seconds", None)
                 else:
                     match["first_token_seconds"] = int(first_token_seconds)
+            if tool_temperature_set:
+                if tool_temperature is None:
+                    match.pop("tool_temperature", None)
+                else:
+                    match["tool_temperature"] = float(tool_temperature)
             match.pop("detected_n_ctx", None)
             atomic_write_json(self.endpoints_path, endpoints)
         return self._hydrate_endpoint(match)

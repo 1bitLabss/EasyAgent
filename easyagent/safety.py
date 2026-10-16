@@ -13,6 +13,7 @@ import hashlib
 import os
 import re
 import shutil
+import stat
 import sys
 import tempfile
 import threading
@@ -254,9 +255,27 @@ def is_unattended() -> bool:
     return bool(_UNATTENDED.get())
 
 
+_SKILL_CHECK: ContextVar[bool] = ContextVar("easyagent_skill_check", default=False)
+
+
+def begin_skill_check() -> Token:
+    """A learned skill's check. It does not get the interactive allow-list."""
+    return _SKILL_CHECK.set(True)
+
+
+def end_skill_check(token: Token) -> None:
+    _SKILL_CHECK.reset(token)
+
+
+def ordinary_relax() -> bool:
+    """sed, mkdir, cp, and touch may run while a person is here. A routine or a skill check may not."""
+    return not is_unattended() and not _SKILL_CHECK.get()
+
+
 def reset_for_tests() -> None:
     _PENDING.clear()
     _UNTRUSTED.clear()
+    _SNIFF_CACHE.clear()
     try:
         from easyagent.connectors import reset_for_tests as reset_connectors
 
@@ -777,6 +796,12 @@ def _split_chain(command: str) -> list[str]:
             i += 1
             continue
         if ch == "&":
+            prev = buf[-1] if buf else ""
+            nxt = text[i + 1] if i + 1 < len(text) else ""
+            if prev in {">", "<"} or nxt in {">", "<", "|"}:
+                buf.append(ch)
+                i += 1
+                continue
             rest = text[i + 1:].strip()
             if not rest:
                 i += 1
@@ -891,6 +916,44 @@ def _inside(path: Path, roots: list[Path]) -> bool:
     return False
 
 
+_ENV_TEMPLATE_MARKS = frozenset({"example", "sample", "template", "dist", "default"})
+# A template mark does not hide a real env, a key, or a backup.
+_ENV_REAL_PARTS = frozenset({
+    "local", "production", "prod", "development", "dev", "test", "testing",
+    "staging", "stage", "pem", "key", "bak", "swp", "json", "old", "backup",
+    "orig", "secret", "priv", "private", "credentials", "save",
+})
+
+
+def _env_name_parts(name: str) -> list[str]:
+    low = (name or "").strip().lower()
+    return [part for part in low.split(".") if part and part != "env"]
+
+
+def _env_template_name(name: str) -> bool:
+    """A committed env template. ``.envrc`` and a real ``.env`` are not templates.
+
+    The name is only a candidate. ``secret_class`` still sniffs the bytes, and a
+    name that also says local, production, pem, key, bak, or json is never a template.
+    Leading or trailing whitespace is not a template: ``' .env.example'`` stays a secret name.
+    """
+    raw = name or ""
+    if raw != raw.strip():
+        return False
+    low = raw.strip().lower()
+    if low.endswith(_SECRET_SUFFIXES) or any(part in _ENV_REAL_PARTS for part in _env_name_parts(low)):
+        return False
+    bare = low.rstrip(".")
+    if bare in {f"{mark}.env" for mark in _ENV_TEMPLATE_MARKS}:
+        return True
+    if not low.startswith(".env."):
+        return False
+    parts = _env_name_parts(bare)
+    marks = [part for part in parts if part in _ENV_TEMPLATE_MARKS]
+    others = [part for part in parts if part not in _ENV_TEMPLATE_MARKS]
+    return bool(marks) and not others
+
+
 def _secret_kind(path: Path) -> str:
     name = path.name.lower()
     text = str(path).lower().replace("\\", "/")
@@ -898,6 +961,8 @@ def _secret_kind(path: Path) -> str:
         return "browser"
     if "cookies" in text and ("chrome" in text or "firefox" in text or "safari" in text or "edge" in text):
         return "browser"
+    if _env_template_name(name):
+        return ""
     if name in {".env", ".env.local", ".env.production"} or name.startswith(".env."):
         return "secret"
     if name in {"id_rsa", "id_ed25519", "id_ecdsa"} or name.endswith(".pem"):
@@ -948,9 +1013,286 @@ _SECRET_NAMES = frozenset({
     ".netrc",
     ".pgpass",
     ".token",
+    ".npmrc",
+    ".pypirc",
+    ".git-credentials",
 })
-_SECRET_SUFFIXES = (".pem", ".key", ".p12", ".pfx", ".kdbx", ".token")
+_SECRET_SUFFIXES = (".pem", ".key", ".p12", ".pfx", ".kdbx", ".jks", ".token")
 _SECRET_DIRS = frozenset({".ssh", ".gnupg", ".aws"})
+_TEXT_SUFFIXES = frozenset({
+    "", ".txt", ".text", ".json", ".yml", ".yaml", ".xml", ".env",
+    ".conf", ".cfg", ".ini", ".toml", ".csv", ".log",
+})
+_SNIFF_CACHE: dict[tuple, str | None] = {}
+_SNIFF_MAX = 1_000_000
+_TEMPLATE_CAP = 16_000_000
+_ASSIGN_LINE = re.compile(
+    br"(?im)^(?:export\s+)?([A-Za-z_][A-Za-z0-9_]{0,60})\s*=\s*['\"]?([^\s'\"#]*)"
+)
+_SECRET_KEY_NAME = re.compile(
+    br"(?i)(?:pass(?:word|wd)?|secret|token|api[_-]?key|auth|credential|private)"
+)
+_PRIVATE_KEY = re.compile(br"-----BEGIN [A-Z0-9 ]{0,40}PRIVATE KEY-----")
+_PUTTY_KEY = b"PuTTY-User-Key-File"
+_AUTH_ASSIGN = re.compile(br"(?i)_auth(?:Token)?\s*=")
+_AWS_SECRET = re.compile(br"(?i)\b(?:AWS_SECRET_ACCESS_KEY|aws_secret)\b")
+_TOKEN_SHAPE = re.compile(
+    br"(?:ghp_|gho_|github_pat_|sk_live_|sk_test_|sk-|xox[bp]-)[A-Za-z0-9_\-]{8,}"
+)
+_NAMED_SECRET = re.compile(
+    br"(?im)^[^\r\n]{0,80}\b(?:token|secret|password|api[_-]?key)\b[^\r\n]{0,40}"
+    br"[=:][ \t]*['\"]?([A-Za-z0-9+/_=.-]{32,})"
+)
+_ASSIGN_VALUE = re.compile(br"(?im)^[A-Za-z_][A-Za-z0-9_]{0,60}\s*=\s*['\"]?([^\s'\"#]{16,})")
+_OBVIOUS_PLACEHOLDER = re.compile(
+    br"(?i)(?:your[_\-]|changeme|change_me|placeholder|example|xxx+|todo|replace|dummy|sample|<.*>|insert|password123)"
+)
+
+
+def _classify_names(path: Path) -> str | None:
+    """Name, suffix, and directory classification. Does not open the file."""
+    raw = path.name
+    if raw != raw.strip() and (_env_template_name(raw.strip()) or raw.strip().lower().startswith(".env")):
+        return "name"
+    low = raw.lower()
+    if "env" in low and any(part in _ENV_REAL_PARTS for part in _env_name_parts(low)):
+        return "name"
+    if _secret_kind(path):
+        return "name"
+    name = low
+    if name in _SECRET_NAMES or name.endswith(_SECRET_SUFFIXES):
+        return "name"
+    if {part.lower() for part in path.parts} & _SECRET_DIRS:
+        return "name"
+    suffix = Path(name).suffix.lower()
+    stem = Path(name).stem.lower()
+    if "token" in stem and suffix in _TEXT_SUFFIXES:
+        return "name"
+    return None
+
+
+def _name_secret(path: Path) -> str | None:
+    reason = _classify_names(path)
+    if reason:
+        return reason
+    try:
+        link = path.is_symlink()
+    except OSError:
+        return None
+    if not link:
+        return None
+    try:
+        target = path.resolve()
+    except OSError:
+        return "symlink"
+    return _classify_names(target)
+
+
+def _shares_secret_inode(path: Path) -> bool:
+    """A hardlink keeps the secret bytes under a bland name."""
+    try:
+        if path.is_symlink() or not path.is_file():
+            return False
+        st = path.stat()
+        if not stat.S_ISREG(st.st_mode):
+            return False
+        siblings = list(path.parent.iterdir())
+    except OSError:
+        return False
+    for entry in siblings:
+        if entry.name == path.name:
+            continue
+        try:
+            if entry.is_symlink():
+                continue
+            other = entry.lstat()
+        except OSError:
+            continue
+        if not stat.S_ISREG(other.st_mode):
+            continue
+        if other.st_ino != st.st_ino or other.st_dev != st.st_dev:
+            continue
+        if _name_secret(entry) is None:
+            continue
+        return True
+    return False
+
+
+def _sniff_blob(blob: bytes) -> str | None:
+    if not blob:
+        return None
+    if _PRIVATE_KEY.search(blob) or _PUTTY_KEY in blob:
+        return "content"
+    if _AUTH_ASSIGN.search(blob) or _AWS_SECRET.search(blob) or _TOKEN_SHAPE.search(blob):
+        return "content"
+    if _NAMED_SECRET.search(blob):
+        return "content"
+    return None
+
+
+def sniff_secret(path: Path) -> str | None:
+    """First 8 KB of a regular file at most 1 MB. A symlink that leaves the folder is not followed.
+
+    The result is cached by path, mtime, and size. Name-classified files should
+    be rejected before this runs, so a key named id_rsa is never opened.
+    """
+    try:
+        if path.is_symlink():
+            parent = path.parent.resolve()
+            target = path.resolve()
+            if target != parent and parent not in target.parents:
+                return None
+            path = target
+        if not path.is_file():
+            return None
+        st = path.stat()
+        if not stat.S_ISREG(st.st_mode) or st.st_size > _SNIFF_MAX or st.st_size <= 0:
+            return None
+        key = (str(path), st.st_mtime_ns, st.st_size)
+        if key in _SNIFF_CACHE:
+            return _SNIFF_CACHE[key]
+        with path.open("rb") as handle:
+            blob = handle.read(8192)
+    except OSError:
+        return None
+    reason = _sniff_blob(blob)
+    if len(_SNIFF_CACHE) > 4096:
+        _SNIFF_CACHE.pop(next(iter(_SNIFF_CACHE)), None)
+    _SNIFF_CACHE[key] = reason
+    return reason
+
+
+def _template_assignment_secret(blob: bytes) -> bool:
+    """A template KEY=value whose value is not an obvious placeholder.
+
+    ``COLOR=blue``, ``PORT=3000``, ``DEBUG=true``, and ``API_KEY=your_key_here``
+    stay. ``DB_PASSWORD=hunter2`` and a long value on any key do not: a password
+    does not have to look like a token.
+    """
+    for match in _ASSIGN_LINE.finditer(blob or b""):
+        key, value = match.group(1), match.group(2)
+        if not value or _OBVIOUS_PLACEHOLDER.search(value):
+            continue
+        if value.lower() in {b"true", b"false", b"null", b"none", b"yes", b"no"}:
+            continue
+        if re.fullmatch(br"\d{1,6}", value):
+            continue
+        if _SECRET_KEY_NAME.search(key) or len(value) >= 8:
+            return True
+    return False
+
+
+def _stream_template(path: Path) -> str | None:
+    """Read a template in chunks. A match stops the read. No whole-file buffer."""
+    pending = b""
+    try:
+        with path.open("rb") as handle:
+            while True:
+                chunk = handle.read(256 * 1024)
+                if not chunk:
+                    break
+                pending += chunk
+                if b"\n" not in pending and len(pending) > 65536:
+                    if _sniff_blob(pending):
+                        return "content"
+                    pending = pending[-4096:]
+                    continue
+                lines = pending.split(b"\n")
+                pending = lines[-1]
+                block = b"\n".join(lines[:-1])
+                if block and (_sniff_blob(block) or _template_assignment_secret(block)):
+                    return "content"
+    except OSError:
+        return "content"
+    if pending and (_sniff_blob(pending) or _template_assignment_secret(pending)):
+        return "content"
+    return None
+
+
+def _sniff_template(path: Path) -> str | None:
+    """Whole template, streamed, up to 16 MB. Larger than that is secret."""
+    try:
+        if path.is_symlink():
+            path = path.resolve()
+        if not path.is_file():
+            return None
+        st = path.stat()
+        if not stat.S_ISREG(st.st_mode) or st.st_size <= 0:
+            return None
+        key = ("tmpl", str(path), st.st_mtime_ns, st.st_size)
+        if key in _SNIFF_CACHE:
+            return _SNIFF_CACHE[key]
+        if st.st_size > _TEMPLATE_CAP:
+            reason = "content"
+        else:
+            reason = _stream_template(path)
+    except OSError:
+        return "content"
+    if len(_SNIFF_CACHE) > 4096:
+        _SNIFF_CACHE.pop(next(iter(_SNIFF_CACHE)), None)
+    _SNIFF_CACHE[key] = reason
+    return reason
+
+
+def _classify_resolved(path: Path) -> str | None:
+    """Name, hardlink, or content. A template name is exempt only when the bytes are placeholders."""
+    raw_name = path.name
+    if raw_name != raw_name.strip() and (
+        _env_template_name(raw_name.strip()) or raw_name.strip().lower().startswith(".env")
+    ):
+        return "name"
+    if {part.lower() for part in path.parts} & _SECRET_DIRS:
+        return "name"
+    if _shares_secret_inode(path):
+        return "hardlink"
+    if _env_template_name(raw_name):
+        # A missing template has no bytes. A file we cannot read is not proved placeholder-only.
+        # nlink > 1 is a hardlink even when the secret-named sibling is not in this directory.
+        try:
+            if not path.is_file():
+                return None
+            st = path.stat()
+            if stat.S_ISREG(st.st_mode) and st.st_nlink > 1:
+                return "hardlink"
+        except OSError:
+            return "content"
+        sniffed = _sniff_template(path)
+        if sniffed:
+            return sniffed
+        try:
+            with path.open("rb") as handle:
+                handle.read(1)
+        except OSError:
+            return "content"
+        return None
+    reason = _name_secret(path)
+    if reason:
+        return reason
+    return sniff_secret(path)
+
+
+def secret_class(path: Path) -> str | None:
+    """Why this path is a secret, or None. One classifier for read, write, search, and the shell.
+
+    A template name is not an exemption by itself. The bytes have to be placeholder-only,
+    the name cannot also be a real env or a key, and a symlink is classified as its target.
+    """
+    try:
+        linked = path.is_symlink()
+    except OSError:
+        linked = False
+    if linked:
+        try:
+            target = path.resolve()
+        except OSError:
+            return "symlink"
+        reason = _classify_resolved(target)
+        if reason:
+            return "symlink"
+        if _env_template_name(path.name):
+            return None
+        return _classify_resolved(path)
+    return _classify_resolved(path)
 
 
 def secret_file(path: Path) -> bool:
@@ -958,14 +1300,7 @@ def secret_file(path: Path) -> bool:
 
     A search must not open these files. read_file and patch card them first.
     """
-    if _secret_kind(path):
-        return True
-    name = path.name.lower()
-    if name in _SECRET_NAMES:
-        return True
-    if name.endswith(_SECRET_SUFFIXES):
-        return True
-    return bool({part.lower() for part in path.parts} & _SECRET_DIRS)
+    return secret_class(path) is not None
 
 
 def _is_profile_root(path: Path) -> bool:
@@ -2538,6 +2873,11 @@ def _judge_command_body(
         return effect
     if re.search(r"(?i)(cookies|login data|logins\.json|key4\.db|web data)", text):
         return _verdict(BLOCK, "browser-store", "Browser cookies and saved passwords are never read.", text.strip(), _fp("cmd", text.strip()))
+    from easyagent.scriptgate import plain_loop
+
+    if plain_loop(text, cwd) and ordinary_relax():
+        loop = text.strip()
+        return _verdict(ALLOW, "read-command", "That command reads. It does not change the computer.", loop, _command_fingerprint(loop))
     pieces = _split_chain(text)
     if len(pieces) > 1:
         verdicts = [
@@ -2649,8 +2989,13 @@ def _judge_command_body(
         return _verdict(ALLOW, "harmless", "That command only reads or prints.", detail, fingerprint)
     if _READ_CMD.search(line):
         return _verdict(ALLOW, "read-command", "That command reads. It does not change the computer.", detail, fingerprint)
+    from easyagent.scriptgate import awk_plain_read
+
+    if awk_plain_read(line, cwd):
+        return _verdict(ALLOW, "read-command", "That command reads. It does not change the computer.", detail, fingerprint)
     quiet = re.sub(r"\s+&\s*$", "", line)
     quiet = re.sub(r"(?i)(?:^|\s)<\s*\S+", " ", quiet)
+    quiet = re.sub(r"(?:^|\s)\d*>&\d+", " ", quiet)
     if re.search(r"[|&;<>`$]", quiet):
         return _verdict(REVIEW, "unmatched-shell", "That command is not one the rules recognize.", detail, fingerprint)
     if _DOTNET_CALL.search(line):
@@ -3038,9 +3383,9 @@ def classify(store: Store, request, bot_id: str | None) -> Verdict:
                     _fp("mcp-install", command[:180]),
                 )
         if kind in {"shell", "ssh", "windows"} and not remote:
-            from easyagent.psast import data_decision
+            from easyagent.psast import resolved_data_decision
 
-            decision = data_decision(store, command, cwd, bot_id)
+            decision = resolved_data_decision(store, command, cwd, bot_id)
             if decision == "block" and verdict.rule not in {
                 "guardrail-edit",
                 "root-delete",
@@ -3098,10 +3443,27 @@ def classify(store: Store, request, bot_id: str | None) -> Verdict:
                             _fp("script-run", command[:180]),
                         ),
                     )
-        if verdict.tier == ALLOW and bot_id:
+        if bot_id and verdict.tier != BLOCK and verdict.rule not in {
+            "injection",
+            "mcp-install",
+            "data-dir",
+            "guardrail-edit",
+            "root-delete",
+            "remote-script",
+            "fork-bomb",
+            "disk-format",
+            "firewall-off",
+            "credential-dump",
+            "browser-store",
+        }:
             from easyagent.browser import command_runs_download
 
-            if command_runs_download(store, bot_id, command):
+            # A downloaded file still waits under the download rule. Scanning its
+            # bytes can also look like a secret read; the download card is the
+            # one that names why this file must not run, and /yolo cannot skip it.
+            if command_runs_download(store, bot_id, command) and (
+                verdict.tier == ALLOW or verdict.rule == "read-secret"
+            ):
                 verdict = _verdict(
                     ASK,
                     "download-exec",
@@ -3695,6 +4057,8 @@ async def guard(store: Store, request, bot_id: str | None):
     slot = turn_mod.current_slot()
     if slot is not None:
         slot.script_human_approved = False
+    if getattr(request, "kind", "") == "failed":
+        raise ToolError(getattr(request, "body", "") or "That call could not be run.")
 
     budget = _budget()
     verdict = budget or classify(store, request, bot_id)

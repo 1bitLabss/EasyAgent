@@ -3,6 +3,7 @@
 import asyncio
 import shlex
 import sys
+from pathlib import Path
 
 from easyagent.learn import (
     BODY_CAP,
@@ -510,3 +511,29 @@ def test_a_checker_revision_and_the_nightly_pass_propose_candidates(tmp_path, mo
     names = {item["name"] for item in list_candidates(store, bot["id"], status="candidate")}
     assert "night-note" in names
     assert not (store.skills_dir / "night-note.md").is_file()
+
+
+def test_learned_check_command_not_run_unchecked(tmp_path):
+    """A skill check does not get the interactive allow-list. touch outside the folder does not run."""
+    import os
+    import tempfile
+
+    store, _endpoint, bot = _world(tmp_path)
+    marker = Path(tempfile.gettempdir()) / f"PWNED_LEARN_{os.getpid()}"
+    marker.unlink(missing_ok=True)
+    command = f"touch {marker}"
+    save_candidate(
+        store,
+        bot["id"],
+        _proposal(name="touch-note", check={"kind": "command", "command": command, "exit_code": 0}),
+        source={"model": "bot-model", "connection": "home"},
+    )
+    try:
+        result = asyncio.run(sleep_once(store, mock=True, runs=1, bot_id=bot["id"]))
+        assert not marker.exists()
+        assert result["promoted"] == []
+        assert "touch-note" not in _live(store)
+        assert result["rejected"]
+        assert "not run" in result["rejected"][0]["reason"].lower()
+    finally:
+        marker.unlink(missing_ok=True)

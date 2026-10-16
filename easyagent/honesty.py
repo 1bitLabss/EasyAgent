@@ -63,6 +63,7 @@ _SHELL_MUTATE = re.compile(
 _MCP_MUTATE = re.compile(r"(?i)\b(write|delete|remove|send|update|create|put|post|edit|unlink)\b")
 _WRITE_ACTIONS = {"write", "delete", "move", "append", "edit", "mkdir", "create", "remove", "patch"}
 _EXIT = re.compile(r"exit code (\d+)")
+_NOT_RUN = re.compile(r"(?i)\b(?:was not run|not run|did not run|was not started|expired|denied|denial)\b")
 _TOOL_LINE = re.compile(r"^TOOL\s+(\S+)(?:\s+(.*))?$")
 _KV = re.compile(r"(\w+)=((?:\"[^\"]*\")|(?:'[^']*')|\S+)")
 _BULLET = re.compile(r"(?m)^\s*(?:[-*]|\d+[.)])\s+\S")
@@ -169,6 +170,7 @@ class Trace:
     model_calls: int = 0
     last_fail_command: str = ""
     last_fail_cwd: str = ""
+    refused: set[str] = field(default_factory=set)
     shell_ran: str = ""
     lesson_prefix: str = ""
     mistakes: list | None = None
@@ -673,7 +675,10 @@ def after_tool(request, output: str, *, ok: bool) -> str:
         }
     )
     trace.last_progress = float(trace.clock())
-    executed = kind == "shell" and bool(command) and _shell_executed(trace, command, raw)
+    refused = kind == "shell" and bool(command) and _NOT_RUN.search(raw or "") is not None
+    if refused:
+        trace.refused.add(" ".join(command.split()))
+    executed = kind == "shell" and bool(command) and not refused and _shell_executed(trace, command, raw)
     trace.shell_ran = ""
     if failed:
         sig = _signature(request)
@@ -923,6 +928,8 @@ async def _rerun(trace: Trace, command: str, cwd: str) -> str:
 
     if trace.store is None:
         return "The command was not run."
+    if " ".join((command or "").split()) in trace.refused:
+        return "It was not run."
     slot = turn_mod.current_slot()
     previous_cwd = slot.cwd if slot is not None else None
     if slot is None:

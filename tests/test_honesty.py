@@ -555,3 +555,139 @@ def test_a_promise_with_no_tool_asks_once_to_run_the_check():
     assert result["hidden"] == [{"role": "user", "content": "Run the failing test or command now."}]
     assert "Run the check" in result["chips"]
     assert "Run the failing test" not in result["text"]
+
+
+def _outside_marker(name: str):
+    import os
+    import tempfile
+
+    marker = Path(tempfile.gettempdir()) / f"{name}_{os.getpid()}"
+    marker.unlink(missing_ok=True)
+    return marker
+
+
+def _excuse_world(tmp_path):
+    from easyagent import honesty, turn as turn_mod
+    from easyagent.safety import reset_for_tests
+    from easyagent.workspace import bot_workspace
+
+    reset_for_tests()
+    store, bot = _bot(tmp_path)
+    work = bot_workspace(store, bot["id"], create=True)
+    target = work / "note.txt"
+    return store, bot, work, target, honesty, turn_mod
+
+
+def _excuse_left_it(text: str) -> None:
+    if "Checked the state before this turn's changes:" in text:
+        assert "not run" in text.lower()
+
+
+def test_checker_refused_command_not_rerun_by_excuse_check(tmp_path, monkeypatch):
+    """A command the checker refused is not run again when the reply calls the failure pre-existing."""
+    from easyagent.tools import ToolError, ToolRequest, execute
+
+    monkeypatch.setenv("EASYAGENT_KEYRING", "memory")
+    monkeypatch.setenv("EASYAGENT_APPROVAL_SECONDS", "1")
+    store, bot, work, target, honesty, turn_mod = _excuse_world(tmp_path)
+    marker = _outside_marker("PWNED_REFUSED")
+    command = f"touch {marker}"
+
+    async def go():
+        honesty.begin(store, bot["id"])
+        slot = turn_mod.bind(store, "honesty-refused", bot["id"])
+        slot.cwd = str(work)
+        await execute(store, ToolRequest(kind="files", action="write", path=str(target), body="new"), bot["id"])
+        try:
+            await execute(store, ToolRequest(kind="shell", command=command), bot["id"])
+        except ToolError:
+            pass
+        outcome = await honesty.settle("The failure is pre-existing.")
+        return outcome.text
+
+    try:
+        text = asyncio.run(go())
+        assert not marker.exists()
+        _excuse_left_it(text)
+    finally:
+        marker.unlink(missing_ok=True)
+        turn_mod._slot.set(None)
+
+
+def test_denied_card_then_excuse_does_not_rerun(tmp_path, monkeypatch):
+    """Denying the card is final. The excuse check does not run the command."""
+    from easyagent.safety import list_pending, resolve_card
+    from easyagent.tools import ToolError, ToolRequest, execute
+
+    monkeypatch.setenv("EASYAGENT_KEYRING", "memory")
+    monkeypatch.setenv("EASYAGENT_APPROVAL_SECONDS", "1")
+    store, bot, work, target, honesty, turn_mod = _excuse_world(tmp_path)
+    marker = _outside_marker("PWNED_DENIED")
+    command = f"touch {marker}"
+
+    async def go():
+        honesty.begin(store, bot["id"])
+        slot = turn_mod.bind(store, "honesty-denied", bot["id"])
+        slot.cwd = str(work)
+        await execute(store, ToolRequest(kind="files", action="write", path=str(target), body="new"), bot["id"])
+        task = asyncio.create_task(execute(store, ToolRequest(kind="shell", command=command), bot["id"]))
+        cards = []
+        for _ in range(50):
+            cards = list_pending(bot["id"])
+            if cards or task.done():
+                break
+            await asyncio.sleep(0.02)
+        assert cards, "the touch outside the folder should have waited on a card"
+        resolve_card(cards[0]["id"], "deny")
+        try:
+            await task
+        except ToolError:
+            pass
+        outcome = await honesty.settle("The failure is pre-existing.")
+        return outcome.text
+
+    try:
+        text = asyncio.run(go())
+        assert not marker.exists()
+        _excuse_left_it(text)
+    finally:
+        marker.unlink(missing_ok=True)
+        turn_mod._slot.set(None)
+
+
+def test_unattended_held_then_expired_excuse(tmp_path, monkeypatch):
+    """A routine holds the command. Expiry and the excuse check both leave it unrun."""
+    from easyagent.safety import attend, unattended
+    from easyagent.tools import ToolError, ToolRequest, execute
+
+    monkeypatch.setenv("EASYAGENT_KEYRING", "memory")
+    monkeypatch.setenv("EASYAGENT_APPROVAL_SECONDS", "1")
+    store, bot, work, target, honesty, turn_mod = _excuse_world(tmp_path)
+    marker = _outside_marker("PWNED_UNATTENDED")
+    command = f"touch {marker}"
+
+    async def go():
+        honesty.begin(store, bot["id"])
+        slot = turn_mod.bind(store, "honesty-unattended", bot["id"])
+        slot.cwd = str(work)
+        await execute(store, ToolRequest(kind="files", action="write", path=str(target), body="new"), bot["id"])
+        token = unattended()
+        try:
+            await execute(store, ToolRequest(kind="shell", command=command), bot["id"])
+        except ToolError as exc:
+            assert "denial" in str(exc).lower() or "needs you" in str(exc).lower()
+        else:
+            raise AssertionError("unattended touch ran")
+        finally:
+            attend(token)
+        await asyncio.sleep(1.3)
+        outcome = await honesty.settle("The failure is pre-existing.")
+        return outcome.text
+
+    try:
+        text = asyncio.run(go())
+        assert not marker.exists()
+        _excuse_left_it(text)
+    finally:
+        marker.unlink(missing_ok=True)
+        turn_mod._slot.set(None)

@@ -578,10 +578,12 @@ def test_a_folder_wide_shell_read_cards_secret_files(tmp_path):
     clean = folder / "empty-tree"
     clean.mkdir()
     (clean / "notes.txt").write_text("visible-note\n", encoding="utf-8")
-    commands = [
+    recursive = [
         f"grep -rn KEYBODY {folder}",
         f"rg KEYBODY {folder}",
         f"egrep -rn KEYBODY {folder}",
+    ]
+    commands = [
         "cat *",
         "head *",
         "strings *",
@@ -591,6 +593,13 @@ def test_a_folder_wide_shell_read_cards_secret_files(tmp_path):
     ]
     try:
         turn_mod.current_slot().cwd = str(folder)
+        for command in recursive:
+            request = ToolRequest(kind="shell", command=command)
+            verdict = classify(store, request, bot["id"])
+            assert verdict.tier == "ask" and verdict.rule == "read-secret", (command, verdict.tier, verdict.rule)
+            assert covers(store, bot["id"], request, verdict) is False, (command, verdict.rule)
+        named = classify(store, ToolRequest(kind="shell", command="grep KEYBODY id_rsa"), bot["id"])
+        assert named.tier == "ask" and named.rule == "read-secret", (named.tier, named.rule)
         for command in commands:
             request = ToolRequest(kind="shell", command=command)
             verdict = classify(store, request, bot["id"])
@@ -606,7 +615,7 @@ def test_a_folder_wide_shell_read_cards_secret_files(tmp_path):
                 assert marker not in heard
         quiet = ToolRequest(kind="shell", command=f"grep -rn visible-note {clean}")
         quiet_verdict = classify(store, quiet, bot["id"])
-        assert quiet_verdict.rule != "read-secret", quiet_verdict
+        assert quiet_verdict.tier == "ask" and quiet_verdict.rule == "read-secret", quiet_verdict
     finally:
         turn_mod._slot.set(None)
         client.close()
@@ -991,7 +1000,7 @@ def test_a_live_grep_does_not_print_a_secret(tmp_path, monkeypatch):
                 blob = heard + json.dumps(stored["messages"])
                 assert "KEYBODYXYZ" not in blob, (yolo, command, heard)
                 assert "hunter2PASS" not in blob, (yolo, command)
-                assert "waits for you" in heard or "not run" in heard or stored["run"]["status"] == "paused", (
+                assert "was not run" in heard or "waits for you" in heard or stored["run"]["status"] == "paused", (
                     yolo,
                     command,
                     heard,

@@ -338,7 +338,8 @@ _GIT_LOG_VALUE = {
 }
 _GIT_COMMIT_LONG = {
     "--message", "--all", "--amend", "--no-edit", "--allow-empty", "--allow-empty-message",
-    "--author", "--date", "--signoff", "--file", "--reset-author", "--no-signoff",
+    "--author", "--date", "--signoff", "--file", "--reset-author", "--no-signoff", "--quiet",
+    "--stat", "--short",
 }
 _GIT_COMMIT_VALUE = {"--message", "--author", "--date", "--file"}
 _GIT_ADD_LONG = {"--all", "--update", "--patch", "--dry-run", "--verbose", "--force", "--intent-to-add", "--ignore-errors", "--renormalize", "--chmod"}
@@ -616,8 +617,122 @@ def _one_assignment(piece: str) -> tuple[list[tuple[str, str]], str] | None:
     return _bash_assignments(text)
 
 
+_SHELL_CONTROL = frozenset({
+    "IFS", "ENV", "BASH_ENV", "SHELLOPTS", "BASHOPTS", "GLOBIGNORE", "CDPATH",
+    "POSIXLY_CORRECT", "PYTHONSTARTUP", "PYTHONPATH", "NODE_OPTIONS", "PERL5OPT",
+    "RUBYOPT", "SSLKEYLOGFILE", "FIGNORE",
+})
+
+
+def _literal_assign_value(value: str) -> bool:
+    text = _unquote_assign(value)
+    return not any(mark in text for mark in ("$(", "${", "`", "$"))
+
+
+def _can_bind(name: str, value: str) -> bool:
+    """A literal ordinary assignment can be substituted. Run and shell-control names cannot."""
+    kind = _env_kind(name)
+    if kind == "inert":
+        return True
+    if kind != "ask":
+        return False
+    upper = (name or "").upper()
+    if upper.startswith(("LD_", "DYLD_")) or upper in _SHELL_CONTROL:
+        return False
+    return _literal_assign_value(value)
+
+
+def _subst_bindings(text: str, bindings: dict[str, str]) -> str:
+    if not bindings or "$" not in (text or ""):
+        return text
+    out: list[str] = []
+    index = 0
+    quote = ""
+    source = text or ""
+    while index < len(source):
+        ch = source[index]
+        if quote == "'":
+            out.append(ch)
+            if ch == "'":
+                quote = ""
+            index += 1
+            continue
+        if not quote and ch in {"'", '"'}:
+            quote = ch
+            out.append(ch)
+            index += 1
+            continue
+        if quote == '"' and ch == '"':
+            quote = ""
+            out.append(ch)
+            index += 1
+            continue
+        if ch == "$" and index + 1 < len(source):
+            if source[index + 1] == "{":
+                end = source.find("}", index + 2)
+                if end != -1:
+                    name = source[index + 2 : end]
+                    if name in bindings:
+                        out.append(bindings[name])
+                        index = end + 1
+                        continue
+            else:
+                match = re.match(r"[A-Za-z_][A-Za-z0-9_]*", source[index + 1 :])
+                if match and match.group(0) in bindings:
+                    out.append(bindings[match.group(0)])
+                    index += 1 + len(match.group(0))
+                    continue
+        out.append(ch)
+        index += 1
+    return "".join(out)
+
+
+def expand_literal_assignments(command: str) -> str | None:
+    """Drop literal ordinary assignments and substitute them. None means leave the old policy.
+
+    ``F=src/app.py; cat $F`` becomes ``cat src/app.py``. ``LD_PRELOAD=...``,
+    ``PATH=...``, and ``IFS=`` stay for the env-prefix card. A value that is
+    itself a substitution is not a literal.
+    """
+    safety = _safety()
+    pieces = safety._split_chain(command or "")
+    bindings: dict[str, str] = {}
+    kept: list[str] = []
+    saw = False
+    for piece in pieces:
+        parsed = _one_assignment(piece)
+        if parsed is None:
+            kept.append(_subst_bindings(piece.strip(), bindings))
+            continue
+        assigns, rest = parsed
+        if assigns and all(_env_kind(name) == "locate" for name, _value in assigns):
+            return None
+        saw = True
+        for name, value in assigns:
+            if not _can_bind(name, value):
+                return None
+            if _env_kind(name) != "inert" and _literal_assign_value(value):
+                bindings[name] = _unquote_assign(value)
+            elif _env_kind(name) == "inert" and _literal_assign_value(value):
+                bindings[name] = _unquote_assign(value)
+        if rest:
+            kept.append(_subst_bindings(rest, bindings))
+    if not saw:
+        return command
+    return " ; ".join(item for item in kept if item.strip())
+
+
 def _env_policy(command: str, cwd, roots, remote, created, mode, denied, depth):
     """Ask or block on a non-inert assignment. Return a rewritten command when only inert ones were removed."""
+    expanded = expand_literal_assignments(command) if _safety().ordinary_relax() else None
+    if expanded is not None and expanded.strip() != (command or "").strip():
+        if not expanded.strip():
+            return _ask_rule(
+                command,
+                "env-prefix",
+                "That environment assignment can change what the command runs. It waits for you.",
+            ), None
+        return None, expanded
     safety = _safety()
     pieces = safety._split_chain(command or "")
     if not pieces:
@@ -727,7 +842,7 @@ def _closed_flags(base: str, args: str, line: str, cwd, roots, remote, created, 
         "grep": dict(shorts=_GREP_SHORT, values=_GREP_VALUE, longs={"--extended-regexp", "--fixed-strings", "--basic-regexp", "--perl-regexp", "--recursive", "--line-number", "--ignore-case", "--invert-match", "--word-regexp", "--line-regexp", "--count", "--files-with-matches", "--only-matching", "--text", "--after-context", "--before-context", "--context", "--with-filename", "--no-filename", "--binary-files", "--max-count", "--quiet", "--no-messages", "--null", "--regexp", "--file", "--include", "--exclude", "--exclude-dir", "--color", "--colour"}, long_values={"--after-context", "--before-context", "--context", "--max-count", "--regexp", "--file", "--include", "--exclude", "--exclude-dir", "--binary-files", "--color", "--colour"}, exec_long={"--pre"}, exec_short=set(), ask_long={"--pre-glob"}),
         "egrep": dict(shorts=_GREP_SHORT, values=_GREP_VALUE, longs={"--line-number", "--ignore-case", "--invert-match", "--recursive", "--color"}, long_values={"--color"}, exec_long={"--pre"}, exec_short=set(), ask_long={"--pre-glob"}),
         "fgrep": dict(shorts=_GREP_SHORT, values=_GREP_VALUE, longs={"--line-number", "--ignore-case", "--invert-match", "--recursive", "--color"}, long_values={"--color"}, exec_long={"--pre"}, exec_short=set(), ask_long={"--pre-glob"}),
-        "rg": dict(shorts=set("nilwcABgtsSFvqHNeUPm"), values=set("ABCgeftm"), longs=_RG_LONG, long_values=_RG_VALUE, exec_long={"--pre"}, exec_short=set(), ask_long={"--pre-glob"}),
+        "rg": dict(shorts=set("nilwcABgtsSFvqHNeUPmr"), values=set("ABCgeftmr"), longs=_RG_LONG, long_values=_RG_VALUE, exec_long={"--pre"}, exec_short=set(), ask_long={"--pre-glob"}),
         "sort": dict(shorts=_SORT_SHORT, values=_SORT_VALUE, longs={"--numeric-sort", "--reverse", "--unique", "--key", "--field-separator", "--stable", "--human-numeric-sort", "--version-sort", "--general-numeric-sort", "--month-sort", "--ignore-leading-blanks", "--ignore-case", "--dictionary-order", "--check", "--merge", "--output", "--buffer-size", "--parallel", "--zero-terminated"}, long_values={"--key", "--field-separator", "--output", "--buffer-size", "--parallel"}, exec_long={"--compress-program"}, exec_short=set(), ask_long=set()),
         "diff": dict(shorts=_DIFF_SHORT, values=_DIFF_VALUE, longs={"--unified", "--recursive", "--brief", "--ignore-space-change", "--ignore-all-space", "--ignore-blank-lines", "--ignore-case", "--report-identical-files", "--text", "--strip-trailing-cr", "--color", "--show-c-function", "--side-by-side", "--width", "--suppress-common-lines", "--normal", "--context", "--minimal"}, long_values={"--unified", "--width", "--color", "--tabsize", "--horizon-lines"}, exec_long=set(), exec_short=set(), ask_long={"--to-file", "--from-file"}),
         "less": dict(shorts=_LESS_SHORT, values=set("pP"), longs={"--quit-if-one-screen", "--raw-control-chars", "--chop-long-lines", "--ignore-case", "--no-init", "--quit-at-eof", "--silent", "--quiet", "--squeeze-blank-lines", "--pattern", "--prompt"}, long_values={"--pattern", "--prompt"}, exec_long=set(), exec_short=set(), ask_long=set(), plus=True),
@@ -912,7 +1027,7 @@ def _git_decision(args: str, line: str, cwd, roots, remote, created, mode, denie
         "log": (_GIT_LOG_LONG, _GIT_LOG_VALUE, set("psng"), True),
         "diff": (_GIT_LOG_LONG, _GIT_LOG_VALUE, set("pwuab"), False),
         "show": (_GIT_LOG_LONG, _GIT_LOG_VALUE, set("ps"), True),
-        "commit": (_GIT_COMMIT_LONG, _GIT_COMMIT_VALUE, set("am"), False),
+        "commit": (_GIT_COMMIT_LONG, _GIT_COMMIT_VALUE, set("aqm"), False),
         "add": (_GIT_ADD_LONG, _GIT_ADD_VALUE, set("AupnvfN"), False),
         "pull": (_GIT_PULL_LONG, set(), set("qv"), False),
         "fetch": (_GIT_FETCH_LONG, set(), set("qv"), False),
@@ -932,7 +1047,28 @@ def _git_decision(args: str, line: str, cwd, roots, remote, created, mode, denie
     walk = _flag_walk(joined, shorts=shorts, values=set("mL"), longs=longs, long_values=long_values, exec_long=set(), exec_short=set(), ask_long=set(), numeric=numeric)
     if walk is not None:
         return _from_walk(walk, line, cwd, roots, remote, created, mode, denied, depth)
+    if sub == "commit" and _commit_message_unresolved(rest):
+        return _ask_rule(line, "exec-flag", "That commit message is not a literal. It waits for you.")
     return None
+
+
+def _commit_message_unresolved(words: list[str]) -> bool:
+    """A commit message that runs a substitution is not the literal form."""
+    index = 0
+    while index < len(words):
+        word = words[index]
+        value = ""
+        if word in {"-m", "--message"}:
+            value = words[index + 1] if index + 1 < len(words) else ""
+        elif word.startswith("--message="):
+            value = word.split("=", 1)[1]
+        elif word.startswith("-") and not word.startswith("--") and "m" in word[1:]:
+            attached = word[1:][word[1:].find("m") + 1 :]
+            value = attached or (words[index + 1] if index + 1 < len(words) else "")
+        if value and any(mark in value for mark in ("$(", "${", "`")):
+            return True
+        index += 1
+    return False
 
 
 def _npm_flags(args: str, line: str):
@@ -1110,11 +1246,178 @@ def _ssh_command(args: str) -> str | None:
     return None
 
 
+def _write_homes(cwd, roots) -> list:
+    """Where mkdir, cp, and touch may land. The system temp directory is not one of them."""
+    import tempfile
+
+    temp = Path(tempfile.gettempdir())
+    try:
+        temp_resolved = temp.resolve()
+    except OSError:
+        temp_resolved = temp
+    homes = []
+    for root in [cwd, *(roots or [])]:
+        try:
+            resolved = Path(root).resolve()
+        except OSError:
+            resolved = Path(root)
+        if resolved == temp_resolved:
+            continue
+        homes.append(root)
+    return homes or [cwd]
+
+
+def _ordinary_operand(token: str, cwd, roots, *, must_exist: bool) -> bool:
+    """A literal path that is not a secret and stays in this workspace."""
+    raw = (token or "").strip().strip("'\"")
+    if not raw or raw == "-" or any(mark in raw for mark in ("$(", "${", "`", "$", "*", "?", "[")):
+        return False
+    safety = _safety()
+    try:
+        path = safety._resolve(raw, cwd)
+    except Exception:
+        return False
+    if safety._name_secret(path) or (path.exists() and safety.secret_file(path)):
+        return False
+    if must_exist and not path.is_file():
+        return False
+    home = _write_homes(cwd, roots)
+    if path.exists():
+        return safety._inside(path, home) or safety._inside(path.parent, home)
+    return safety._inside(path.parent if path.parent != path else path, home) or safety._inside(path, home)
+
+
+def _sed_plain(args: str, cwd, roots) -> bool:
+    words = _words(args)
+    files: list[str] = []
+    index = 0
+    saw_script = False
+    while index < len(words):
+        word = words[index]
+        if word in {"-e", "--expression", "-f", "--file"}:
+            saw_script = True
+            nxt = words[index + 1] if index + 1 < len(words) else ""
+            if word in {"-f", "--file"}:
+                files.append(nxt)
+            elif any(mark in nxt for mark in ("$(", "`")):
+                return False
+            index += 2
+            continue
+        if word.startswith("--expression=") or word.startswith("--file="):
+            saw_script = True
+            if word.startswith("--file="):
+                files.append(word.split("=", 1)[1])
+            index += 1
+            continue
+        if word.startswith("-") and word != "-":
+            index += 1
+            continue
+        if not saw_script:
+            saw_script = True
+            if any(mark in word for mark in ("$(", "`")):
+                return False
+            index += 1
+            continue
+        files.append(word)
+        index += 1
+    return bool(files) and all(_ordinary_operand(item, cwd, roots, must_exist=True) for item in files)
+
+
+def _position_words(args: str) -> list[str]:
+    words = _words(args)
+    found: list[str] = []
+    index = 0
+    while index < len(words):
+        word = words[index]
+        if word == "--":
+            found.extend(words[index + 1 :])
+            break
+        if word.startswith("-") and word != "-":
+            index += 1
+            continue
+        found.append(word)
+        index += 1
+    return found
+
+
+def _write_paths_plain(base: str, args: str, cwd, roots) -> bool:
+    tokens = _position_words(args)
+    if not tokens:
+        return False
+    return all(_ordinary_operand(item, cwd, roots, must_exist=False) for item in tokens)
+
+
+def _cp_plain(args: str, cwd, roots) -> bool:
+    tokens = _position_words(args)
+    if len(tokens) < 2:
+        return False
+    sources, dest = tokens[:-1], tokens[-1]
+    if not all(_ordinary_operand(item, cwd, roots, must_exist=True) for item in sources):
+        return False
+    return _ordinary_operand(dest, cwd, roots, must_exist=False)
+
+
+def _timeout_inner(args: str) -> str | None:
+    words = _words(args)
+    valued = {"-k", "--kill-after", "-s", "--signal"}
+    index = 0
+    while index < len(words):
+        word = words[index]
+        if word == "--":
+            rest = words[index + 1 :]
+            if rest and re.fullmatch(r"\d+(?:\.\d+)?[smhd]?", rest[0]):
+                rest = rest[1:]
+            return " ".join(rest) if rest else None
+        head = word.split("=", 1)[0]
+        if head in valued:
+            index += 1 if "=" in word else 2
+            continue
+        if word.startswith("-") and word != "-":
+            index += 1
+            continue
+        if re.fullmatch(r"\d+(?:\.\d+)?[smhd]?", word):
+            rest = words[index + 1 :]
+            return " ".join(rest) if rest else None
+        return " ".join(words[index:])
+    return None
+
+
 def _tool_decision(base: str, args: str, program: str, line: str, cwd, roots, remote, created, mode, denied, depth):
     safety = _safety()
+    if safety.ordinary_relax() and base in {"for", "while", "until"}:
+        from easyagent.scriptgate import plain_loop
+
+        if plain_loop(line, cwd):
+            return None
+        return _ask(line)
+    if safety.ordinary_relax() and base == "sed":
+        if _sed_plain(args, cwd, roots):
+            return None
+        return _ask(line)
+    if safety.ordinary_relax() and base in {"mkdir", "touch"}:
+        if _write_paths_plain(base, args, cwd, roots):
+            return None
+        return _ask(line)
+    if safety.ordinary_relax() and base == "cp":
+        if _cp_plain(args, cwd, roots):
+            return None
+        return _ask(line)
+    if safety.ordinary_relax() and base == "timeout":
+        inner = _timeout_inner(args)
+        if not inner:
+            return _ask(line)
+        decided = _judge_text(inner, cwd, roots, remote, created, mode, denied, depth + 1)
+        if decided.tier == safety.ALLOW:
+            return None
+        return decided
     if base in _AWK or base in _EDITORS:
         if _ROOT_WIPE.search(line):
             return _block_place(line, "root")
+        if base in _AWK:
+            from easyagent.scriptgate import awk_plain_read
+
+            if awk_plain_read(line, cwd):
+                return None
         return _ask(line)
     if base in {"ssh", "scp", "sftp"}:
         if _ROOT_WIPE.search(line):

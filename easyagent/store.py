@@ -1134,6 +1134,25 @@ class Store:
         chats = self._bot_dir(bot_id) / "chats"
         return self._child(chats, f"{chat_id}.json")
 
+    def iter_chat_ids(self) -> list[tuple[str, str]]:
+        """Bot id and chat id for every transcript. Does not read the files."""
+        found: list[tuple[str, str]] = []
+        if not self.bots_dir.exists():
+            return found
+        for bot in self.bots_dir.iterdir():
+            if not bot.is_dir() or bot.is_symlink() or not ID_RE.fullmatch(bot.name):
+                continue
+            chats = bot / "chats"
+            if not chats.is_dir():
+                continue
+            for path in chats.iterdir():
+                if not path.is_file() or path.is_symlink() or path.suffix != ".json":
+                    continue
+                if not ID_RE.fullmatch(path.stem):
+                    continue
+                found.append((bot.name, path.stem))
+        return found
+
     def list_chats(self, bot_id: str) -> list[dict]:
         self.get_bot(bot_id)
         chats_dir = self._bot_dir(bot_id) / "chats"

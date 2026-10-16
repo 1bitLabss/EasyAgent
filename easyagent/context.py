@@ -159,6 +159,10 @@ def clip_message(content: str, limit: int | None = None) -> str:
     text = content or ""
     if len(text) <= cap:
         return text
+    if text.startswith("exit code ") or "TRUNCATED -" in text[:800]:
+        from easyagent.truncate import truncate_head_tail
+
+        return truncate_head_tail(text, cap, label="OUTPUT")
     keep = cap - len(TRUNCATION_NOTICE)
     if keep < 1:
         return text[:cap]

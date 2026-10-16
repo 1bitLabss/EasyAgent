@@ -36,6 +36,31 @@ _POP = {"pop-location", "popd"}
 _LISTING = {"get-childitem", "gci", "dir", "ls"}
 
 
+def resolved_data_decision(store, command: str, cwd: Path, bot_id: str | None) -> str:
+    """data_decision after literal assignments and plain loops are substituted.
+
+    ``F=src/app.py; cat $F`` and ``for f in src/*.py; do echo $f; done`` name
+    ordinary files. They are not an unresolved path into the data folder.
+    """
+    checked = command or ""
+    try:
+        from easyagent.strictshell import expand_literal_assignments
+
+        expanded = expand_literal_assignments(checked)
+        if isinstance(expanded, str) and expanded.strip():
+            checked = expanded
+    except Exception:
+        checked = command or ""
+    try:
+        from easyagent.scriptgate import plain_loop
+
+        if plain_loop(command or "", cwd) or plain_loop(checked, cwd):
+            return "allow"
+    except Exception:
+        pass
+    return data_decision(store, checked, cwd, bot_id)
+
+
 def data_decision(store, command: str, cwd: Path, bot_id: str | None) -> str:
     """``block`` when a resolved path is in the data folder outside this bot's work.
 

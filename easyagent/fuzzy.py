@@ -230,7 +230,7 @@ def _strategy_unicode_normalized(content: str, pattern: str) -> list[Span]:
 def _strategy_block_anchor(content: str, pattern: str) -> list[Span]:
     """Strategy 8: anchor on first+last lines, similarity-score the middle."""
     pattern_lines = _unicode_normalize(pattern).split('\n')
-    if len(pattern_lines) < 2:
+    if len(pattern_lines) < 3:
         return []
     first_line = pattern_lines[0].strip()
     last_line = pattern_lines[-1].strip()
@@ -259,12 +259,15 @@ def _strategy_block_anchor(content: str, pattern: str) -> list[Span]:
 
 
 def _strategy_context_aware(content: str, pattern: str) -> list[Span]:
-    """Strategy 9 (last resort): anchored per-line similarity, every non-blank line >= 0.80.
-    The anchor pre-filter bounds the scan; the all-lines rule stops coincidental matches."""
+    """Strategy 9 (last resort): anchored per-line similarity, every non-blank line >= 0.97.
+
+    A single line, or a one-character typo, is not a match. Exact, trimmed, and
+    whitespace strategies still apply those edits.
+    """
     pattern_lines = pattern.split('\n')
     content_lines = content.split('\n')
     n = len(pattern_lines)
-    if n > len(content_lines):
+    if n < 2 or n > len(content_lines):
         return []
     first_pat = pattern_lines[0].strip()
     last_pat = pattern_lines[-1].strip()
@@ -274,12 +277,12 @@ def _strategy_context_aware(content: str, pattern: str) -> list[Span]:
 
     def accept(i: int) -> bool:
         block_lines = content_lines[i:i + n]
-        if _sim(first_pat, block_lines[0].strip()) < 0.80:
+        if _sim(first_pat, block_lines[0].strip()) < 0.97:
             return False
-        if _sim(last_pat, block_lines[-1].strip()) < 0.80:
+        if _sim(last_pat, block_lines[-1].strip()) < 0.97:
             return False
         return all(
-            not p_line.strip() or _sim(p_line.strip(), c_line.strip()) >= 0.80
+            not p_line.strip() or _sim(p_line.strip(), c_line.strip()) >= 0.97
             for p_line, c_line in zip(pattern_lines, block_lines))
 
     return _window_spans(content, content_lines, n, accept)

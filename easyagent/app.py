@@ -4811,6 +4811,62 @@ async def _kick_unanswered(store: Store) -> None:
             _spawn_drain(store, bot["id"], chat_id)
 
 
+def _queued_chat_ids(store: Store) -> list[tuple[str, str]]:
+    """Chats that have a queue file. Idle transcripts are not opened."""
+    from easyagent.plan import queue_path
+
+    found: list[tuple[str, str]] = []
+    try:
+        refs = store.iter_chat_ids()
+    except StoreError:
+        return found
+    for bot_id, chat_id in refs:
+        try:
+            if queue_path(store, bot_id, chat_id).is_file():
+                found.append((bot_id, chat_id))
+        except OSError:
+            continue
+    return found
+
+
+_RUN_SEEN: dict[tuple[str, int, int], str] = {}
+
+
+def _cached_run_status(store: Store, bot_id: str, chat_id: str) -> str:
+    """Run status for one chat, reused while the file's mtime and size stay put."""
+    try:
+        path = store._chat_path(bot_id, chat_id)
+        st = path.stat()
+    except (StoreError, OSError):
+        return ""
+    key = (str(path), st.st_mtime_ns, st.st_size)
+    cached = _RUN_SEEN.get(key)
+    if cached is not None:
+        return cached
+    try:
+        chat = store.get_chat(bot_id, chat_id)
+    except (StoreError, OSError):
+        return ""
+    run = chat.get("run") if isinstance(chat.get("run"), dict) else {}
+    status = str(run.get("status") or "")
+    if len(_RUN_SEEN) > 20000:
+        _RUN_SEEN.clear()
+    _RUN_SEEN[key] = status
+    return status
+
+
+def _running_chat_ids(store: Store) -> list[tuple[str, str]]:
+    found: list[tuple[str, str]] = []
+    try:
+        refs = store.iter_chat_ids()
+    except StoreError:
+        return found
+    for bot_id, chat_id in refs:
+        if _cached_run_status(store, bot_id, chat_id) == "running":
+            found.append((bot_id, chat_id))
+    return found
+
+
 async def kick(store: Store) -> int:
     """Drain every queue that has lines and no live worker.
 
@@ -4821,40 +4877,34 @@ async def kick(store: Store) -> int:
 
     started = 0
     try:
-        bots = store.list_bots()
+        pending = await asyncio.to_thread(_queued_chat_ids, store)
     except StoreError:
         return 0
-    for bot in bots:
+    for bot_id, chat_id in pending:
         try:
-            chats = store.list_chats(bot["id"])
-        except StoreError:
+            if queue_held_for_send(store, bot_id, chat_id):
+                continue
+            if not queued_items(store, bot_id, chat_id):
+                continue
+            chat = store.get_chat(bot_id, chat_id)
+        except (StoreError, OSError):
             continue
-        for summary in chats:
-            chat_id = summary["id"]
-            try:
-                if queue_held_for_send(store, bot["id"], chat_id):
-                    continue
-                if not queued_items(store, bot["id"], chat_id):
-                    continue
-                chat = store.get_chat(bot["id"], chat_id)
-            except (StoreError, OSError):
-                continue
-            if chat.get("resume_now"):
-                continue
-            run = chat.get("run") if isinstance(chat.get("run"), dict) else {}
-            if run.get("status") == "paused":
-                continue
-            slot = turn_mod.slot_for(store, chat_id)
-            worker = slot.worker
-            if worker is not None and not worker.done():
-                continue
-            if slot.user_stop:
-                continue
-            slot.drain_chains = 0
-            if not turn_mod.try_begin(store, chat_id):
-                continue
-            _spawn_drain(store, bot["id"], chat_id)
-            started += 1
+        if chat.get("resume_now"):
+            continue
+        run = chat.get("run") if isinstance(chat.get("run"), dict) else {}
+        if run.get("status") == "paused":
+            continue
+        slot = turn_mod.slot_for(store, chat_id)
+        worker = slot.worker
+        if worker is not None and not worker.done():
+            continue
+        if slot.user_stop:
+            continue
+        slot.drain_chains = 0
+        if not turn_mod.try_begin(store, chat_id):
+            continue
+        _spawn_drain(store, bot_id, chat_id)
+        started += 1
     return started
 
 
@@ -4863,7 +4913,9 @@ async def _supervise(store: Store, stop: asyncio.Event) -> None:
     while not stop.is_set():
         try:
             await kick(store)
-            _watch_wedged(store)
+            running = await asyncio.to_thread(_running_chat_ids, store)
+            for bot_id, chat_id in running:
+                _seal_wedged_run(store, bot_id, chat_id, force=False)
         except Exception as exc:
             _log.warning("Supervisor kick failed: %s", exc)
         try:

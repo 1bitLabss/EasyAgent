@@ -1083,7 +1083,7 @@ def test_ordinary_commands_stay_allowed(tmp_path):
     for command in _ORDINARY_ALLOW:
         linux, windows = _shell_tiers(store, bot, command)
         assert linux == "allow" and windows == "allow", (command, linux, windows)
-    for command in ("time git status", "nohup ls", "env FOO=1 ls", "bash -c 'echo hi'", "eval 'ls'"):
+    for command in ("time git status", "nohup ls", "env FOO=1 ls", "eval 'ls'"):
         verdict = classify(store, ToolRequest(kind="shell", command=command), bot["id"])
         assert verdict.tier == "allow", (command, verdict.tier, verdict.rule)
     nested = "ls"
@@ -1172,7 +1172,7 @@ _EFFECT_CASES = (
     ("find . -delete", "ask"),
     ("find / -exec rm {} +", "block"),
     ("find ./src -exec rm {} \\;", "ask"),
-    ("find . -exec echo {} \\;", "allow"),
+    ("find . -exec echo {} \\;", "ask"),
     ("rsync --delete /empty/ /", "block"),
     ("rsync --delete-before /empty/ /", "block"),
     ("rsync -a --delete src ./dest", "ask"),
@@ -1236,18 +1236,18 @@ _ORDINARY_40 = (
     ("type file.txt", "allow"),
     ("Get-ChildItem -Recurse", "allow"),
     ("cd src && npm test", "allow"),
-    ("grep -r foo .", "allow"),
-    ("rg foo", "allow"),
+    ("grep -r foo .", "ask"),
+    ("rg foo", "ask"),
     ('"C:\\Program Files\\Git\\bin\\git.exe" status', "allow"),
     ("node server.js", "allow"),
     ("./gradlew build", "allow"),
     ("time git status", "allow"),
     ("nohup npm start &", "allow"),
     ("env NODE_ENV=prod npm start", "allow"),
-    ("bash -c 'npm test'", "allow"),
+    ("bash -c 'npm test'", "ask"),
     ('eval "$(ssh-agent)"', "allow"),
     ("sudo apt-get update", "ask"),
-    ("xargs -I{} echo {} < list", "allow"),
+    ("xargs -I{} echo {} < list", "ask"),
     ("find . -name '*.py'", "allow"),
 )
 
@@ -1478,18 +1478,18 @@ _STRICT_40 = (
     ("type file.txt", "allow"),
     ("Get-ChildItem -Recurse", "allow"),
     ("cd src && npm test", "allow"),
-    ("grep -r foo .", "allow"),
-    ("rg foo", "allow"),
+    ("grep -r foo .", "ask"),
+    ("rg foo", "ask"),
     ('"C:\\Program Files\\Git\\bin\\git.exe" status', "allow"),
     ("node server.js", "allow"),
     ("./gradlew build", "allow"),
     ("time git status", "allow"),
     ("nohup npm start &", "allow"),
     ("env NODE_ENV=prod npm start", "allow"),
-    ("bash -c 'npm test'", "allow"),
+    ("bash -c 'npm test'", "ask"),
     ('eval "$(ssh-agent)"', "allow"),
     ("sudo apt-get update", "ask"),
-    ("xargs -I{} echo {} < list", "allow"),
+    ("xargs -I{} echo {} < list", "ask"),
     ("find . -name '*.py'", "allow"),
 )
 
@@ -1535,7 +1535,6 @@ _STRICT_HOLES = (
     "GIT_SSH_COMMAND='rm -rf ~' git fetch",
     "PAGER='rm -rf ~' git log",
     "PAGER=less git log",
-    "FOO=bar ls",
     "env LD_PRELOAD=/tmp/evil.so ls",
     "IFS= ls",
     "PROMPT_COMMAND='rm -rf ~' ls",
@@ -1610,7 +1609,11 @@ def test_strict_forty_tiers_are_pinned(tmp_path):
             "git push",
             "pip install -r requirements.txt",
             "docker compose up -d",
+            "grep -r foo .",
+            "rg foo",
+            "bash -c 'npm test'",
             "sudo apt-get update",
+            "xargs -I{} echo {} < list",
         ]
         for command, expected in _STRICT_40:
             linux, windows = _shell_tiers(store, bot, command)
@@ -1684,7 +1687,6 @@ def test_strict_substitution_env_and_exec_flags(tmp_path):
             "head <(echo $HOME)",
             "LD_PRELOAD=/tmp/evil.so ls",
             "PAGER=less git log",
-            "FOO=bar ls",
             "env LD_PRELOAD=/tmp/evil.so ls",
             "$env:LD_PRELOAD='/tmp/e'; ls",
             "set LD_PRELOAD=/tmp/evil.so & ls",
@@ -1697,10 +1699,12 @@ def test_strict_substitution_env_and_exec_flags(tmp_path):
             "sort --compress-program=gzip f",
             "diff --to-file=x a b",
             "find . -exec echo {} \\;",
+            "rg foo",
         )
         allowed = (
             "head <(echo hi)",
             "echo '<(rm -rf ~)'",
+            "FOO=bar ls",
             "LANG=C ls",
             "LC_ALL=C ls",
             "TZ=UTC date",
@@ -1709,7 +1713,6 @@ def test_strict_substitution_env_and_exec_flags(tmp_path):
             "$env:NODE_ENV='prod'; npm start",
             "set NODE_ENV=prod & npm start",
             "git log --oneline -5",
-            "rg foo",
         )
         for command in blocked:
             verdict = classify(store, ToolRequest(kind="shell", command=command), bot["id"])
@@ -2192,9 +2195,11 @@ def test_strict_directory_flags_reach_bot_configs(tmp_path):
             assert verdict.rule in {"bot-changed", "git-hooks"}, (command, verdict.rule)
             assert "BOTCFG" in verdict.detail, (command, verdict.rule)
 
-        for command in ("ls", "git status", "git diff", "pwd", "rg foo", "cat README.md"):
+        for command in ("ls", "git status", "git diff", "pwd", "cat README.md"):
             verdict = classify(store, ToolRequest(kind="shell", command=command), bot["id"])
             assert verdict.tier == "allow", (command, verdict.tier, verdict.rule)
+        searched = classify(store, ToolRequest(kind="shell", command="rg foo"), bot["id"])
+        assert searched.tier == "ask" and searched.rule == "read-secret", (searched.tier, searched.rule)
     finally:
         from easyagent import turn as turn_mod
 
@@ -2234,9 +2239,17 @@ def test_strict_exec_tools_see_files_under_the_tree(tmp_path):
             assert token in verdict.detail, (command, verdict.detail[-200:])
             assert "file" in verdict.detail
 
-        for command in ("ls", "git status", "git log --oneline -5", "git diff", "rg foo", "grep -r foo .", "cat README.md", "pwd"):
+        for command in ("ls", "git status", "git log --oneline -5", "cat README.md", "pwd"):
             verdict = classify(store, ToolRequest(kind="shell", command=command), bot["id"])
             assert verdict.tier == "allow", (command, verdict.tier, verdict.rule)
+        # A pathless search waits. Naming a secret file still waits.
+        for command in ("rg foo", "grep -r foo ."):
+            verdict = classify(store, ToolRequest(kind="shell", command=command), bot["id"])
+            assert verdict.tier == "ask" and verdict.rule == "read-secret", (command, verdict.tier, verdict.rule)
+        diff = classify(store, ToolRequest(kind="shell", command="git diff"), bot["id"])
+        assert diff.tier == "ask" and diff.rule == "read-secret", (diff.tier, diff.rule)
+        named = classify(store, ToolRequest(kind="shell", command="grep foo pkg/.npmrc"), bot["id"])
+        assert named.tier == "ask" and named.rule == "read-secret", (named.tier, named.rule)
 
         foo = workspace / "src" / "foo.py"
         _track(store, bot, foo, "print('bot-foo')\n")
@@ -2268,7 +2281,7 @@ def test_strict_exec_tools_see_files_under_the_tree(tmp_path):
         assert classify(store, ToolRequest(kind="shell", command="pytest"), bot["id"]).tier == "ask"
 
         rng = random.Random(0xE38C)
-        readers = ("ls", "git status", "rg foo", "cat README.md")
+        readers = ("ls", "git status", "cat README.md")
         runners = ("pytest", "python -m pytest", "make", "npm test", "go test ./...", "go build ./...", "cargo test", "cargo build")
         names = ("conftest.py", "Makefile", "package.json", ".npmrc", "foo_test.go", "build.rs", "gen.py")
         for index in range(20):

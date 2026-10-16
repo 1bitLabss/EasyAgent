@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import ast
 import asyncio
+import hashlib
 import html
 from contextvars import ContextVar
 import json
@@ -745,9 +746,79 @@ def _qwen_call(body: str) -> dict | None:
     return {"name": match.group(1).strip(), "arguments": arguments}
 
 
+_KNOWN_TOOLS = (
+    "list_dir", "read_file", "write_file", "patch", "search_files", "terminal",
+    "web_search", "fetch_page", "research", "browser", "finish", "plan",
+    "read", "write", "list", "cat", "shell", "bash", "search", "files", "file",
+    "ssh", "windows", "mcp", "bridge", "react", "routine", "fetch", "browse",
+    "apply_patch", "search_replace", "grep", "rg", "exec", "execute",
+    "execute_command", "run_command", "run_ssh", "run_windows", "connector",
+    "create_routine", "edit_routine", "delete_routine", "duckduckgo",
+    "save_file", "create_file", "list_directory", "ls", "reaction", "tapback",
+)
+
+
+def _repair_tool_name(raw: str) -> str | None:
+    """Case, separators, CamelCase, and a trailing _tool. None when nothing matches."""
+    text = (raw or "").strip()
+    if not text:
+        return None
+    for mark in ('"', "'", "<", ">"):
+        cut = text.find(mark)
+        if cut > 0:
+            text = text[:cut]
+    folded = text.lower().replace("-", "_").replace(" ", "_")
+    camel = re.sub(r"(?<!^)(?=[A-Z])", "_", text).lower().replace("-", "_").replace(" ", "_")
+    found = {folded, camel, text.lower().replace("-", "_").replace(" ", "_")}
+    extra: set[str] = set()
+    for cand in list(found):
+        current = cand
+        for _ in range(2):
+            for suffix in ("_tool", "-tool", "tool"):
+                if current.endswith(suffix) and len(current) > len(suffix):
+                    current = current[: -len(suffix)].rstrip("_-")
+                    extra.add(current)
+    found |= extra
+    known = set(_KNOWN_TOOLS)
+    for cand in found:
+        if cand in known:
+            return cand
+    import difflib
+
+    match = difflib.get_close_matches(folded, sorted(known), n=1, cutoff=0.84)
+    return match[0] if match else None
+
+
+def _int_arg(value, default: int = 0) -> int:
+    if value is None or value is False or value == "":
+        return default
+    if isinstance(value, bool):
+        return default
+    if isinstance(value, int):
+        return value
+    if isinstance(value, float):
+        return int(value) if value == int(value) else default
+    text = str(value).strip().strip('"').strip("'")
+    if not text:
+        return default
+    try:
+        return int(text)
+    except (TypeError, ValueError):
+        try:
+            number = float(text)
+        except (TypeError, ValueError):
+            return default
+        return int(number) if number == int(number) else default
+
+
 def _request_from_call(data: dict) -> ToolRequest:
     """One tagged or native call, as a tool this computer can run."""
-    name = str(data.get("name") or "").strip().lower().replace("-", "_")
+    given = str(data.get("name") or "").strip()
+    name = _repair_tool_name(given) or ""
+    if given and not name:
+        raise ToolError(
+            "Unknown tool. Valid tools: " + ", ".join(_KNOWN_TOOLS[:12]) + "."
+        )
     raw_args = data.get("arguments")
     if raw_args is None:
         raw_args = data.get("parameters")
@@ -790,7 +861,44 @@ def _request_from_call(data: dict) -> ToolRequest:
     if name in {"read", "read_file", "cat"} or (name in {"files", "file"} and action == "read"):
         if not path:
             raise ToolError("Name a path on this computer.")
-        return ToolRequest(kind="files", action="read", path=path)
+        return ToolRequest(
+            kind="files",
+            action="read",
+            path=path,
+            offset=_int_arg(raw_args.get("offset"), 0),
+            limit=_int_arg(raw_args.get("limit"), 0),
+        )
+    if name in {"patch", "apply_patch", "search_replace"}:
+        old = raw_args.get("old_string")
+        if old is None:
+            old = raw_args.get("old_str") or raw_args.get("old") or ""
+        new = raw_args.get("new_string")
+        if new is None:
+            new = raw_args.get("new_str") or raw_args.get("new") or ""
+        if not isinstance(old, str):
+            old = str(old)
+        if not isinstance(new, str):
+            new = str(new)
+        flag = raw_args.get("replace_all")
+        if isinstance(flag, str):
+            flag = flag.strip().lower() in {"1", "true", "yes"}
+        if not path or not old:
+            raise ToolError("Name the file and the text to replace. The file was not patched.")
+        return ToolRequest(
+            kind="files",
+            action="patch",
+            path=path,
+            old_string=old,
+            new_string=new,
+            replace_all=bool(flag),
+        )
+    if name in {"search_files", "grep", "rg"}:
+        pattern = str(raw_args.get("pattern") or raw_args.get("query") or raw_args.get("regex") or "").strip()
+        folder = path or str(raw_args.get("dir") or ".").strip()
+        file_glob = str(raw_args.get("glob") or raw_args.get("file_glob") or "").strip()
+        if not pattern:
+            raise ToolError("Name a pattern to search for.")
+        return ToolRequest(kind="search_files", action="search", path=folder, body=pattern, command=file_glob)
     if name in {"list", "list_dir", "list_directory", "ls"} or (name in {"files", "file"} and action in {"list", "ls"}):
         if not path:
             raise ToolError("Name a path on this computer.")
@@ -798,7 +906,14 @@ def _request_from_call(data: dict) -> ToolRequest:
     if name in {"shell", "terminal", "bash", "execute", "execute_command", "run_command", "exec"}:
         if not command:
             raise ToolError("There was no command to run.")
-        return ToolRequest(kind="shell", command=command)
+        timeout = raw_args.get("timeout")
+        workdir = str(raw_args.get("workdir") or raw_args.get("cwd") or "").strip()
+        return ToolRequest(
+            kind="shell",
+            command=command,
+            timeout=_int_arg(timeout, -1) if timeout is not None and timeout != "" else -1,
+            workdir=workdir,
+        )
     if name in {"create_routine", "edit_routine", "delete_routine", "routine"}:
         return _routine_request(name, raw_args)
     if name in {"browser", "browse"}:
@@ -1077,10 +1192,7 @@ def _files_from_body(body: str) -> ToolRequest | None:
 
 
 def _positive_int(text: str) -> int:
-    try:
-        value = int(str(text).strip())
-    except (TypeError, ValueError):
-        return 0
+    value = _int_arg(text, 0)
     return value if value > 0 else 0
 
 
@@ -1767,7 +1879,9 @@ def _read_path(path: Path) -> str:
     except OSError as exc:
         raise ToolError(f"Could not read {path}. {exc}") from exc
     if len(text) > _READ_CAP:
-        text = text[: _READ_CAP - 20].rstrip() + "\n[file truncated]"
+        from easyagent.truncate import truncate_head_tail
+
+        text = truncate_head_tail(text, _READ_CAP, label="OUTPUT")
     _remember_read(path)
     return text
 
@@ -2102,6 +2216,8 @@ _SHELL_MAX_TIMEOUT = 900
 
 
 def _shell_timeout(value: int) -> int:
+    if not isinstance(value, int) or isinstance(value, bool):
+        value = _int_arg(value, -1)
     if value < 0:
         return _SHELL_DEFAULT_TIMEOUT
     if value <= 0 or value > _SHELL_MAX_TIMEOUT:
@@ -2132,6 +2248,49 @@ def _shell_workdir(store: Store, workdir: str) -> str:
     return str(path)
 
 
+def _cd_anchor(store: Store, start: Path) -> Path:
+    slot = turn_mod.current_slot()
+    bot_id = slot.bot_id if slot is not None else ""
+    if not bot_id:
+        return start
+    from easyagent.workspace import bot_workspace
+
+    try:
+        return bot_workspace(store, bot_id, create=False)
+    except Exception:
+        return start
+
+
+def _tracked_cd(store: Store, command: str, start: Path) -> str | None:
+    """Where `cd` leaves this chat, when every destination stays in the bot folder."""
+    from easyagent.safety import _inside, _split_chain, secret_file
+    from easyagent.scriptgate import _split_program, _tokenize, _try_resolve
+
+    location = start
+    changed = False
+    for statement in _split_chain(command):
+        words, _redirects = _tokenize(statement)
+        program, args = _split_program(words)
+        if program != "cd":
+            continue
+        target = next((arg for arg in args if not arg.startswith("-")), "")
+        if not target or target == "-":
+            continue
+        dest = _try_resolve(target, location)
+        if dest is None or not dest.is_dir():
+            return None
+        if secret_file(dest):
+            raise ToolError(f"{dest} is a secret folder. The command was not run.")
+        anchor = _cd_anchor(store, start)
+        if not _inside(dest, [anchor]):
+            raise ToolError(f"{dest} is outside this bot's folders. The command was not run.")
+        location = dest
+        changed = True
+    if not changed:
+        return None
+    return str(location)
+
+
 def _run_shell(store: Store, command: str, *, timeout: int = -1, workdir: str = "") -> str:
     from easyagent.safety import shell_text_as_run
 
@@ -2151,7 +2310,6 @@ def _run_shell(store: Store, command: str, *, timeout: int = -1, workdir: str = 
         cwd_path = Path(cwd_text)
     except OSError:
         cwd_path = Path(".")
-    from easyagent.psast import data_decision
     from easyagent.safety import _drive_or_unresolved, decode_shell
     from easyagent.secrets import command_targets_secret, scrub_env
 
@@ -2172,7 +2330,9 @@ def _run_shell(store: Store, command: str, *, timeout: int = -1, workdir: str = 
         and script_run_unproved(store, bot_id, checked, cwd_path)
     ):
         raise ToolError("That script is not limited to this folder. It was not run.")
-    decision = data_decision(store, checked, cwd_path, bot_id or None)
+    from easyagent.psast import resolved_data_decision
+
+    decision = resolved_data_decision(store, checked, cwd_path, bot_id or None)
     if decision == "block":
         raise ToolError("That command mentions EasyAgent's saved chats. It was not run.")
     if decision == "ask":
@@ -2185,6 +2345,10 @@ def _run_shell(store: Store, command: str, *, timeout: int = -1, workdir: str = 
         if "not run" not in why.lower():
             why = why.rstrip(".") + ". It was not run."
         raise ToolError(why)
+    next_cwd = _tracked_cd(store, original, cwd_path)
+    from easyagent.scriptgate import shield_secrets
+
+    text = shield_secrets(text, cwd_path)
     from easyagent.sandbox import popen_contained, shell_mode
 
     mode = shell_mode(store)
@@ -2234,7 +2398,7 @@ def _run_shell(store: Store, command: str, *, timeout: int = -1, workdir: str = 
                 proc.communicate(timeout=2)
             except subprocess.TimeoutExpired:
                 pass
-            raise ToolError("The command timed out. Nothing else was changed.") from exc
+            raise ToolError(f"The command timed out after {wait} s. Nothing else was changed.") from exc
     finally:
         turn_mod.detach_proc(proc)
     if turn_mod.cancelled():
@@ -2255,6 +2419,8 @@ def _run_shell(store: Store, command: str, *, timeout: int = -1, workdir: str = 
     if proc.returncode != 0:
         raise ToolError(output)
     if proc.returncode == 0:
+        if next_cwd and slot is not None:
+            slot.cwd = next_cwd
         target = shell_read_target(original)
         if target is not None:
             _note_shell_read(store, target[0], cwd_path, partial=target[1])
@@ -2955,7 +3121,17 @@ async def _run_together(
     return list(await asyncio.gather(*(one(request) for request in requests)))
 
 
-def happened_line(request: ToolRequest, messages: list[dict] | None = None) -> str:
+def _exit_of(text: str) -> str | None:
+    match = re.search(r"(?m)^exit code (\d+)\b", text or "")
+    if match:
+        return match.group(1)
+    match = re.search(r"exit code (\d+)", text or "")
+    if match:
+        return match.group(1)
+    return None
+
+
+def happened_line(request: ToolRequest, messages: list[dict] | None = None, result: str = "") -> str:
     """What the person sees: the tool ran. Not the listing or the output."""
     if request.kind == "plan":
         return "Updated the checklist."
@@ -2996,7 +3172,10 @@ def happened_line(request: ToolRequest, messages: list[dict] | None = None) -> s
     if request.kind == "history":
         return "Listed saved chats."
     if request.kind == "shell":
-        return "Ran a command on this computer."
+        code = _exit_of(result)
+        if code is None:
+            return "Ran a command on this computer."
+        return f"Ran a command on this computer, exit code {code}."
     if request.kind in {"ssh", "windows"}:
         return f"Ran a command on {request.computer}."
     if request.kind == "browser":
@@ -3203,7 +3382,14 @@ def model_slice(store: Store, request: ToolRequest, result: str, messages: list[
     body = result or ""
     if _full_page_read(request, body):
         return body
-    if request.kind == "search_files" or (request.kind == "files" and request.action in {"patch", "read"} and (request.offset or request.limit or request.action == "patch")):
+    if request.kind in {"shell", "ssh", "windows"}:
+        from easyagent.truncate import truncate_head_tail
+
+        return truncate_head_tail(body, 60_000, label="OUTPUT")
+    wide_read = request.kind == "files" and request.action == "read" and (
+        request.offset or request.limit or len(body) > 4000
+    )
+    if request.kind == "search_files" or (request.kind == "files" and request.action == "patch") or wide_read:
         from easyagent.truncate import truncate_head_tail
 
         return truncate_head_tail(body, 60_000, label="RESULT")
@@ -6117,8 +6303,29 @@ def _ask_left(messages: list[dict]) -> str:
     return ask or "the request"
 
 
-def _tool_signature(request: ToolRequest) -> tuple[str, str, str, str, str, str]:
-    return (request.kind, request.action, request.path, request.command, request.computer, request.body)
+def _sig_text(text: str) -> str:
+    raw = text or ""
+    if len(raw) <= 80:
+        return raw
+    return hashlib.sha256(raw.encode("utf-8", errors="replace")).hexdigest()[:16]
+
+
+def _tool_signature(request: ToolRequest) -> tuple:
+    return (
+        request.kind,
+        request.action,
+        request.path,
+        request.command,
+        request.computer,
+        _sig_text(request.body),
+        str(int(request.offset or 0)),
+        str(int(request.limit or 0)),
+        _sig_text(request.old_string),
+        _sig_text(request.new_string),
+        "1" if request.replace_all else "0",
+        str(int(request.timeout)),
+        request.workdir or "",
+    )
 
 
 def _write_changes_disk(request: ToolRequest) -> bool:
@@ -6509,6 +6716,7 @@ async def run_turn(
     deliver_tries = 0
     page_refusals = 0
     readback_nudges = 0
+    saved_prose = ""
     draft_holds = 0
     command_fails = 0
     thought_holds = 0
@@ -6677,6 +6885,8 @@ async def run_turn(
             if request.kind == "files" and request.action == "write":
                 if _write_is_near(request, old_sig):
                     return True
+                continue
+            if request.kind == "files" and request.action in {"read", "patch"}:
                 continue
             if near_keys(key, old_key):
                 return True
@@ -7202,6 +7412,20 @@ async def run_turn(
         tool_hits[key] = tool_hits.get(key, 1) + 1
         return tool_hits[key]
 
+    def _reset_path_repeats(path: str) -> None:
+        """A write or a patch that landed starts the repeat count over for that file."""
+        if not (path or "").strip():
+            return
+        for key in list(tool_hits):
+            if path in key:
+                tool_hits.pop(key, None)
+        kept = []
+        for item in success_keys:
+            blob = " ".join(str(part) for part in item[1])
+            if path not in blob:
+                kept.append(item)
+        success_keys[:] = kept
+
     def _note_narration(spoken: str) -> int:
         narration_hits.append(spoken)
         return sum(1 for item in narration_hits if _near_line(item, spoken))
@@ -7638,7 +7862,7 @@ async def run_turn(
                             f"Query: {item.body}\n\n{result}"
                         )
                     else:
-                        line = happened_line(item, working)
+                        line = happened_line(item, working, result or "")
                         detail = model_slice(store, item, result or "", working)
                     lines.append(line)
                     added.append(line)
@@ -7778,11 +8002,14 @@ async def run_turn(
                 for event in close(_drop_known_logs(_spoken(text or ""), lines)):
                     yield event
                 return
+            if written.strip() and not _short_done_line(written):
+                saved_prose = written
             if _hold_for_readback():
                 yield "status", "Thinking"
                 continue
             if _pending_write():
-                for event in close(_drop_known_logs(_spoken(text or ""), lines)):
+                chosen = written if written.strip() and not _short_done_line(written) else saved_prose
+                for event in close(chosen or ""):
                     yield event
                 return
             if is_bare_not_written(request.body) and not bare_held:
@@ -8074,6 +8301,9 @@ async def run_turn(
             if _hold_for_stale_release(prose):
                 yield "status", "Thinking"
                 continue
+            model_prose = prose
+            if (model_prose or "").strip() and not _short_done_line(model_prose):
+                saved_prose = model_prose
             prose = _prefer_write_failure(_with_file_place(prose, lines), lines, fails)
             held = _hold_for_draft()
             if held:
@@ -8118,7 +8348,13 @@ async def run_turn(
                 yield "status", "Thinking"
                 continue
             if _pending_write():
-                for event in close(prose or ""):
+                if (model_prose or "").strip() and not _short_done_line(model_prose):
+                    chosen = model_prose
+                elif (saved_prose or "").strip():
+                    chosen = saved_prose
+                else:
+                    chosen = model_prose
+                for event in close(chosen or ""):
                     yield event
                 return
             follow = honesty.take_followup(prose) if not nudged else None
@@ -8255,7 +8491,11 @@ async def run_turn(
             for event in close(_complaint_close(lines, steps, messages)):
                 yield event
             return
-        if (sig == last_sig or _near_repeat(request)) and not _write_changes_disk(request):
+        if (
+            (sig == last_sig or _near_repeat(request))
+            and not _write_changes_disk(request)
+            and not (request.kind == "files" and request.action == "read")
+        ):
             if _mark_repeat(sig) >= REPEAT_LIMIT:
                 yield "loop", LOOP_TEXT
                 return
@@ -8382,7 +8622,7 @@ async def run_turn(
                     for event in close(rich):
                         yield event
                     return
-                line = happened_line(request, working)
+                line = happened_line(request, working, result or "")
                 lines.append(line)
                 raws.append(result or "")
                 steps.append({
@@ -8452,6 +8692,8 @@ async def run_turn(
             continue
         close_tool_step("done")
         yield "status", step_label
+        if request.kind == "files" and request.action in {"write", "patch"}:
+            _reset_path_repeats(request.path)
         raws.append(result)
         steps.append({
             "kind": request.kind,
@@ -8460,7 +8702,7 @@ async def run_turn(
             "raw": result,
             "path": request.path,
         })
-        line = happened_line(request, working)
+        line = happened_line(request, working, result or "")
         lines.append(line)
         if sig in seen_results and seen_results[sig] == result:
             if _mark_repeat(sig) >= REPEAT_LIMIT:

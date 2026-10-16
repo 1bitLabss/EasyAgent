@@ -143,12 +143,36 @@ def similar_names(path: Path) -> str:
     return "Similar filenames: " + ", ".join(close)
 
 
+def _coerce_window_int(value, label: str) -> int:
+    if isinstance(value, bool) or value is None:
+        raise ValueError(f"{label} must be an integer")
+    if isinstance(value, int):
+        return value
+    if isinstance(value, float) and value == int(value):
+        return int(value)
+    text = str(value).strip().strip('"').strip("'")
+    try:
+        number = int(text)
+    except (TypeError, ValueError):
+        try:
+            number = float(text)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"{label} must be an integer") from exc
+        if number != int(number):
+            raise ValueError(f"{label} must be an integer")
+        number = int(number)
+    return number
+
+
 def read_window(path: Path, *, offset: int, limit: int, task_id: str) -> tuple[str, bool]:
     """Line-numbered window. The bool is True when the window is not the whole file.
 
     offset is 1-based. A repeat of the same window on an unchanged file returns
     a short stub, then a BLOCKED line on the third identical read.
+    A numeric string such as ``"200"`` is an integer.
     """
+    offset = _coerce_window_int(offset, "offset")
+    limit = _coerce_window_int(limit, "limit")
     if offset < 1:
         raise ValueError("offset starts at 1")
     if limit < 1:
@@ -447,6 +471,53 @@ def _python_search(root: Path, pattern: str, file_glob: str, limit: int, skip) -
     return matches, note
 
 
+_RG_SECRET_GLOBS = (
+    "!id_rsa", "!id_dsa", "!id_ed25519", "!id_ecdsa",
+    "!id_rsa.pub", "!id_dsa.pub", "!id_ed25519.pub", "!id_ecdsa.pub",
+    "!.env", "!.env.*", "!.npmrc", "!.pypirc", "!.netrc", "!.pgpass",
+    "!.git-credentials", "!.token", "!.ssh", "!.gnupg", "!.aws",
+    "!*.pem", "!*.key", "!*.p12", "!*.pfx", "!*.kdbx", "!*.jks", "!*.token",
+    "!credentials*", "!credential.json", "!creds*", "!token*", "!*token*",
+    "!secrets.json", "!secret.json", "!kubeconfig", "!secrets.db",
+)
+
+
+def _content_secret_globs(root: Path) -> list[str]:
+    """Relative rg excludes for bland names whose bytes are a key or a token.
+
+    Name-classified files are already excluded and are not opened here.
+    """
+    from easyagent.safety import _name_secret, sniff_secret
+
+    found: list[str] = []
+    seen = 0
+    for dirpath, dirnames, filenames in os.walk(root, followlinks=False):
+        dirnames[:] = [name for name in dirnames if not _skip_dir(name)]
+        here = Path(dirpath)
+        if _system_dir(here) or not _within(root, here):
+            dirnames[:] = []
+            continue
+        for name in filenames:
+            seen += 1
+            if seen > SEARCH_MAX_FILES:
+                return found
+            path = here / name
+            if path.is_symlink() or not _within(root, path):
+                continue
+            try:
+                if _name_secret(path):
+                    continue
+            except Exception:
+                continue
+            if sniff_secret(path):
+                try:
+                    rel = path.resolve().relative_to(root.resolve()).as_posix()
+                except (OSError, ValueError):
+                    rel = name
+                found.append("!" + rel)
+    return found
+
+
 def _rg_search(root: Path, pattern: str, file_glob: str, limit: int, skip) -> list[str] | None:
     rg = shutil.which("rg")
     if not rg:
@@ -458,6 +529,8 @@ def _rg_search(root: Path, pattern: str, file_glob: str, limit: int, skip) -> li
         "-g", "!.git", "-g", "!node_modules", "-g", "!venv",
         "-g", "!.venv", "-g", "!__pycache__",
     ]
+    for glob in (*_RG_SECRET_GLOBS, *_content_secret_globs(root)):
+        command.extend(["-g", glob])
     if file_glob:
         command.extend(["-g", file_glob])
     command.extend(["--", pattern, str(root)])

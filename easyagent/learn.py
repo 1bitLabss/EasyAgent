@@ -484,7 +484,7 @@ async def run_check(store: Store, bot: dict, check: dict, *, cwd: Path) -> tuple
     if not argv:
         return False, "The command was empty."
     from easyagent import turn as turn_mod
-    from easyagent.safety import ALLOW, classify
+    from easyagent.safety import ALLOW, begin_skill_check, classify, end_skill_check
     from easyagent.tools import ToolError, ToolRequest, _run_shell
 
     previous_slot = turn_mod.current_slot()
@@ -493,6 +493,7 @@ async def run_check(store: Store, bot: dict, check: dict, *, cwd: Path) -> tuple
         slot = turn_mod.bind(store, "learn-check", bot.get("id") or "")
     previous_cwd = slot.cwd
     slot.cwd = str(cwd)
+    skill = begin_skill_check()
     try:
         verdict = classify(store, ToolRequest(kind="shell", command=command), bot.get("id"))
         if verdict.tier != ALLOW:
@@ -510,6 +511,7 @@ async def run_check(store: Store, bot: dict, check: dict, *, cwd: Path) -> tuple
             match = re.search(r"exit code (\d+)", output)
             code = int(match.group(1)) if match else 1
     finally:
+        end_skill_check(skill)
         slot.cwd = previous_cwd
         if previous_slot is None:
             turn_mod._slot.set(None)

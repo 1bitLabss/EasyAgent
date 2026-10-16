@@ -1775,6 +1775,17 @@ async def _stream_once(
             working = nudge_single_tool(working)
 
 
+def _unfenced_unknown(calls: list[dict]) -> bool:
+    """True when a native call names a tool this computer does not run."""
+    from easyagent.tools import _repair_tool_name
+
+    for call in calls:
+        name = str(call.get("name") or "").strip()
+        if name and _repair_tool_name(name) is None and not calls_to_fence([call]):
+            return True
+    return False
+
+
 async def _stream_attempt(
     *,
     base_url: str,
@@ -1862,6 +1873,11 @@ async def _stream_attempt(
         turn_mod.detach_client(client)
         await client.aclose()
     if not yielded:
+        # A name this computer cannot fence is still a call. The turn answers
+        # it with the valid tool list. A reply with no call stays empty.
+        pending = list(_native_calls.get() or [])
+        if pending and _unfenced_unknown(pending):
+            return
         raise ProviderError(EMPTY_TOOL_TEXT)
 
 

@@ -182,7 +182,8 @@ def test_shell_stays_on_the_file_guards_until_consent(tmp_path, monkeypatch):
         heard = _run_shell(store, "echo plain-ok")
     finally:
         turn_mod._slot.set(None)
-    assert heard == "plain-ok"
+    assert heard.splitlines()[-1] == "plain-ok"
+    assert "exit code 0" in heard
     if os.name == "nt":
         assert seen["shell"] is False
         assert seen["args"][0] == "powershell.exe"

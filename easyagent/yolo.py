@@ -437,16 +437,9 @@ def _prove_paths(store: Store, bot_id: str, request, verdict) -> list | None:
     from easyagent import turn as turn_mod
     from easyagent.safety import (
         _command_program,
-        _content_target,
         _file_request_path,
-        _mode,
-        _paths_in,
         _path_key,
-        _resolve,
-        _targets_after_verb,
         _wide_token,
-        _workspace_roots,
-        judge_command,
         shell_text_as_run,
     )
 
@@ -460,25 +453,14 @@ def _prove_paths(store: Store, bot_id: str, request, verdict) -> list | None:
         path = _file_request_path(store, getattr(request, "path", "") or ".", cwd, bot_id)
         paths = [path]
         if rule == "script-body":
+            # The shebang names the interpreter. It is not a path this write
+            # touches. The body is proved statement by statement. None means
+            # the body leaves the folder or cannot be proved, so the card stays.
+            from easyagent.scriptgate import script_body_proved
+
             body = getattr(request, "body", "") or ""
-            try:
-                bot = store.get_bot(bot_id)
-            except Exception:
-                bot = None
-            inner = judge_command(
-                body,
-                remote=False,
-                cwd=path.parent,
-                roots=_workspace_roots(store, bot_id, ""),
-                created=set(),
-                mode=_mode(bot),
-            )
-            if inner.tier == "block" or inner.rule in _REFUSE_RULES or _shape_hard(body):
+            if not script_body_proved(store, bot_id, body, path.parent, path):
                 return None
-            inner_paths = _shell_paths(body, path.parent, inner.rule) or _operand_paths(body, path.parent)
-            if not inner_paths:
-                return None
-            paths.extend(inner_paths)
         return _unique(paths)
     if kind != "shell":
         return None
@@ -540,6 +522,16 @@ def _unique(paths: list) -> list:
     return found
 
 
+def _without_shebang(body: str) -> str:
+    """Drop #! lines so the interpreter is not treated as a path the write touches."""
+    kept = []
+    for line in (body or "").splitlines():
+        if line.lstrip().startswith("#!"):
+            continue
+        kept.append(line)
+    return "\n".join(kept)
+
+
 def _shape_hard(command: str) -> bool:
     text = command or ""
     return bool(_FETCH.search(text) or _DISGUISE.search(text))
@@ -574,9 +566,10 @@ def _files_refused(store: Store, bot_id: str, request, rule: str) -> bool:
         return True
     if rule != "script-body":
         return False
-    body = getattr(request, "body", "") or ""
-    if _shape_hard(body):
-        return True
+    # A shebang is not the command. python3 on that line is not python -c.
+    body = _without_shebang(getattr(request, "body", "") or "")
+    if not body.strip():
+        return False
     try:
         bot = store.get_bot(bot_id)
     except Exception:
@@ -589,7 +582,7 @@ def _files_refused(store: Store, bot_id: str, request, rule: str) -> bool:
         created=set(),
         mode=_mode(bot),
     )
-    return inner.tier == "block" or inner.rule in _REFUSE_RULES or _shape_hard(body)
+    return inner.tier == "block" or inner.rule in _REFUSE_RULES
 
 
 def _implicated(store: Store, bot_id: str, command: str):
@@ -670,6 +663,16 @@ def _inside_scope(store: Store, bot_id: str, request, verdict) -> bool:
     if kind != "shell":
         return False
     command = getattr(request, "command", "") or ""
+    try:
+        cwd = Path(turn_mod.tool_cwd())
+    except OSError:
+        return False
+    from easyagent.scriptgate import command_reads_secrets, script_run_unproved
+
+    # A script is read again here. A folder-wide read that would print a
+    # secret file is not an ordinary in-folder read.
+    if script_run_unproved(store, bot_id, command, cwd) or command_reads_secrets(command, cwd):
+        return False
     if _command_is_wide(command, _wide()):
         return False
     rule = str(getattr(verdict, "rule", "") or "")
@@ -981,12 +984,12 @@ def _read_inside(store: Store, bot_id: str, path, roots: list) -> bool:
         _inside,
         _is_guardrail,
         _is_profile_root,
-        _secret_kind,
+        secret_file,
         saved_data_blocked,
     )
     from easyagent.secrets import is_protected_secret
 
-    if _secret_kind(path) or _is_profile_root(path) or _is_guardrail(path):
+    if secret_file(path) or _is_profile_root(path) or _is_guardrail(path):
         return False
     if is_protected_secret(store, path):
         return False
@@ -1001,11 +1004,11 @@ def _safe_inside(store: Store, bot_id: str, path, roots: list) -> bool:
         _inside,
         _is_guardrail,
         _is_profile_root,
-        _secret_kind,
+        secret_file,
         saved_data_blocked,
     )
 
-    if _secret_kind(path) or _is_profile_root(path) or _is_guardrail(path):
+    if secret_file(path) or _is_profile_root(path) or _is_guardrail(path):
         return False
     if saved_data_blocked(store, path, bot_id) or _foreign_bot_data(store, path, bot_id):
         return False

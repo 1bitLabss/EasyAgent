@@ -221,7 +221,7 @@ def test_a_secret_is_not_in_json_or_the_bot_shell(tmp_path, monkeypatch):
         return real_popen(argv, *args, **kwargs)
 
     monkeypatch.setattr("easyagent.tools.subprocess.Popen", fake_popen)
-    assert _run_shell(store, "echo hi") == "ok"
+    assert _run_shell(store, "echo hi").splitlines()[-1] == "ok"
     blob = json.dumps(seen["env"])
     assert "super-secret-token" not in blob
     assert "TOKEN" not in seen["env"]

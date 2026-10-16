@@ -20,7 +20,7 @@ from easyagent.safety import mark_untrusted
 from easyagent.store import Store, new_id
 
 FENCE_RE = re.compile(r"```helper[ \t]*\r?\n(.*?)```", re.DOTALL | re.IGNORECASE)
-_TOOLS = frozenset({"files", "shell", "search", "browser", "mcp", "memory", "project", "history", "bridge"})
+_TOOLS = frozenset({"files", "shell", "search", "search_files", "browser", "mcp", "memory", "project", "history", "bridge"})
 _DEFAULT_TOOLS = frozenset({"files", "search"})
 _HEADER = re.compile(r"(?i)^(name|tools|steps|seconds)\s*:\s*(.*)$")
 _IGNORED_TASKS = {"the task", "task"}

@@ -334,7 +334,7 @@ def wrap_output(request, text: str, store: Store | None = None) -> str:
             cleaned = _scrub_patterns(text)
     else:
         cleaned = _scrub_patterns(text)
-    if kind in {"files", "shell", "ssh", "windows", "search", "mcp"} or action == "read":
+    if kind in {"files", "shell", "ssh", "windows", "search", "search_files", "mcp"} or action == "read":
         return mark_untrusted(cleaned)
     if kind == "browser" and action in {"read", "open", "tabs"}:
         return mark_untrusted(cleaned)
@@ -907,6 +907,65 @@ def _secret_kind(path: Path) -> str:
     if text.endswith("/etc/shadow") or text.endswith("/etc/gshadow"):
         return "browser"
     return ""
+
+
+# Names and folders read_file cards, plus credential, key, and token files
+# the same card must cover. Search drops these files instead of printing a line.
+_SECRET_NAMES = frozenset({
+    "id_rsa",
+    "id_dsa",
+    "id_ed25519",
+    "id_ecdsa",
+    "id_rsa.pub",
+    "id_dsa.pub",
+    "id_ed25519.pub",
+    "id_ecdsa.pub",
+    "credentials",
+    "credentials.json",
+    "credentials.yml",
+    "credentials.yaml",
+    "credentials.xml",
+    "credential.json",
+    "creds",
+    "creds.json",
+    "creds.yml",
+    "creds.yaml",
+    "creds.txt",
+    "token.json",
+    "tokens.json",
+    "token.yaml",
+    "tokens.yaml",
+    "token.yml",
+    "tokens.yml",
+    "access_token",
+    "access_token.json",
+    "api_token.json",
+    "secrets.json",
+    "secret.json",
+    "kubeconfig",
+    "secrets.db",
+    "secrets.passphrase",
+    ".netrc",
+    ".pgpass",
+    ".token",
+})
+_SECRET_SUFFIXES = (".pem", ".key", ".p12", ".pfx", ".kdbx", ".token")
+_SECRET_DIRS = frozenset({".ssh", ".gnupg", ".aws"})
+
+
+def secret_file(path: Path) -> bool:
+    """True for a key, a credential, a token file, or anything _secret_kind already cards.
+
+    A search must not open these files. read_file and patch card them first.
+    """
+    if _secret_kind(path):
+        return True
+    name = path.name.lower()
+    if name in _SECRET_NAMES:
+        return True
+    if name.endswith(_SECRET_SUFFIXES):
+        return True
+    return bool({part.lower() for part in path.parts} & _SECRET_DIRS)
 
 
 def _is_profile_root(path: Path) -> bool:
@@ -2582,7 +2641,7 @@ def _judge_command_body(
         kind = _secret_kind(path)
         if kind == "browser":
             return _verdict(BLOCK, "browser-store", "Browser cookies and saved passwords are never read.", str(path), fingerprint)
-        if kind == "secret" and _READ_CMD.search(line):
+        if (kind == "secret" or secret_file(path)) and _READ_CMD.search(line):
             return _verdict(ASK, "read-secret", "That reads a secret file. It waits for you, and the secret is not copied onward.", str(path), fingerprint)
     if remote and not (_HARMLESS.search(line) or _READ_CMD.search(line) or _GIT_READ.search(line)):
         return _verdict(ASK, "remote-change", "A remote computer is stricter. Anything that changes it waits for you.", detail, fingerprint)
@@ -2764,12 +2823,12 @@ def judge_files(
     if secret == "browser":
         return _verdict(BLOCK, "browser-store", "Browser cookies and saved passwords are never read.", detail, fingerprint)
     if action in {"list", "read"}:
-        if secret == "secret":
+        if secret == "secret" or secret_file(path):
             return _verdict(ASK, "read-secret", "That reads a secret file. It waits for you.", detail, fingerprint)
         return _verdict(ALLOW, "read", "Reading and listing are allowed.", detail, fingerprint)
-    if action != "write":
+    if action not in {"write", "patch"}:
         return _verdict(REVIEW, "file-other", "That file action is not one the rules recognize.", detail, fingerprint)
-    if secret == "secret":
+    if secret == "secret" or secret_file(path):
         return _verdict(ASK, "write-secret", "That writes a secret file. It waits for you.", detail, fingerprint)
     if mode == "strict" and action == "write":
         from easyagent.strictshell import place_class
@@ -2905,6 +2964,14 @@ def classify(store: Store, request, bot_id: str | None) -> Verdict:
             )
     if kind in {"search", "fetch", "research", "question", "finish", "plan", "react", "memory", "history", "project"}:
         verdict = _verdict(ALLOW, kind or "meta", "That does not change the computer.", kind, _fp(kind, getattr(request, "body", "")[:80]))
+    elif kind == "search_files":
+        path = _file_request_path(store, getattr(request, "path", "") or ".", cwd, bot_id)
+        if _foreign_bot_data(store, path, bot_id):
+            verdict = _verdict(BLOCK, "bot-isolation", "That is another bot's data. It stays in that bot's folder.", str(path), _fp("isolation", str(path)))
+        elif saved_data_blocked(store, path, bot_id):
+            verdict = _verdict(BLOCK, "data-dir", "That reads EasyAgent's saved data.", str(path), _fp("file", "read", str(path)))
+        else:
+            verdict = judge_files("read", path, "", roots=roots, created=created, mode=mode, user_text=user_text)
     elif kind == "files":
         path = _file_request_path(store, getattr(request, "path", "") or ".", cwd, bot_id)
         action = getattr(request, "action", "") or ""
@@ -2925,10 +2992,13 @@ def classify(store: Store, request, bot_id: str | None) -> Verdict:
                 _fp("file", action, str(path)),
             )
         else:
+            body = getattr(request, "body", "") or ""
+            if action == "patch":
+                body = getattr(request, "new_string", "") or body
             verdict = judge_files(
                 getattr(request, "action", ""),
                 path,
-                getattr(request, "body", "") or "",
+                body,
                 roots=roots,
                 created=created,
                 mode=mode,
@@ -2996,6 +3066,38 @@ def classify(store: Store, request, bot_id: str | None) -> Verdict:
                     verdict.detail,
                     verdict.fingerprint,
                 )
+        if kind == "shell" and verdict.tier != BLOCK:
+            from easyagent.scriptgate import command_reads_secrets, script_run_unproved
+
+            if command_reads_secrets(command, cwd):
+                verdict = _worst(
+                    verdict,
+                    _verdict(
+                        ASK,
+                        "read-secret",
+                        "That reads a secret file. It waits for you, and the secret is not copied onward.",
+                        command[:500],
+                        _fp("bulk-secret", command[:180]),
+                    ),
+                )
+            else:
+                try:
+                    from easyagent.yolo import active as yolo_active
+
+                    yolo_on = bool(bot_id) and yolo_active(store, bot_id)
+                except Exception:
+                    yolo_on = False
+                if yolo_on and script_run_unproved(store, bot_id, command, cwd):
+                    verdict = _worst(
+                        verdict,
+                        _verdict(
+                            ASK,
+                            "script-body",
+                            "That script is not limited to this folder. It waits for you.",
+                            command[:500],
+                            _fp("script-run", command[:180]),
+                        ),
+                    )
         if verdict.tier == ALLOW and bot_id:
             from easyagent.browser import command_runs_download
 
@@ -3048,8 +3150,53 @@ def classify(store: Store, request, bot_id: str | None) -> Verdict:
     needle = (getattr(request, "command", "") or getattr(request, "path", "") or verdict.detail or "").strip()
     copied = bool(needle) and _injected(needle, needle)
     if copied and (verdict.tier == ALLOW or verdict.rule == "unlisted-command"):
-        verdict = _verdict(ASK, "injection", "That call matches text from a file, a page, or a tool. Those are data, so it waits for you.", verdict.detail, verdict.fingerprint)
+        if not _folder_edit_not_tainted(store, request, bot_id):
+            verdict = _verdict(ASK, "injection", "That call matches text from a file, a page, or a tool. Those are data, so it waits for you.", verdict.detail, verdict.fingerprint)
     return verdict
+
+
+def _folder_edit_not_tainted(store: Store, request, bot_id: str | None) -> bool:
+    """A file inside this bot's folder is not an injection just because a listing printed its path.
+
+    A read or a list of that file does not wait. A write waits unless this chat
+    already has a fresh read of it. A secret, or a path outside the folder,
+    still waits. A path that only appeared on a web page, and was not read,
+    still waits.
+    """
+    kind = getattr(request, "kind", "")
+    action = getattr(request, "action", "") or ""
+    if kind == "search_files":
+        kind, action = "files", "read"
+    if kind != "files" or action not in {"read", "list", "write", "patch"}:
+        return False
+    try:
+        cwd = Path(turn_mod.tool_cwd())
+    except OSError:
+        return False
+    path = _file_request_path(store, getattr(request, "path", "") or ".", cwd, bot_id)
+    if path.name.lower() in {"secrets.db", "secrets.passphrase"} or _is_passphrase_file(path):
+        return False
+    if secret_file(path):
+        return False
+    roots = _workspace_roots(store, bot_id, _user_text(store, bot_id))
+    if not _inside(path, roots):
+        return False
+    if action in {"read", "list"}:
+        return True
+    return _chat_has_fresh_read(path)
+
+
+def _chat_has_fresh_read(path: Path) -> bool:
+    from easyagent import filestate
+    from easyagent.tools import _edit_reads, _file_stamp, _path_key
+
+    stamps = _edit_reads.get()
+    key = _path_key(str(path))
+    if isinstance(stamps, dict) and key in stamps and stamps.get(key) == _file_stamp(path):
+        return True
+    slot = turn_mod.current_slot()
+    chat = slot.chat_id if slot is not None and slot.chat_id else "default"
+    return filestate.has_full_read(chat, str(path))
 
 
 def _only_browser_label(needle: str) -> bool:
@@ -3545,6 +3692,10 @@ async def guard(store: Store, request, bot_id: str | None):
     """Return (request, early_result). early_result is set when the tool must not run."""
     from easyagent.tools import ToolError
 
+    slot = turn_mod.current_slot()
+    if slot is not None:
+        slot.script_human_approved = False
+
     budget = _budget()
     verdict = budget or classify(store, request, bot_id)
     if verdict.tier == REVIEW:
@@ -3675,6 +3826,9 @@ async def guard(store: Store, request, bot_id: str | None):
         if decision != "approve":
             _remember_denial(store, bot_id, verdict.fingerprint)
             raise ToolError("You denied that, or the card expired. It will not be asked again, and it was not run.")
+        approved_slot = turn_mod.current_slot()
+        if approved_slot is not None:
+            approved_slot.script_human_approved = True
         if verdict.rule in {"bot-changed", "git-hooks"} and bot_id and not session_grant and not class_grant:
             _stamp_script(store, bot_id, card.exact or getattr(request, "command", "") or "")
         if getattr(request, "kind", "") == "shell":

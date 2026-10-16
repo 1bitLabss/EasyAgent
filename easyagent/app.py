@@ -3774,6 +3774,9 @@ def public_run(chat: dict, store: Store | None = None) -> dict:
         from easyagent.plan import run_fields
 
         payload.update(run_fields(store, chat))
+        plan = _public_plan(store, chat)
+        if plan is not None:
+            payload["plan"] = plan
     return payload
 
 

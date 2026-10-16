@@ -315,6 +315,10 @@ def _read(store, bot_id: str, command: str) -> ActionClass | None:
         cwd = Path(turn_mod.tool_cwd())
     except OSError:
         return None
+    from easyagent.scriptgate import command_reads_secrets
+
+    if command_reads_secrets(command, cwd):
+        return None
     slot = turn_mod.current_slot()
     env = dict(slot.env) if slot is not None and slot.env else dict(os.environ)
     proved = prove_readonly(command, cwd, env)

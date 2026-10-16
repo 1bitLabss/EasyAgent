@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.3.33
+- A done or fixed claim after a write is marked when this turn did not check the result. The mark survives the tool running on a worker thread. A read-only shell of one file counts as a read of that file, and a read stays valid on a later turn while the file's time and hash still match. A path inside this bot's folder that a listing printed can be read, and then edited, without a second card. A summary after a write stays in the chat, with the file's location after it.
+- While /yolo is on for this chat, a script inside the allowed folder does not wait when its body is proved to stay there. A `#!/bin/sh` script that only echoes, and a `#!/usr/bin/env python3` script that only prints, are written with no card. A `#!/bin/sh` script whose body deletes `../outside.txt` still waits, and running it does not delete that file. Running `sh` reads the script again. With the sandbox on, a script cannot delete a file outside the folder.
+- A malformed tool call names the retry and cuts the server excerpt on a word. The chat's run includes the saved checklist.
+- read_file can return a line-numbered window. patch replaces a region you have read and reports the diff. search_files searches with ripgrep when it is installed, and with Python otherwise. A command can set a timeout and a working folder. A write reports syntax errors that the edit introduced.
+- search_files does not print a line from a secret file. That includes id_rsa, .env, .ssh, credential files, key files, and token files, with or without ripgrep, and while /yolo is on. It skips node_modules, the same way it skips .git and a virtualenv. A search of the filesystem root, a system folder, or a folder outside this bot's folders is not run. The Python walk stops after 20 seconds or 4000 files and does not follow a symlink out of the folder. read_file and patch still wait on a card before a secret file is opened.
+- A shell command that reads across a folder, or through a glob, waits when that folder contains one of those secret files. `grep -r`, `rg`, and `cat *` do this with /yolo on and off, and the secret line is not printed. A search of one ordinary file still runs.
+
 ## 0.3.32
 - A tool-call failure from the model server keeps a short excerpt of the server body, in the activity log and in the resumable error. Tool requests send EasyAgent's own temperature, starting at 0.6 and stepping down on each retry, and the tool list stays on every try.
 - A reply with no text and no tool call, a stream error, a tool call cut off by length, or thinking text inside a tool call stays a visible resumable error.

@@ -67,6 +67,8 @@ _MODEL_CHARS = 1200
 _COMMAND_TIMEOUT = 30
 
 _FILES_FENCE = re.compile(r"```files[ \t]*\r?\n(.*?)```", re.DOTALL | re.IGNORECASE)
+_PATCH_FENCE = re.compile(r"```patch[ \t]*\r?\n(.*?)```", re.DOTALL | re.IGNORECASE)
+_SEARCH_FILES_FENCE = re.compile(r"```search_files[ \t]*\r?\n(.*?)```", re.DOTALL | re.IGNORECASE)
 _SHELL_FENCE = re.compile(r"```shell[ \t]*\r?\n(.*?)```", re.DOTALL | re.IGNORECASE)
 _SSH_FENCE = re.compile(r"```ssh[ \t]*\r?\n(.*?)```", re.DOTALL | re.IGNORECASE)
 _WINDOWS_FENCE = re.compile(r"```windows[ \t]*\r?\n(.*?)```", re.DOTALL | re.IGNORECASE)
@@ -109,8 +111,10 @@ class ToolError(Exception):
 
 _edit_reads: ContextVar[dict | None] = ContextVar("easyagent_edit_reads", default=None)
 _turn_changes: ContextVar[list | None] = ContextVar("easyagent_turn_changes", default=None)
-_turn_checked: ContextVar[bool | None] = ContextVar("easyagent_turn_checked", default=None)
-_turn_effect: ContextVar[bool | None] = ContextVar("easyagent_turn_effect", default=None)
+# One dict, created on the turn task. Tool code runs in asyncio.to_thread, which
+# copies the context, so a later .set(True) on a bool is dropped. Mutating this
+# dict is visible to the turn that applies the verify note.
+_turn_flags: ContextVar[dict | None] = ContextVar("easyagent_turn_flags", default=None)
 _turn_notes: ContextVar[list | None] = ContextVar("easyagent_turn_notes", default=None)
 
 _CHECK_COMMAND = re.compile(
@@ -125,28 +129,33 @@ def begin_turn_checks() -> None:
     """One turn: reads, file changes, and whether a check already ran."""
     _edit_reads.set({})
     _turn_changes.set([])
-    _turn_checked.set(False)
-    _turn_effect.set(False)
+    _turn_flags.set({"checked": False, "effect": False})
     _turn_notes.set([])
 
 
 def end_turn_checks() -> None:
     _edit_reads.set(None)
     _turn_changes.set(None)
-    _turn_checked.set(None)
-    _turn_effect.set(None)
+    _turn_flags.set(None)
     _turn_notes.set(None)
+
+
+def _flag_box() -> dict | None:
+    flags = _turn_flags.get()
+    return flags if isinstance(flags, dict) else None
 
 
 def note_turn_effect() -> None:
     """This turn wrote a file or started a command, so a done claim can be checked."""
-    if _turn_effect.get() is not None:
-        _turn_effect.set(True)
+    flags = _flag_box()
+    if flags is not None:
+        flags["effect"] = True
 
 
 def mark_turn_checked() -> None:
-    if _turn_checked.get() is not None:
-        _turn_checked.set(True)
+    flags = _flag_box()
+    if flags is not None:
+        flags["checked"] = True
 
 
 def command_is_check(command: str) -> bool:
@@ -158,16 +167,17 @@ def apply_verify_note(text: str) -> str:
 
     A short reply that did not write a file or start a command is left as it is.
     """
-    if _turn_checked.get() is None:
+    flags = _flag_box()
+    if flags is None:
         return text or ""
     body = text or ""
-    if not _turn_effect.get():
+    if not flags.get("effect"):
         return body
     if not _DONE_CLAIM.search(body) or _UNVERIFIED_NOTE in body:
         return body
     if re.search(r"(?i)\b(not verified|did not verify|didn't verify|without verifying)\b", body):
         return body
-    if _turn_checked.get():
+    if flags.get("checked"):
         return body
     return (body.rstrip() + "\n\n" + _UNVERIFIED_NOTE).strip()
 
@@ -195,7 +205,14 @@ def _file_stamp(path: Path) -> tuple[int, int] | None:
     return (int(getattr(stat, "st_mtime_ns", int(stat.st_mtime * 1_000_000_000))), int(stat.st_size))
 
 
-def _remember_read(path: Path) -> None:
+def _chat_task_id() -> str:
+    slot = turn_mod.current_slot()
+    if slot is None or not slot.chat_id:
+        return "default"
+    return str(slot.chat_id)
+
+
+def _remember_read(path: Path, *, partial: bool = False) -> None:
     stamps = _edit_reads.get()
     if not isinstance(stamps, dict):
         return
@@ -203,14 +220,26 @@ def _remember_read(path: Path) -> None:
     if stamp is None:
         return
     key = _path_key(str(path))
-    stamps[key] = stamp
+    if not partial:
+        stamps[key] = stamp
     changes = _turn_changes.get() or []
     if any(_path_key(str(item.get("path") or "")) == key for item in changes):
         mark_turn_checked()
+    from easyagent import filestate
+
+    try:
+        filestate.record_read(_chat_task_id(), str(path), partial=partial)
+    except Exception:
+        pass
 
 
-def _require_fresh_read(path: Path) -> None:
-    """An existing file is written only from a read of its current bytes."""
+def _require_fresh_read(path: Path, *, allow_partial: bool = False) -> None:
+    """An existing file is written only from a read of its current bytes.
+
+    The read can be from this turn or from an earlier turn in the same chat,
+    as long as the mtime and the content hash still match. A windowed read
+    does not authorize a whole-file overwrite.
+    """
     stamps = _edit_reads.get()
     if not isinstance(stamps, dict):
         return
@@ -218,13 +247,34 @@ def _require_fresh_read(path: Path) -> None:
         return
     key = _path_key(str(path))
     stamp = stamps.get(key)
-    if stamp is None:
-        raise ToolError(
-            f"Read {path} before writing it. The write was refused because this turn has not read the current file."
-        )
     current = _file_stamp(path)
-    if current != stamp:
+    from easyagent import filestate
+
+    task = _chat_task_id()
+    resolved = str(path)
+    if stamp is not None and current == stamp:
+        reason = filestate.check_stale(task, resolved) or ""
+        if "changed since it was last read" in reason or "partial view" in reason:
+            raise ToolError(f"Read {path} again before writing it. The file changed since it was last read.")
+        return
+    if stamp is not None and current != stamp:
         raise ToolError(f"Read {path} again before writing it. The file changed since it was last read.")
+    if filestate.has_full_read(task, resolved):
+        if current is not None:
+            stamps[key] = current
+        return
+    reason = filestate.check_stale(task, resolved) or ""
+    if "partial view" in reason:
+        if allow_partial:
+            return
+        raise ToolError(
+            f"Read {path} again before writing it. The last read was only part of the file. {reason}"
+        )
+    if "changed since it was last read" in reason or "modified" in reason:
+        raise ToolError(f"Read {path} again before writing it. The file changed since it was last read.")
+    raise ToolError(
+        f"Read {path} before writing it. The write was refused because this turn has not read the current file."
+    )
 
 
 def _line_change(before: str, after: str) -> tuple[int, int]:
@@ -256,6 +306,12 @@ def _remember_write(path: Path, *, existed: bool, before: str, after: str, binar
     stamps = _edit_reads.get()
     if isinstance(stamps, dict) and stamp is not None:
         stamps[key] = stamp
+    from easyagent import filestate
+
+    try:
+        filestate.note_write(_chat_task_id(), str(path))
+    except Exception:
+        pass
 
 
 def diff_summary(changes: list[dict]) -> str:
@@ -309,6 +365,13 @@ class ToolRequest:
     call_id: str = ""
     call_name: str = ""
     call_arguments: str = ""
+    offset: int = 0
+    limit: int = 0
+    old_string: str = ""
+    new_string: str = ""
+    replace_all: bool = False
+    timeout: int = -1
+    workdir: str = ""
 
 
 @dataclass(frozen=True)
@@ -357,6 +420,8 @@ def strip_tool_markup(text: str) -> str:
     cleaned = _INVOKE.sub("", cleaned)
     for pattern in (
         _FILES_FENCE,
+        _PATCH_FENCE,
+        _SEARCH_FILES_FENCE,
         _SHELL_FENCE,
         _SSH_FENCE,
         _WINDOWS_FENCE,
@@ -885,7 +950,17 @@ def parse_tool(text: str) -> ToolRequest | None:
         path = lines[1].strip() if len(lines) > 1 else ""
         body = "\n".join(lines[2:]) if len(lines) > 2 else ""
         if action in {"list", "read", "write"} and not _ignored_path(path):
-            return ToolRequest(kind="files", action=action, path=path, body=body)
+            return _files_from_body(files)
+    patched = _fence_request(_PATCH_FENCE, text)
+    if patched is not None:
+        request = _patch_from_body(patched)
+        if request is not None:
+            return request
+    searched = _fence_request(_SEARCH_FILES_FENCE, text)
+    if searched is not None:
+        request = _search_files_from_body(searched)
+        if request is not None:
+            return request
     shell = _fence_request(_SHELL_FENCE, text)
     if shell is not None and not _ignored_command(shell.strip()):
         return ToolRequest(kind="shell", command=shell.strip())
@@ -979,17 +1054,88 @@ def _files_from_body(body: str) -> ToolRequest | None:
     lines = (body or "").splitlines()
     action = (lines[0] if lines else "").strip().lower()
     path = lines[1].strip() if len(lines) > 1 else ""
-    content = "\n".join(lines[2:]) if len(lines) > 2 else ""
+    rest = lines[2:]
+    offset = 0
+    limit = 0
+    content_lines: list[str] = []
+    if action == "read":
+        for line in rest:
+            cleaned = line.strip()
+            if cleaned.lower().startswith("offset:"):
+                offset = _positive_int(cleaned.split(":", 1)[1])
+                continue
+            if cleaned.lower().startswith("limit:"):
+                limit = _positive_int(cleaned.split(":", 1)[1])
+                continue
+            content_lines.append(line)
+    else:
+        content_lines = rest
+    content = "\n".join(content_lines) if content_lines else ""
     if action in {"list", "read", "write"} and not _ignored_path(path):
-        return ToolRequest(kind="files", action=action, path=path, body=content)
+        return ToolRequest(kind="files", action=action, path=path, body=content, offset=offset, limit=limit)
     return None
 
 
+def _positive_int(text: str) -> int:
+    try:
+        value = int(str(text).strip())
+    except (TypeError, ValueError):
+        return 0
+    return value if value > 0 else 0
+
+
+def _patch_from_body(body: str) -> ToolRequest | None:
+    text = body or ""
+    if "\n---OLD---\n" not in text or "\n---NEW---\n" not in text:
+        return None
+    head, _, tail = text.partition("\n---OLD---\n")
+    old, _, new = tail.partition("\n---NEW---\n")
+    lines = [line.strip() for line in head.splitlines() if line.strip()]
+    path = lines[0] if lines else ""
+    replace_all = any(line.lower() in {"replace_all", "replace_all: true", "replace_all:true"} for line in lines[1:])
+    if not path or _ignored_path(path):
+        return None
+    return ToolRequest(
+        kind="files",
+        action="patch",
+        path=path,
+        old_string=old,
+        new_string=new,
+        replace_all=replace_all,
+    )
+
+
+def _search_files_from_body(body: str) -> ToolRequest | None:
+    lines = [line.strip() for line in (body or "").splitlines() if line.strip()]
+    if not lines:
+        return None
+    pattern = lines[0]
+    path = lines[1] if len(lines) > 1 else "."
+    file_glob = lines[2] if len(lines) > 2 else ""
+    if pattern.lower() in {"the pattern", "pattern", "query"}:
+        return None
+    return ToolRequest(kind="search_files", action="search", path=path, body=pattern, command=file_glob)
+
+
 def _shell_from_body(body: str) -> ToolRequest | None:
-    command = (body or "").strip()
+    raw = body or ""
+    timeout = -1
+    workdir = ""
+    if "\n---EA---\n" in raw:
+        raw, _, meta = raw.partition("\n---EA---\n")
+        for line in meta.splitlines():
+            cleaned = line.strip()
+            if cleaned.lower().startswith("timeout:"):
+                try:
+                    timeout = int(cleaned.split(":", 1)[1].strip())
+                except ValueError:
+                    timeout = 0
+            elif cleaned.lower().startswith("workdir:"):
+                workdir = cleaned.split(":", 1)[1].strip()
+    command = raw.strip()
     if not command or _ignored_command(command):
         return None
-    return ToolRequest(kind="shell", command=command)
+    return ToolRequest(kind="shell", command=command, timeout=timeout, workdir=workdir)
 
 
 def _remote_from_body(kind: str, body: str) -> ToolRequest | None:
@@ -1196,6 +1342,8 @@ def parse_tools(text: str) -> list[ToolRequest]:
                 found.append((match.start(), request))
 
     take(_FILES_FENCE, _files_from_body)
+    take(_PATCH_FENCE, _patch_from_body)
+    take(_SEARCH_FILES_FENCE, _search_files_from_body)
     take(_SHELL_FENCE, _shell_from_body)
     take(_SSH_FENCE, lambda body: _remote_from_body("ssh", body))
     take(_WINDOWS_FENCE, lambda body: _remote_from_body("windows", body))
@@ -1344,8 +1492,12 @@ def status_label(request: ToolRequest) -> str:
         return "Asking"
     if request.kind == "files" and request.action == "write":
         return f"Writing {_file_name(request.path)}"
+    if request.kind == "files" and request.action == "patch":
+        return f"Patching {_file_name(request.path)}"
     if request.kind == "files" and request.action == "read":
         return f"Reading {_file_name(request.path)}"
+    if request.kind == "search_files":
+        return "Searching files"
     if request.kind in {"files", "project", "history"} or (request.kind == "memory" and request.action == "read"):
         return "Looking"
     if request.kind == "memory":
@@ -1766,31 +1918,47 @@ def _clear_file_posed_as_folder(path: Path) -> None:
 
 
 def _write_path(path: Path, body: str) -> str:
+    from easyagent import filestate
+    from easyagent.coding import is_internal_display, rewrite_hint
+    from easyagent.linting import check_lint_delta
+
     blocked = _file_parent_in(str(path))
     if blocked:
         raise ToolError(f"The file was not written. {blocked} is a file path, not a folder.")
+    if is_internal_display(body):
+        raise ToolError(
+            "The file was not written. That text is read_file's numbered display. "
+            "Strip the line-number prefixes before writing."
+        )
     _clear_file_posed_as_folder(path)
     if path.exists() and path.is_dir():
         raise ToolError(f"The file was not written. {path} is a folder.")
     if len(body) > _WRITE_CAP:
         raise ToolError(f"The file was not written. {path} is too long to write.")
-    existed = path.is_file()
-    before = ""
-    if existed:
-        _require_fresh_read(path)
+    with filestate.lock_path(str(path)):
+        existed = path.is_file()
+        before = ""
+        if existed:
+            _require_fresh_read(path)
+            try:
+                before = path.read_text(encoding="utf-8", errors="replace")
+            except OSError:
+                before = ""
         try:
-            before = path.read_text(encoding="utf-8", errors="replace")
-        except OSError:
-            before = ""
-    try:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(body, encoding="utf-8", newline="\n")
-    except OSError as exc:
-        raise ToolError(f"The file was not written. {path}: {exc}") from exc
-    if not _file_is_present(path):
-        raise ToolError(f"The file was not written. {path} is not on disk.")
-    _remember_write(path, existed=existed, before=before, after=body)
-    return f"Wrote {len(body)} characters to {path}"
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(body, encoding="utf-8", newline="\n")
+        except OSError as exc:
+            raise ToolError(f"The file was not written. {path}: {exc}") from exc
+        if not _file_is_present(path):
+            raise ToolError(f"The file was not written. {path} is not on disk.")
+        _remember_write(path, existed=existed, before=before, after=body)
+    note = f"Wrote {len(body)} characters to {path}"
+    hint = rewrite_hint(before, body) if existed else ""
+    lint = check_lint_delta(str(path), before if existed else None, body)
+    extra = "\n".join(part for part in (hint, lint) if part)
+    if extra:
+        note = note + "\n" + extra
+    return note
 
 
 def _write_bytes(path: Path, data: bytes) -> str:
@@ -1826,10 +1994,19 @@ def _run_files(store: Store, request: ToolRequest) -> str:
             raise ToolError(f"The file was not written. {blocked} is a file path, not a folder.")
         if _drive_path_unusable(path_text):
             raise ToolError(f"The file was not written. This computer cannot use {path_text}.")
+    elif request.action == "patch":
+        path_text = request.path
+        blocked = _file_parent_in(path_text)
+        if blocked:
+            raise ToolError(f"The file was not written. {blocked} is a file path, not a folder.")
+        if _drive_path_unusable(path_text):
+            raise ToolError(f"The file was not written. This computer cannot use {path_text}.")
     path = _user_path(store, path_text)
     if request.action == "list":
         return _list_path(path)
     if request.action == "read":
+        if request.offset or request.limit:
+            return _read_window(path, request.offset or 1, request.limit or 2000)
         return _read_path(path)
     if request.action == "write":
         if body.strip() == _PNG_MARK:
@@ -1837,7 +2014,51 @@ def _run_files(store: Store, request: ToolRequest) -> str:
         if not body.strip():
             raise ToolError(f"The file was not written. {path} had nothing to write.")
         return _write_path(path, body)
-    raise ToolError("Say whether to list, read, or write that path.")
+    if request.action == "patch":
+        return _run_patch(path, request)
+    raise ToolError("Say whether to list, read, write, or patch that path.")
+
+
+def _read_window(path: Path, offset: int, limit: int) -> str:
+    from easyagent.coding import read_window
+
+    try:
+        text, partial = read_window(path, offset=offset, limit=limit, task_id=_chat_task_id())
+    except FileNotFoundError as exc:
+        raise ToolError(str(exc)) from exc
+    except ValueError as exc:
+        raise ToolError(str(exc)) from exc
+    if not text.startswith("BLOCKED:") and not text.startswith("File unchanged"):
+        _remember_read(path, partial=partial)
+    return text
+
+
+def _run_patch(path: Path, request: ToolRequest) -> str:
+    from easyagent import filestate
+    from easyagent.coding import apply_patch, verified_line
+
+    if not path.is_file():
+        raise ToolError(f"The file was not patched. {path} is not there. Write it first.")
+    _require_fresh_read(path, allow_partial=True)
+    try:
+        with filestate.lock_path(str(path)):
+            report, new_content = apply_patch(
+                path,
+                request.old_string,
+                request.new_string,
+                replace_all=request.replace_all,
+                task_id=_chat_task_id(),
+            )
+            before = path.read_text(encoding="utf-8", errors="replace")
+            path.write_text(new_content, encoding="utf-8", newline="\n")
+            if not _file_is_present(path):
+                raise ToolError(f"The file was not patched. {path} is not on disk.")
+            _remember_write(path, existed=True, before=before, after=new_content)
+    except ValueError as exc:
+        raise ToolError(str(exc)) from exc
+    except OSError as exc:
+        raise ToolError(f"The file was not patched. {path}: {exc}") from exc
+    return report + "\n" + verified_line(path)
 
 
 def _powershell_command(command: str) -> str:
@@ -1876,7 +2097,42 @@ def _empty_command(code: int | None) -> str:
     return f"command produced no output, exit code {shown}"
 
 
-def _run_shell(store: Store, command: str) -> str:
+_SHELL_DEFAULT_TIMEOUT = 120
+_SHELL_MAX_TIMEOUT = 900
+
+
+def _shell_timeout(value: int) -> int:
+    if value < 0:
+        return _SHELL_DEFAULT_TIMEOUT
+    if value <= 0 or value > _SHELL_MAX_TIMEOUT:
+        raise ToolError(
+            f"timeout must be between 1 and {_SHELL_MAX_TIMEOUT} seconds. The command was not run."
+        )
+    return value
+
+
+def _shell_workdir(store: Store, workdir: str) -> str:
+    if not (workdir or "").strip():
+        return turn_mod.tool_cwd()
+    path = _user_path(store, workdir)
+    if not path.is_dir():
+        raise ToolError(f"{path} is not a folder. The command was not run.")
+    from easyagent.safety import _inside, _workspace_roots, secret_file
+
+    if secret_file(path):
+        raise ToolError(f"{path} is a secret folder. The command was not run.")
+
+    slot = turn_mod.current_slot()
+    bot_id = slot.bot_id if slot is not None else ""
+    roots = _workspace_roots(store, bot_id or None, "")
+    if roots and not _inside(path, roots):
+        raise ToolError(f"{path} is outside this bot's folders. The command was not run.")
+    if slot is not None:
+        slot.cwd = str(path)
+    return str(path)
+
+
+def _run_shell(store: Store, command: str, *, timeout: int = -1, workdir: str = "") -> str:
     from easyagent.safety import shell_text_as_run
 
     original = (command or "").strip()
@@ -1887,10 +2143,12 @@ def _run_shell(store: Store, command: str) -> str:
     if len(original) > 4000:
         raise ToolError("That command is too long. It was not run.")
     text = shell_text_as_run(original)
+    wait = _shell_timeout(timeout)
+    cwd_text = _shell_workdir(store, workdir)
     slot = turn_mod.current_slot()
     bot_id = slot.bot_id if slot is not None else ""
     try:
-        cwd_path = Path(turn_mod.tool_cwd())
+        cwd_path = Path(cwd_text)
     except OSError:
         cwd_path = Path(".")
     from easyagent.psast import data_decision
@@ -1904,6 +2162,16 @@ def _run_shell(store: Store, command: str) -> str:
         raise ToolError("That command names a saved secret. It was not run.")
     if turn_mod.cancelled():
         raise turn_mod.TurnCancelled()
+    from easyagent.scriptgate import script_run_unproved
+    from easyagent.yolo import active as yolo_active
+
+    if (
+        bot_id
+        and not getattr(slot, "script_human_approved", False)
+        and yolo_active(store, bot_id)
+        and script_run_unproved(store, bot_id, checked, cwd_path)
+    ):
+        raise ToolError("That script is not limited to this folder. It was not run.")
     decision = data_decision(store, checked, cwd_path, bot_id or None)
     if decision == "block":
         raise ToolError("That command mentions EasyAgent's saved chats. It was not run.")
@@ -1927,7 +2195,7 @@ def _run_shell(store: Store, command: str) -> str:
     proc = None
     if mode.get("contained"):
         try:
-            proc = popen_contained(store, bot_id or None, text, env, turn_mod.tool_cwd())
+            proc = popen_contained(store, bot_id or None, text, env, cwd_text)
         except (OSError, subprocess.SubprocessError, RuntimeError, ValueError) as exc:
             from easyagent.sandbox import launch_failure
 
@@ -1941,7 +2209,7 @@ def _run_shell(store: Store, command: str) -> str:
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 text=True,
-                cwd=turn_mod.tool_cwd(),
+                cwd=cwd_text,
                 env=env,
                 start_new_session=True,
             )
@@ -1959,7 +2227,7 @@ def _run_shell(store: Store, command: str) -> str:
             turn_mod.stop_process(proc)
             raise turn_mod.TurnCancelled()
         try:
-            stdout, stderr = proc.communicate(timeout=_COMMAND_TIMEOUT)
+            stdout, stderr = proc.communicate(timeout=wait)
         except subprocess.TimeoutExpired as exc:
             turn_mod.stop_process(proc)
             try:
@@ -1972,13 +2240,24 @@ def _run_shell(store: Store, command: str) -> str:
     if turn_mod.cancelled():
         turn_mod.stop_process(proc)
         raise turn_mod.TurnCancelled()
-    output = _clip(((stdout or "") + (stderr or "")).strip())
-    if not output:
+    from easyagent.coding import shell_read_target
+    from easyagent.truncate import truncate_head_tail
+
+    raw_output = ((stdout or "") + (stderr or "")).strip()
+    if not raw_output:
         output = _empty_command(proc.returncode)
+    else:
+        # The command's own last line stays last. Exit code and cwd are the lines above it.
+        output = truncate_head_tail(raw_output, _OUTPUT_CAP)
+        output = f"exit code {proc.returncode}\ncwd {cwd_text}\n{output}"
     if notice:
         output = (notice + "\n" + output).strip()
     if proc.returncode != 0:
         raise ToolError(output)
+    if proc.returncode == 0:
+        target = shell_read_target(original)
+        if target is not None:
+            _note_shell_read(store, target[0], cwd_path, partial=target[1])
     if bot_id:
         from easyagent.strictshell import remember_git_command
 
@@ -1987,6 +2266,96 @@ def _run_shell(store: Store, command: str) -> str:
         except Exception:
             pass
     return output
+
+
+def _note_shell_read(store: Store, raw: str, cwd: Path, *, partial: bool) -> None:
+    """A read-only shell that printed a file counts as a read of that file."""
+    text = (raw or "").strip().strip('"').strip("'")
+    if not text or text in {".", ".."}:
+        return
+    path = Path(text)
+    if not path.is_absolute():
+        path = cwd / path
+    try:
+        resolved = path.resolve()
+    except OSError:
+        return
+    if not resolved.is_file():
+        return
+    caller = _caller_bot()
+    try:
+        if _data_path_blocked(store, resolved, caller):
+            return
+    except Exception:
+        return
+    from easyagent.secrets import is_protected_secret
+
+    if is_protected_secret(store, resolved):
+        return
+    _remember_read(resolved, partial=partial)
+
+
+def _match_file(line: str) -> Path | None:
+    """path:line:text, including a Windows drive letter in the path."""
+    match = re.match(r"^(.*):(\d+):(.*)$", line)
+    if match is None:
+        return None
+    return Path(match.group(1))
+
+
+def _run_search_files(store: Store, request: ToolRequest) -> str:
+    from easyagent.coding import search_root_error, search_tree
+    from easyagent.safety import _inside, secret_file
+    from easyagent.secrets import command_targets_secret, is_protected_secret
+    from easyagent.yolo import _scope_roots
+
+    pattern = (request.body or "").strip()
+    if command_targets_secret(store, pattern) or command_targets_secret(store, request.path or ""):
+        raise ToolError("That search names a saved secret. It was not run.")
+    root = _user_path(store, request.path or ".")
+    if secret_file(root):
+        raise ToolError("That search names a secret file. It was not run.")
+    if root.is_file():
+        root = root.parent
+        if secret_file(root):
+            raise ToolError("That search names a secret folder. It was not run.")
+    if not root.exists():
+        raise ToolError(f"Could not search {root}: that folder is not there.")
+    refused = search_root_error(root)
+    if refused:
+        raise ToolError(refused)
+    caller = _caller_bot()
+    roots = _scope_roots(store, caller) if caller else []
+    if roots and not _inside(root, roots):
+        raise ToolError(f"{root} is outside this bot's folders. The search was not run.")
+
+    def skip(path: Path) -> bool:
+        try:
+            if secret_file(path) or is_protected_secret(store, path):
+                return True
+            if _data_path_blocked(store, path, caller):
+                return True
+        except Exception:
+            return True
+        return False
+
+    try:
+        text = search_tree(root, pattern, file_glob=(request.command or "").strip(), limit=50, skip=skip)
+    except ValueError as exc:
+        raise ToolError(str(exc)) from exc
+    kept: list[str] = []
+    for line in text.splitlines():
+        candidate = _match_file(line)
+        if candidate is None:
+            kept.append(redact(store, line))
+            continue
+        if not candidate.is_absolute():
+            candidate = root / candidate
+        if skip(candidate):
+            continue
+        kept.append(redact(store, line))
+    shown = "\n".join(kept).strip()
+    return shown or f"No matches for {pattern} under {root}."
 
 
 def _saved_computer(store: Store, name: str, kind: str) -> dict:
@@ -2214,6 +2583,8 @@ def _execute(store: Store, request: ToolRequest, bot_id: str | None = None) -> s
         return "The reaction is on that message."
     if request.kind == "files":
         return _run_files(store, request)
+    if request.kind == "search_files":
+        return _run_search_files(store, request)
     if request.kind == "project":
         return _run_project(store, request, bot_id)
     if request.kind == "memory":
@@ -2228,6 +2599,8 @@ def _execute(store: Store, request: ToolRequest, bot_id: str | None = None) -> s
     if request.kind == "failed":
         raise ToolError(request.body or "That call could not be run.")
     if request.kind == "shell":
+        if request.timeout >= 0 or request.workdir:
+            return _run_shell(store, request.command, timeout=request.timeout, workdir=request.workdir)
         return _run_shell(store, request.command)
     if request.kind in {"ssh", "windows"}:
         kind = "linux" if request.kind == "ssh" else "windows"
@@ -2594,6 +2967,10 @@ def happened_line(request: ToolRequest, messages: list[dict] | None = None) -> s
         return f"Read {request.path}."
     if request.kind == "files" and request.action == "write":
         return f"Wrote {request.path}."
+    if request.kind == "files" and request.action == "patch":
+        return f"Patched {request.path}."
+    if request.kind == "search_files":
+        return f"Searched files for {request.body}."
     if request.kind == "project" and request.action == "read":
         return f"Read {request.command} in {request.path}."
     if request.kind == "project" and request.path:
@@ -2826,6 +3203,10 @@ def model_slice(store: Store, request: ToolRequest, result: str, messages: list[
     body = result or ""
     if _full_page_read(request, body):
         return body
+    if request.kind == "search_files" or (request.kind == "files" and request.action in {"patch", "read"} and (request.offset or request.limit or request.action == "patch")):
+        from easyagent.truncate import truncate_head_tail
+
+        return truncate_head_tail(body, 60_000, label="RESULT")
     if len(body) > _MODEL_CHARS:
         body = body[: _MODEL_CHARS - 24].rstrip() + "\n[result truncated]"
     return body
@@ -3558,6 +3939,9 @@ def _file_sentence(path: str) -> str:
     name, folder = _split_stored_path(path)
     if not name:
         return ""
+    shown = (folder or "").strip().strip("\\/")
+    if not shown or shown in {".", "./"}:
+        return f"The file is {name} in the project folder."
     return f"The file is {name} in {folder}."
 
 
@@ -3616,8 +4000,14 @@ def _with_file_place(answer: str, lines: list[str]) -> str:
         return answer
     if re.search(r"(?i)\bnot written\b", answer or ""):
         answer = ""
-    if _looks_like_creation(answer) and not _answer_names_file(answer, path):
+    folded = " ".join((answer or "").split())
+    if _UNBACKED_SAVE.match(folded):
         answer = ""
+    elif _looks_like_creation(answer) and not _answer_names_file(answer, path):
+        # A one-line claim that does not name the file is replaced by the location.
+        # A longer summary stays, and the location is appended below.
+        if len(folded) <= 80 and not _names_in(answer or ""):
+            answer = ""
     if path.lower().endswith((".html", ".htm")) and _page_name(path):
         if _names_page(answer, path):
             return answer
@@ -7728,7 +8118,7 @@ async def run_turn(
                 yield "status", "Thinking"
                 continue
             if _pending_write():
-                for event in close(""):
+                for event in close(prose or ""):
                     yield event
                 return
             follow = honesty.take_followup(prose) if not nudged else None

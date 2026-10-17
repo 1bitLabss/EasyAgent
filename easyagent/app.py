@@ -3021,8 +3021,10 @@ def _last_user_text(messages: list) -> str:
 
 
 def _skills_for_prompt(store: Store, bot_id: str, request: str) -> str:
-    """User skills first, then learned ones by measured success. Lessons only when one matches."""
-    text = pack_skills(rank_skills(store, store.list_skills()))
+    """Names for this bot. The body is read on demand. Lessons only when one matches."""
+    from easyagent.botskills import catalog
+
+    text = catalog(store, bot_id) if bot_id else "(none yet)"
     block = lesson_block(store, bot_id, request) if bot_id and request else ""
     if not block:
         return text

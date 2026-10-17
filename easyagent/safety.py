@@ -3471,6 +3471,22 @@ def classify(store: Store, request, bot_id: str | None) -> Verdict:
                     verdict.detail,
                     verdict.fingerprint,
                 )
+    elif kind == "skill":
+        verdict = _verdict(
+            ALLOW,
+            "skill",
+            "A skill file stays in this bot's skills folder. It does not change approvals.",
+            getattr(request, "path", "") or "",
+            _fp("skill", getattr(request, "action", ""), getattr(request, "path", "")),
+        )
+    elif kind == "delegate":
+        verdict = _verdict(
+            ALLOW,
+            "delegate",
+            "Starting a child does not approve its tools. Each tool the child uses is judged on its own.",
+            (getattr(request, "body", "") or "")[:180],
+            _fp("delegate", (getattr(request, "body", "") or "")[:80]),
+        )
     elif kind == "mcp":
         from easyagent.connectors import judge_mcp
 

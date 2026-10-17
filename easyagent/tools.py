@@ -755,7 +755,7 @@ _KNOWN_TOOLS = (
     "execute_command", "run_command", "run_ssh", "run_windows", "connector",
     "create_routine", "edit_routine", "delete_routine", "duckduckgo",
     "save_file", "create_file", "list_directory", "ls", "reaction", "tapback",
-    "delegate_task",
+    "delegate_task", "skill",
 )
 
 
@@ -857,6 +857,18 @@ def _request_from_call(data: dict) -> ToolRequest:
         if not emoji or not mid:
             raise ToolError("A reaction needs an emoji and the person's message id.")
         return ToolRequest(kind="react", path=mid, body=emoji)
+    if name == "skill":
+        skill_action = action or "list"
+        if skill_action not in {"list", "read", "write"}:
+            raise ToolError("A skill action is list, read, or write. It was not run.")
+        skill_name = str(raw_args.get("name") or raw_args.get("topic") or "").strip()
+        return ToolRequest(
+            kind="skill",
+            action=skill_action,
+            path=skill_name,
+            body=content,
+            command=str(raw_args.get("description") or "").strip(),
+        )
     if name == "delegate_task":
         task = str(raw_args.get("task") or content or "").strip()
         if not task:
@@ -1615,6 +1627,8 @@ def clear_activity() -> None:
 
 
 def status_label(request: ToolRequest) -> str:
+    if request.kind == "skill":
+        return "Saving a skill" if request.action == "write" else "Reading a skill"
     if request.kind == "delegate":
         return "Running a child agent"
     if request.kind == "plan":
@@ -3059,6 +3073,28 @@ async def _execute_now(store: Store, request: ToolRequest, bot_id: str | None = 
     limited = scope_block(request.kind)
     if limited:
         raise ToolError(limited + " It was not run.")
+    if request.kind == "skill":
+        from easyagent.botskills import SkillError, list_skills, read_skill, write_skill
+
+        if not bot_id:
+            raise ToolError("This turn has no bot, so the skill was not opened.")
+        try:
+            if request.action == "list":
+                rows = list_skills(store, bot_id)
+                if not rows:
+                    return "No skills."
+                return "Skills\n" + "\n".join(
+                    f"- {row['name']}: {row['description']}" if row.get("description") else f"- {row['name']}"
+                    for row in rows
+                )
+            if request.action == "read":
+                return read_skill(store, bot_id, request.path)
+            if request.action == "write":
+                saved = write_skill(store, bot_id, request.path, request.body, request.command)
+                return f"Saved skill {saved['name']}."
+        except SkillError as exc:
+            raise ToolError(str(exc)) from exc
+        raise ToolError("A skill action is list, read, or write. It was not run.")
     if request.kind == "delegate":
         from easyagent.delegate import run_delegate
 

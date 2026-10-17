@@ -89,7 +89,7 @@ Follow the direction below on every turn. It outranks habit.
 {direction_text}
 
 # Skills
-Reuse a skill when it fits. When you learn a durable preference or a reusable procedure, save it by including a fenced block in your reply, exactly in this shape (replace the sample name and body):
+Reuse a skill when it fits. The list below is names. Read that skill's file when you need the body. When you learn a durable preference or a reusable procedure, save it by including a fenced block in your reply, exactly in this shape (replace the sample name and body):
 
 ```skill
 ---

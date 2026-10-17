@@ -453,7 +453,7 @@ def test_direction_is_reread_each_turn_and_skills_are_reused(world):
     system = world.rec.calls[-1]["messages"][0]["content"]
     assert "Custom rule: do not wipe chats." in system
     assert "short-replies" in system
-    assert "Answer in one or two sentences." in system
+    assert "Answer in one or two sentences." not in system
     assert len(again.json()["chat"]["messages"]) == 4
 
 

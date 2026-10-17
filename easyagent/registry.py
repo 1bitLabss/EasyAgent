@@ -71,6 +71,7 @@ _KIND_TOOLS = {
     "question": "question",
     "finish": "finish",
     "delegate": "delegate_task",
+    "skill": "skill",
 }
 
 

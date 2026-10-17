@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.3.36
+- A native tool call is repaired and coerced through the registry, including delegate_task and skill. A call that cannot run returns that error instead of ending the turn with no tool call.
+- A webhook is accepted on its HTTP route. The token is checked from the header. A bad token does not touch the chat, and the token is not written to disk.
+- A routine's time limit cancels a model call that is still running.
+- JWT, a private-key body, sk_live_, and a password line are scrubbed by one scrubber, including memory, session search, spill files, undo copies, and a provider error log. search_files skips .ea-undo and .ea-spill. A search for a bare secret does not echo it.
+- `command echo .npmrc` is echo, so it does not card. `command cat .npmrc` still does. Another bot's missing memory topic says it is not in the index.
+- A skill body with a password line, a tool call, a terminal or memory fence, or more than 64 KB is not stored. The prompt catalog fences the description on one line.
+- A child prompt names only the tools it was given. Three child agents can run at once.
+
 ## 0.3.35
 - A memory line is scrubbed before it is stored. A read of that topic is scrubbed again. A scrub failure stores [redacted], not the original line.
 - Session search matches the saved text, then scrubs the snippet and the reply. A key in the query is not echoed. A scrub failure is the word [redacted].

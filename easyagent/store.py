@@ -2155,6 +2155,15 @@ class Store:
             raise StoreError("The index is full. An older topic was not changed.", 400)
         return slug
 
+    def _scrub_memory_text(self, text: str) -> str:
+        """Scrub before taking the store lock. Listing saved secrets takes that same lock."""
+        try:
+            from easyagent.journal import scrub_text
+
+            return scrub_text(self, text or "")
+        except Exception:
+            return "[redacted]"
+
     def add_memory(
         self,
         bot_id: str,
@@ -2166,7 +2175,7 @@ class Store:
         also: str | None = None,
     ) -> dict:
         """File one line into the topic it belongs with. An identical line is left as it is."""
-        cleaned = " ".join((text or "").split())
+        cleaned = self._scrub_memory_text(" ".join((text or "").split()))
         if not cleaned or len(cleaned) > 500:
             raise StoreError("Type the fact. Nothing was changed.", 400)
         with self._lock:
@@ -2205,7 +2214,7 @@ class Store:
     def update_memory(self, bot_id: str, memory_id: str, text: str) -> dict:
         """Change one line. Every other line stays."""
         memory_id = self._parse_id(memory_id)
-        cleaned = " ".join((text or "").split())
+        cleaned = self._scrub_memory_text(" ".join((text or "").split()))
         if not cleaned or len(cleaned) > 500:
             raise StoreError("Type the fact. Nothing was changed.", 400)
         with self._lock:

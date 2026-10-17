@@ -1,6 +1,7 @@
 # Changelog
 
 ## 0.3.35
+- A memory line is scrubbed before it is stored. A read of that topic is scrubbed again. A scrub failure stores [redacted], not the original line.
 - Session search matches the saved text, then scrubs the snippet and the reply. A key in the query is not echoed. A scrub failure is the word [redacted].
 - Context compression keeps the latest request, the open task list, and pending approvals. Older rows are what get dropped. A short chat with none of those is unchanged.
 - A Windows path is folded before the secret check. Backslashes, a drive letter, `\\?\`, case, a trailing dot or space, an 8.3 short name, and an NTFS stream such as `.env::$DATA` are the same name as the file. `type .env`, `cat ..\.env`, `.ENV`, `.env.`, and a key file still wait. `echo hi`, `cat notes.txt`, and `git status` do not. A folder under `C:\Users` is not itself a secret read.

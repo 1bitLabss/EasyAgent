@@ -373,7 +373,13 @@ async def server_is_llama(base_url: str, api_key: str | None = None) -> bool:
     cached = cached_llama(base_url)
     if cached is not None:
         return cached
-    headers = {"Authorization": f"Bearer {api_key}"} if api_key else {}
+    from easyagent import providers
+
+    try:
+        headers = providers.authorize(base_url, api_key, content_type=None)
+    except providers.ProviderKeyError:
+        remember_llama(base_url, False)
+        return False
     url = _server_root(base_url).rstrip("/") + "/props"
     try:
         async with httpx.AsyncClient(timeout=httpx.Timeout(2.0, connect=1.0)) as client:
@@ -1120,6 +1126,31 @@ def _http_timeout(timeout: float, *, stream: bool) -> httpx.Timeout:
     )
 
 
+def _auth_headers(base_url: str, api_key: str | None) -> dict:
+    """One provider's headers. A key pinned to another host is not attached."""
+    from easyagent import providers
+
+    try:
+        return providers.authorize(base_url, api_key)
+    except providers.ProviderKeyError as exc:
+        raise ProviderError(str(exc)) from exc
+
+
+def _provider_rows(base_url: str, api_key: str | None, model, fallbacks) -> list[dict]:
+    from easyagent import providers
+
+    return providers.activation(base_url, api_key, model, fallbacks)
+
+
+def _raise_failover(exc: ProviderError, keys: list[str]) -> None:
+    from easyagent import providers
+
+    cleaned = providers.scrub(str(exc), keys)
+    if cleaned != str(exc):
+        raise ProviderError(cleaned) from None
+    raise exc
+
+
 def _raise_transport(exc: BaseException, base_url: str) -> None:
     if isinstance(exc, turn_mod.TurnCancelled):
         raise exc
@@ -1313,9 +1344,7 @@ async def _complete_attempt(
         max_tokens=current_limits().max_tokens,
         temperature=_tool_temperature(tools, response_schema, grammar, attempt),
     )
-    headers = {"Content-Type": "application/json"}
-    if api_key:
-        headers["Authorization"] = f"Bearer {api_key}"
+    headers = _auth_headers(base_url, api_key)
     client = httpx.AsyncClient(timeout=_http_timeout(timeout, stream=False))
     turn_mod.attach_client(client)
     watcher = asyncio.create_task(_watch_for_chat(client)) if yield_to_chats else None
@@ -1488,20 +1517,20 @@ async def _complete_window(
                 await permit.release()
 
 
-async def complete(
+async def _complete_current(
     *,
     base_url: str,
     api_key: str | None,
     model: str | None,
     messages: list[dict],
-    timeout: float = 120.0,
-    response_schema: dict | None = None,
-    grammar: str | None = None,
-    tools: bool | None = None,
-    yield_to_chats: bool = False,
-    long_wait: bool = False,
+    timeout: float,
+    response_schema: dict | None,
+    grammar: str | None,
+    tools: bool | None,
+    yield_to_chats: bool,
+    long_wait: bool,
 ) -> str:
-    """One completion. The request runs in this process, not in the tool container. Structured and internal calls omit tools. llama.cpp gets plain JSON."""
+    """One provider. A grammar rejection is retried here, still with this key."""
     structured = bool(response_schema or grammar)
     send_tools = False if tools is False or structured else True
     schema = response_schema
@@ -1541,6 +1570,63 @@ async def complete(
                 long_wait=long_wait,
             )
         raise
+
+
+async def complete(
+    *,
+    base_url: str,
+    api_key: str | None,
+    model: str | None,
+    messages: list[dict],
+    timeout: float = 120.0,
+    response_schema: dict | None = None,
+    grammar: str | None = None,
+    tools: bool | None = None,
+    yield_to_chats: bool = False,
+    long_wait: bool = False,
+    fallbacks: list[dict] | None = None,
+) -> str:
+    """One completion. A rate limit or a dropped connection tries the next saved provider.
+
+    The request runs in this process, not in the tool container. Structured and
+    internal calls omit tools. llama.cpp gets plain JSON. The previous error is
+    not added to the next provider's messages, and that provider's own key is
+    the only key on its request.
+    """
+    from easyagent import providers
+
+    rows = _provider_rows(base_url, api_key, model, fallbacks)
+    keys = providers.secret_values(rows)
+    last: ProviderError | None = None
+    for index, item in enumerate(rows):
+        chosen = model if index == 0 else (item.get("model") or model)
+        try:
+            return await _complete_current(
+                base_url=str(item.get("base_url") or ""),
+                api_key=(item.get("api_key") or None),
+                model=chosen,
+                messages=messages,
+                timeout=timeout,
+                response_schema=response_schema,
+                grammar=grammar,
+                tools=tools,
+                yield_to_chats=yield_to_chats,
+                long_wait=long_wait,
+            )
+        except YieldLater:
+            raise
+        except turn_mod.TurnCancelled:
+            raise
+        except ProviderError as exc:
+            last = exc
+            more = index + 1 < len(rows)
+            if providers.refused(str(exc)) and more:
+                continue
+            if not more or not providers.failover(str(exc)):
+                _raise_failover(exc, keys)
+    if last is not None:
+        _raise_failover(last, keys)
+    raise ProviderError("Endpoint returned an empty message.")
 
 
 def _choice_text(choice: dict) -> str:
@@ -1826,9 +1912,7 @@ async def _stream_attempt(
         temperature=_tool_temperature(True, None, None, attempt),
     )
     watch = GenerationWatch(limits)
-    headers = {"Content-Type": "application/json"}
-    if api_key:
-        headers["Authorization"] = f"Bearer {api_key}"
+    headers = _auth_headers(base_url, api_key)
     client = httpx.AsyncClient(timeout=_http_timeout(timeout, stream=True))
     turn_mod.attach_client(client)
     yielded = False
@@ -1944,19 +2028,15 @@ async def _stream_window(
                 await permit.release()
 
 
-async def stream_complete(
+async def _stream_current(
     *,
     base_url: str,
     api_key: str | None,
     model: str | None,
     messages: list[dict],
-    timeout: float = 120.0,
+    timeout: float,
 ) -> AsyncIterator[str]:
-    """Yield the reply as it arrives. Waiting on an open socket is not a failure.
-
-    A caller that already retries passes one attempt through. On its own, this
-    keeps trying until the first token or the retry window runs out.
-    """
+    """One provider's stream. A caller that already retries passes one attempt through."""
     producer = _stream_window if gate.inner_retry_allowed() else _stream_once
     async for piece in producer(
         base_url=base_url,
@@ -1966,3 +2046,51 @@ async def stream_complete(
         timeout=timeout,
     ):
         yield piece
+
+
+async def stream_complete(
+    *,
+    base_url: str,
+    api_key: str | None,
+    model: str | None,
+    messages: list[dict],
+    timeout: float = 120.0,
+    fallbacks: list[dict] | None = None,
+) -> AsyncIterator[str]:
+    """Yield the reply as it arrives. Waiting on an open socket is not a failure.
+
+    A caller that already retries passes one attempt through. On its own, this
+    keeps trying until the first token or the retry window runs out. Before any
+    token, a rate limit or a dropped connection tries the next saved provider
+    with that provider's own key. Text already yielded is not restarted.
+    """
+    from easyagent import providers
+
+    rows = _provider_rows(base_url, api_key, model, fallbacks)
+    keys = providers.secret_values(rows)
+    last: ProviderError | None = None
+    for index, item in enumerate(rows):
+        chosen = model if index == 0 else (item.get("model") or model)
+        produced = False
+        try:
+            async for piece in _stream_current(
+                base_url=str(item.get("base_url") or ""),
+                api_key=(item.get("api_key") or None),
+                model=chosen,
+                messages=messages,
+                timeout=timeout,
+            ):
+                produced = True
+                yield piece
+            return
+        except turn_mod.TurnCancelled:
+            raise
+        except ProviderError as exc:
+            last = exc
+            more = index + 1 < len(rows)
+            if produced or not more or not providers.failover(str(exc)):
+                if providers.refused(str(exc)) and more and not produced:
+                    continue
+                _raise_failover(exc, keys)
+    if last is not None:
+        _raise_failover(last, keys)

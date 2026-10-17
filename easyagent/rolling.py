@@ -107,7 +107,7 @@ async def refresh_rolling_summary(
 
     start, end = _span(chat)
     messages = list(chat.get("messages") or [])
-    token = gate.bind_connection(endpoint, bot.get("name") or "summary")
+    token = gate.bind_connection(endpoint, bot.get("name") or "summary", store=store)
     try:
         text = await llm.complete(
             base_url=endpoint["base_url"],

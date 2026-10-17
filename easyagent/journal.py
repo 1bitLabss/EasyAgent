@@ -1372,7 +1372,7 @@ async def _ask(store: Store, bot: dict, prompt: str) -> str:
         endpoint = None
     if not endpoint:
         return ""
-    token = gate.bind_connection(endpoint, bot.get("name") or "notes")
+    token = gate.bind_connection(endpoint, bot.get("name") or "notes", store=store)
     try:
         return await llm.complete(
             base_url=endpoint["base_url"],

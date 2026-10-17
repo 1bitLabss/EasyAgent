@@ -49,6 +49,15 @@ def registry_starts_enabled():
 
 
 @pytest.fixture(autouse=True)
+def provider_registry_starts_clear():
+    from easyagent.providers import reset_registry
+
+    reset_registry()
+    yield
+    reset_registry()
+
+
+@pytest.fixture(autouse=True)
 def isolate_user_dirs(monkeypatch, tmp_path):
     """The suite must not touch a real profile, data dir, or temp folder.
 

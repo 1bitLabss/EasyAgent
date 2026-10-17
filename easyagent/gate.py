@@ -46,9 +46,13 @@ def is_dropped_connection(detail: str) -> bool:
     )
 
 
-def bind_connection(endpoint: dict, bot_name: str):
-    """This task's model calls use this connection's line."""
-    return _conn.set(
+def bind_connection(endpoint: dict, bot_name: str, store=None):
+    """This task's model calls use this connection's line.
+
+    When `store` is passed, a rate limit or a dropped connection can try the
+    saved fallbacks. Each fallback keeps the key stored for that connection.
+    """
+    conn_token = _conn.set(
         {
             "id": str(endpoint.get("id") or endpoint.get("base_url") or ""),
             "name": (endpoint.get("name") or "the connection").strip() or "the connection",
@@ -56,9 +60,20 @@ def bind_connection(endpoint: dict, bot_name: str):
             "bot": (bot_name or "a bot").strip() or "a bot",
         }
     )
+    if store is None:
+        return conn_token
+    from easyagent.providers import bind_chain, chain_for
+
+    return (conn_token, bind_chain(chain_for(store, endpoint)))
 
 
 def reset_connection(token) -> None:
+    if isinstance(token, tuple):
+        from easyagent.providers import reset_chain
+
+        _conn.reset(token[0])
+        reset_chain(token[1])
+        return
     _conn.reset(token)
 
 

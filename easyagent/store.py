@@ -556,7 +556,32 @@ class Store:
         else:
             shown["api_key"] = ""
             shown["has_api_key"] = bool(shown.get("has_api_key"))
+        self._pin_endpoint_key(shown)
         return shown
+
+    def _pin_endpoint_key(self, shown: dict) -> None:
+        from easyagent.providers import register
+
+        register(str(shown.get("id") or ""), str(shown.get("base_url") or ""), shown.get("api_key") or "")
+
+    def _clean_fallback_ids(self, value, *, self_id: str | None = None) -> list[str]:
+        if value is None:
+            return []
+        if isinstance(value, str) or not isinstance(value, (list, tuple)):
+            raise StoreError("Fallback connections must be a list.", 400)
+        known = {str(item.get("id") or "") for item in self.list_endpoints() if isinstance(item, dict)}
+        cleaned: list[str] = []
+        for item in value:
+            text = str(item or "").strip().lower()
+            if not ID_RE.fullmatch(text) or text not in known:
+                raise StoreError("Unknown fallback connection.", 400)
+            if self_id and text == self_id:
+                raise StoreError("A connection cannot fall back to itself.", 400)
+            if text not in cleaned:
+                cleaned.append(text)
+            if len(cleaned) >= 4:
+                break
+        return cleaned
 
     def _store_endpoint_key(self, endpoint_id: str, api_key: str | None, *, clear: bool = False) -> bool:
         from easyagent.secrets import delete_secret, endpoint_account, put_secret
@@ -583,6 +608,7 @@ class Store:
         stall_seconds: int | None = None,
         first_token_seconds: int | None = None,
         tool_temperature: float | None = None,
+        fallback_ids: list | None = None,
     ) -> dict:
         record = {
             "id": self._parse_id(endpoint_id) if endpoint_id else new_id(),
@@ -604,6 +630,10 @@ class Store:
             record["first_token_seconds"] = int(first_token_seconds)
         if tool_temperature is not None:
             record["tool_temperature"] = float(tool_temperature)
+        if fallback_ids is not None:
+            cleaned = self._clean_fallback_ids(fallback_ids, self_id=record["id"])
+            if cleaned:
+                record["fallback_ids"] = cleaned
         has_key = self._store_endpoint_key(record["id"], api_key)
         record["has_api_key"] = has_key
         with self._lock:
@@ -612,6 +642,7 @@ class Store:
             atomic_write_json(self.endpoints_path, endpoints)
         shown = dict(record)
         shown["api_key"] = (api_key or "").strip()
+        self._pin_endpoint_key(shown)
         return shown
 
     def delete_endpoint(self, endpoint_id: str, confirm_name: str) -> None:
@@ -627,6 +658,9 @@ class Store:
             kept = [item for item in endpoints if item.get("id") != endpoint_id]
             atomic_write_json(self.endpoints_path, kept)
             self._store_endpoint_key(endpoint_id, "", clear=True)
+            from easyagent.providers import forget
+
+            forget(endpoint_id)
 
     def update_endpoint(
         self,
@@ -651,6 +685,8 @@ class Store:
         first_token_seconds_set: bool = False,
         tool_temperature: float | None = None,
         tool_temperature_set: bool = False,
+        fallback_ids: list | None = None,
+        fallback_ids_set: bool = False,
     ) -> dict:
         """Change one saved connection. Bot directories and chats are not opened."""
         endpoint_id = self._parse_id(endpoint_id)
@@ -699,6 +735,12 @@ class Store:
                     match.pop("tool_temperature", None)
                 else:
                     match["tool_temperature"] = float(tool_temperature)
+            if fallback_ids_set:
+                cleaned = self._clean_fallback_ids(fallback_ids, self_id=endpoint_id)
+                if cleaned:
+                    match["fallback_ids"] = cleaned
+                else:
+                    match.pop("fallback_ids", None)
             match.pop("detected_n_ctx", None)
             atomic_write_json(self.endpoints_path, endpoints)
         return self._hydrate_endpoint(match)

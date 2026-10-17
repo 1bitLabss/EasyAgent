@@ -154,6 +154,7 @@ def public_endpoint(endpoint: dict) -> dict:
         "tool_temperature": _public_tool_temperature(endpoint),
         "n_ctx": clean_tokens(endpoint.get("n_ctx")),
         "created_at": endpoint.get("created_at"),
+        "fallback_ids": [str(item) for item in (endpoint.get("fallback_ids") or [])],
     }
 
 
@@ -409,6 +410,7 @@ class EndpointIn(BaseModel):
     first_token_seconds: int | None = None
     tool_temperature: float | None = None
     n_ctx: int | None = None
+    fallback_ids: list[str] | None = None
 
 
 class EndpointPatch(BaseModel):
@@ -424,6 +426,7 @@ class EndpointPatch(BaseModel):
     first_token_seconds: int | None = None
     tool_temperature: float | None = None
     n_ctx: int | None = None
+    fallback_ids: list[str] | None = None
 
 
 class ConfirmIn(BaseModel):
@@ -919,6 +922,7 @@ def create_app(data_dir: str | Path | None = None) -> FastAPI:
             stall_seconds=clean_stall_seconds(body.stall_seconds) if "stall_seconds" in body.model_fields_set else None,
             first_token_seconds=clean_first_token_seconds(body.first_token_seconds) if "first_token_seconds" in body.model_fields_set else None,
             tool_temperature=clean_tool_temperature(body.tool_temperature) if "tool_temperature" in body.model_fields_set else None,
+            fallback_ids=body.fallback_ids if "fallback_ids" in body.model_fields_set else None,
         )
         return public_endpoint(record)
 
@@ -947,6 +951,8 @@ def create_app(data_dir: str | Path | None = None) -> FastAPI:
             first_token_seconds_set="first_token_seconds" in fields,
             tool_temperature=clean_tool_temperature(body.tool_temperature) if "tool_temperature" in fields else None,
             tool_temperature_set="tool_temperature" in fields,
+            fallback_ids=body.fallback_ids if "fallback_ids" in fields else None,
+            fallback_ids_set="fallback_ids" in fields,
         )
         if _snapshot_bots(store) != bots_before:
             raise HTTPException(500, "Saving a connection changed a bot or a chat.")
@@ -3281,7 +3287,7 @@ async def _bridge_reply(store: Store, bot_id: str) -> str:
     bot = store.get_bot(bot_id)
     chat = store.ongoing_chat(bot_id)
     endpoint, messages = _turn_messages(store, bot_id, chat)
-    conn = gate.bind_connection(endpoint, bot.get("name") or "")
+    conn = gate.bind_connection(endpoint, bot.get("name") or "", store=store)
     try:
         settled = await complete_with_tools(
             base_url=endpoint["base_url"],
@@ -3414,7 +3420,7 @@ async def _complete_for_chat(store: Store, bot_id: str, chat: dict) -> tuple[str
     endpoint = _require_endpoint(store, bot_id)
     await _refresh_window(store, bot, endpoint)
     endpoint, messages = _turn_messages(store, bot_id, chat)
-    conn = gate.bind_connection(endpoint, bot.get("name") or "")
+    conn = gate.bind_connection(endpoint, bot.get("name") or "", store=store)
     from easyagent.generation import bind_limits, reset_limits
 
     length = bind_limits(endpoint)
@@ -3579,7 +3585,7 @@ async def _complete_for_room_bot(store: Store, room: dict, bot_id: str) -> tuple
         if not is_harness_message(message)
     ])
     messages = coalesce_assistants([{"role": "system", "content": system}, *tail])
-    conn = gate.bind_connection(endpoint, bot.get("name") or "")
+    conn = gate.bind_connection(endpoint, bot.get("name") or "", store=store)
     try:
         try:
             settled = await complete_with_tools(
@@ -3652,7 +3658,7 @@ async def _ack_chat_reaction(store: Store, bot_id: str, chat_id: str, message: d
         },
     ]
     bot = store.get_bot(bot_id)
-    conn = gate.bind_connection(endpoint, bot.get("name") or "")
+    conn = gate.bind_connection(endpoint, bot.get("name") or "", store=store)
     try:
         try:
             raw = await llm.complete(
@@ -3724,7 +3730,7 @@ async def _ack_room_reaction(store: Store, room_id: str, message: dict) -> None:
             ),
         },
     ]
-    conn = gate.bind_connection(endpoint, bot.get("name") or "")
+    conn = gate.bind_connection(endpoint, bot.get("name") or "", store=store)
     try:
         try:
             raw = await llm.complete(
@@ -5240,7 +5246,7 @@ async def _run_child(store: Store, parent_id: str, parent_chat_id: str, child: d
     if endpoint is None:
         error_text = f"{child['name']}'s endpoint is missing."
     else:
-        conn = gate.bind_connection(endpoint, child.get("name") or "")
+        conn = gate.bind_connection(endpoint, child.get("name") or "", store=store)
         try:
             try:
                 reply = await llm.complete(
@@ -5649,7 +5655,7 @@ async def _stream_reply(
     if opened:
         yield _sse({"type": "run", "run": opened})
     yield _sse({"type": "status", "text": "Waiting on model"})
-    conn = gate.bind_connection(endpoint, bot.get("name") or "")
+    conn = gate.bind_connection(endpoint, bot.get("name") or "", store=store)
     from easyagent.generation import GenerationLimit, bind_limits, reset_limits
 
     length = bind_limits(endpoint)

@@ -255,7 +255,7 @@ async def _run_one(store: Store, bot: dict, schedule: dict, slot: str) -> dict:
         _CANCEL[schedule_id] = cancel
         _RUNNING[schedule_id] = {"bot_id": bot.get("id"), "name": routine_name, "schedule_id": schedule_id}
     token = unattended()
-    conn = gate.bind_connection(endpoint, name)
+    conn = gate.bind_connection(endpoint, name, store=store)
     status = "ok"
     error = ""
     visible = ""

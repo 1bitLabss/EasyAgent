@@ -191,7 +191,7 @@ async def run_night(store: Store) -> dict:
     transcript = _transcript(messages)
     if not transcript.strip():
         return {"kept": [], "dropped": 0}
-    conn = gate.bind_connection(endpoint, bot.get("name") or "")
+    conn = gate.bind_connection(endpoint, bot.get("name") or "", store=store)
     try:
         proposal_text = await llm.complete(
             base_url=endpoint["base_url"],
@@ -219,7 +219,7 @@ async def run_night(store: Store) -> dict:
             return {"kept": [], "dropped": 1}
     if parsed["kind"] == "playbook" and (parsed.get("name") or "") not in PLAYBOOKS:
         return {"kept": [], "dropped": 1}
-    conn = gate.bind_connection(endpoint, bot.get("name") or "")
+    conn = gate.bind_connection(endpoint, bot.get("name") or "", store=store)
     try:
         breaker_text = await llm.complete(
             base_url=endpoint["base_url"],

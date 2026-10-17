@@ -1,6 +1,7 @@
 # Changelog
 
 ## 0.3.35
+- The coding block says to verify before stopping. Replacing a file keeps the previous bytes in .ea-undo next to it, and a secret is not copied there. A long command keeps its head and its tail, and the full text is spilled under .ea-spill unless that text is a secret.
 - Skills are files in that bot's skills folder. The prompt lists the names. The body is read when asked. A name with .. or a slash is refused, a symlink is not read, and a body with a secret or a tool fence is not stored. Reading a skill does not turn on /yolo. Starting a child is a known tool, and the child's own tools are still judged one by one.
 - A routine result is written to a delivery queue before it is sent. A slot fires once. Several missed interval slots become that one run, not a burst, and a slot older than the catch-up window is marked and not run. A routine past its time limit stops. The run is unattended, so /yolo is off. If the send is killed after the claim, the next start sends that row once, and the chat does not gain a second copy.
 - delegate_task runs one child agent. The child sees only its task, only the tools the parent named, and nothing the parent cannot use. It does not inherit /yolo, it cannot delegate again, and a third child waits while two are running. Stopping the parent cancels the child. The parent receives the child's summary. A secret file and a path outside the folder are not read.

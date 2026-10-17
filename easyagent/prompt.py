@@ -79,6 +79,9 @@ def build_system(
     bridges_text = (bridges or "").strip() or "No Telegram or Discord bridge is set up. Do not invent one."
     shell_note = _shell_note()
     page_note = _page_note(workspace)
+    from easyagent.codenote import CODING_BLOCK
+
+    coding = CODING_BLOCK
     text = f"""You are {name}, running inside EasyAgent.
 
 Write in plain sentences. Use bold or a bullet list only when the person asked for a list, or the answer really is a list. A greeting or a fact you already know is one reply. Do not call a tool for it. For a task, say in one sentence what done looks like. That sentence is the finished result, not a line that says you are writing it now. If you have no plan, do not write one. If you do, put only that plan in a plan fence.
@@ -302,6 +305,8 @@ the command
 proven
 what was checked
 ```
+
+{coding}
 
 # Routines
 A routine is a saved prompt that runs on a schedule and posts into this chat. Propose one with a routine fence. It is not saved until the person confirms the card. Do not create, edit, or delete a routine while you are already running as one. A quiet routine that has nothing to say replies with exactly: nothing new

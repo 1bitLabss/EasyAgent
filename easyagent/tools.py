@@ -2093,6 +2093,10 @@ def _write_path(path: Path, body: str) -> str:
                 before = ""
         try:
             path.parent.mkdir(parents=True, exist_ok=True)
+            if existed and before:
+                from easyagent.codenote import remember_undo
+
+                remember_undo(path, before)
             path.write_text(body, encoding="utf-8", newline="\n")
         except OSError as exc:
             raise ToolError(f"The file was not written. {path}: {exc}") from exc
@@ -2197,6 +2201,9 @@ def _run_patch(path: Path, request: ToolRequest) -> str:
                 task_id=_chat_task_id(),
             )
             before = path.read_text(encoding="utf-8", errors="replace")
+            from easyagent.codenote import remember_undo
+
+            remember_undo(path, before)
             path.write_text(new_content, encoding="utf-8", newline="\n")
             if not _file_is_present(path):
                 raise ToolError(f"The file was not patched. {path} is not on disk.")
@@ -2446,6 +2453,12 @@ def _run_shell(store: Store, command: str, *, timeout: int = -1, workdir: str = 
     else:
         # The command's own last line stays last. Exit code and cwd are the lines above it.
         output = truncate_head_tail(raw_output, _OUTPUT_CAP)
+        if len(raw_output) > _OUTPUT_CAP:
+            from easyagent.codenote import spill_output
+
+            spilled = spill_output(raw_output, Path(cwd_text) / ".ea-spill")
+            if spilled is not None:
+                output = output + f"\nFull output: {spilled}"
         output = f"exit code {proc.returncode}\ncwd {cwd_text}\n{output}"
     if notice:
         output = (notice + "\n" + output).strip()

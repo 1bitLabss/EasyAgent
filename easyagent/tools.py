@@ -829,6 +829,14 @@ def _request_from_call(data: dict) -> ToolRequest:
         raw_args = objects[0] if objects else {}
     if not isinstance(raw_args, dict):
         raw_args = {}
+    from easyagent.registry import block_reason, canonical, coerce_tool_args
+
+    canon = canonical(name) if name else ""
+    refused = block_reason(canon)
+    if refused:
+        raise ToolError(refused)
+    if canon:
+        raw_args = coerce_tool_args(canon, raw_args)
     path = str(
         raw_args.get("path") or raw_args.get("file") or raw_args.get("target_file") or raw_args.get("filename") or ""
     ).strip()
@@ -1713,10 +1721,10 @@ def _ask(store: Store, request: ToolRequest) -> Settled:
 
 
 def _clip(text: str) -> str:
-    body = text or ""
-    if len(body) <= _OUTPUT_CAP:
-        return body
-    return body[: _OUTPUT_CAP - 20].rstrip() + "\n[output truncated]"
+    """Head and tail of a long tool result. A short result is unchanged."""
+    from easyagent.registry import trim_result
+
+    return trim_result(text or "", _OUTPUT_CAP)
 
 
 def _scrub(text: str, *hidden: str) -> str:
@@ -2744,7 +2752,16 @@ def tapback_from_reply(store: Store, bot_id: str | None, scope_id: str | None, t
     return strip_tool_markup(text or ""), did
 
 
+def _refuse_disabled(request: ToolRequest) -> None:
+    from easyagent.registry import block_reason, tool_name_for
+
+    refused = block_reason(tool_name_for(request.kind, request.action))
+    if refused:
+        raise ToolError(refused)
+
+
 def _execute(store: Store, request: ToolRequest, bot_id: str | None = None) -> str:
+    _refuse_disabled(request)
     if request.kind == "react":
         return "The reaction is on that message."
     if request.kind == "files":
@@ -3022,6 +3039,7 @@ async def execute(store: Store, request: ToolRequest, bot_id: str | None = None)
 
 
 async def _execute_now(store: Store, request: ToolRequest, bot_id: str | None = None) -> str:
+    _refuse_disabled(request)
     turn_mod.raise_if_cancelled()
     from easyagent.helpers import scope_block
     from easyagent.safety import _audit, guard, unattended_blocked_target

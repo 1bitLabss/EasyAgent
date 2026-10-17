@@ -811,11 +811,17 @@ _TERMINAL_WINDOWS = (
 
 
 def native_tools() -> list[dict]:
-    """Tool list for this computer. On Windows the shell tool is PowerShell."""
+    """Tool list for this computer. On Windows the shell tool is PowerShell.
+
+    A disabled tool is absent here and its call is refused.
+    """
+    from easyagent.registry import visible_tools
+
+    listed = visible_tools(NATIVE_TOOLS)
     if sys.platform != "win32":
-        return NATIVE_TOOLS
+        return listed
     tools = []
-    for tool in NATIVE_TOOLS:
+    for tool in listed:
         if tool.get("function", {}).get("name") == "terminal":
             tools.append({**tool, "function": {**tool["function"], "description": _TERMINAL_WINDOWS}})
         else:

@@ -84,6 +84,9 @@ _MCP_FENCE = re.compile(r"```mcp[ \t]*\r?\n(.*?)```", re.DOTALL | re.IGNORECASE)
 _BRIDGE_FENCE = re.compile(r"```bridge[ \t]*\r?\n(.*?)```", re.DOTALL | re.IGNORECASE)
 _BROWSER_ACTIONS = {"open", "read", "click", "type", "select", "scroll", "back", "wait", "tabs", "download"}
 _HISTORY_FENCE = re.compile(r"```history[ \t]*\r?\n(.*?)```", re.DOTALL | re.IGNORECASE)
+_DELEGATE_FENCE = re.compile(r"```delegate[ \t]*\r?\n(.*?)```", re.DOTALL | re.IGNORECASE)
+_SKILL_FENCE = re.compile(r"```skill[ \t]*\r?\n(.*?)```", re.DOTALL | re.IGNORECASE)
+_TOOL_ERROR_FENCE = re.compile(r"```tool_error[ \t]*\r?\n(.*?)```", re.DOTALL | re.IGNORECASE)
 _HISTORY_ACTIONS = {"list", "ls", "chats", "search", "find", "grep", "read", "open", "chat", "memory", "notes"}
 _FUNCTION_BLOCK = re.compile(r"<function_calls>\s*.*?(?:</function_calls>|$)", re.DOTALL | re.IGNORECASE)
 _INVOKE = re.compile(r"<invoke\s+name=[\"']([^\"']+)[\"']\s*>(.*?)</invoke>", re.DOTALL | re.IGNORECASE)
@@ -1070,7 +1073,7 @@ def _cut_off_tool(text: str) -> bool:
     ):
         if lowered.count(open_tag) > lowered.count(close_tag):
             return True
-    if re.search(r"```(?:files|shell|search|ssh|windows|project|memory|history|finish|react|routine|browser|fetch|research|mcp|bridge|plan)\b", raw, re.IGNORECASE):
+    if re.search(r"```(?:files|shell|search|ssh|windows|project|memory|history|finish|react|routine|browser|fetch|research|mcp|bridge|plan|delegate|skill|tool_error)\b", raw, re.IGNORECASE):
         if raw.count("```") % 2 == 1:
             return True
     return False
@@ -1191,6 +1194,15 @@ def parse_tool(text: str) -> ToolRequest | None:
         from easyagent.plan import request_from_fence
 
         return request_from_fence(planned)
+    delegated = _fence_request(_DELEGATE_FENCE, text)
+    if delegated is not None:
+        return _delegate_from_body(delegated)
+    skilled = _fence_request(_SKILL_FENCE, text)
+    if skilled is not None:
+        return _skill_from_body(skilled)
+    refused = _fence_request(_TOOL_ERROR_FENCE, text)
+    if refused is not None:
+        raise ToolError(refused.strip() or "That tool call was not run.")
     return None
 
 
@@ -1508,6 +1520,9 @@ def parse_tools(text: str) -> list[ToolRequest]:
         return request_from_fence(body)
 
     take(_PLAN_FENCE, _plan_from_fence)
+    take(_DELEGATE_FENCE, _delegate_from_body)
+    take(_SKILL_FENCE, _skill_from_body)
+    take(_TOOL_ERROR_FENCE, _tool_error_from_body)
     if found:
         found.sort(key=lambda item: item[0])
         return [item for _start, item in found]
@@ -1537,6 +1552,54 @@ def parse_tools(text: str) -> list[ToolRequest]:
             "and run a command on a Linux or Windows computer you saved."
         )
     return []
+
+
+def _delegate_from_body(body: str) -> ToolRequest:
+    lines = (body or "").splitlines()
+    tools: list = []
+    task_lines: list[str] = []
+    for line in lines:
+        if line.startswith("tools:"):
+            raw = line.split(":", 1)[1].strip()
+            try:
+                parsed = json.loads(raw) if raw else []
+            except ValueError:
+                parsed = [part.strip() for part in raw.split(",") if part.strip()]
+            if isinstance(parsed, list):
+                tools = [str(item) for item in parsed]
+            elif raw:
+                tools = [raw]
+            continue
+        task_lines.append(line)
+    task = "\n".join(task_lines).strip()
+    if not task:
+        raise ToolError("Name the task. The child was not started.")
+    return ToolRequest(kind="delegate", body=task, command=json.dumps(tools))
+
+
+def _skill_from_body(body: str) -> ToolRequest:
+    text = body or ""
+    if "\n---\n" in text:
+        head, _, rest = text.partition("\n---\n")
+    else:
+        head, rest = text, ""
+    lines = [line.strip() for line in head.splitlines()]
+    action = (lines[0] if lines else "list").strip().lower()
+    if action not in {"list", "read", "write"}:
+        raise ToolError("A skill action is list, read, or write. It was not run.")
+    name = lines[1] if len(lines) > 1 else ""
+    description = lines[2] if len(lines) > 2 else ""
+    return ToolRequest(
+        kind="skill",
+        action=action,
+        path=name,
+        body=rest if action == "write" else "",
+        command=description,
+    )
+
+
+def _tool_error_from_body(body: str) -> ToolRequest:
+    raise ToolError((body or "").strip() or "That tool call was not run.")
 
 
 def _file_name(path: str) -> str:

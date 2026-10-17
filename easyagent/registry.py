@@ -221,6 +221,14 @@ def coerce_tool_args(tool_name: str, args: dict[str, Any]) -> dict[str, Any]:
             args[key] = [value]
             continue
         if not isinstance(value, str):
+            wants_string = expected == "string" or (
+                _schema_accepts_kind(prop_schema, "string") and not _schema_accepts_kind(prop_schema, "array")
+            )
+            if wants_string:
+                text = _string_from_value(value)
+                if text is not None:
+                    args[key] = text
+                continue
             if (expected == "array" and is_container) or (expected == "object" and isinstance(value, dict)):
                 args[key] = _normalize_json_strings(value, prop_schema)
             continue
@@ -287,6 +295,26 @@ def _normalize_json_strings(value: Any, schema: Any) -> Any:
                 out[key] = _normalize_json_strings(value[key], prop_schema)
         return out if any(out[key] is not old for key, old in value.items()) else value
     return value
+
+
+def _string_from_value(value: Any) -> str | None:
+    """A string field sent as a number or a one-item list. Anything else stays put."""
+    if isinstance(value, bool) or value is None:
+        return None
+    if isinstance(value, int):
+        return str(value)
+    if isinstance(value, float):
+        if value != value or value in (float("inf"), float("-inf")):
+            return None
+        if value == int(value):
+            return str(int(value))
+        return str(value)
+    if isinstance(value, list) and len(value) == 1:
+        item = value[0]
+        if isinstance(item, str):
+            return item.strip() or None
+        return _string_from_value(item)
+    return None
 
 
 def _coerce_value(value: str, expected_type, schema: dict | None = None):

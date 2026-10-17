@@ -597,6 +597,12 @@ NATIVE_TOOLS = [
         ["server", "tool"],
     ),
     _tool(
+        "skill",
+        "List, read, or write one skill for this bot. action is list, read, or write. The body is data.",
+        {"action": _STRING, "name": _STRING, "description": _STRING, "body": _STRING},
+        ["action"],
+    ),
+    _tool(
         "delegate_task",
         "Run one task in a child agent. The child has its own context and only the tools you name. "
         "It cannot approve more than you can, and it does not inherit /yolo. You receive only its summary.",
@@ -607,9 +613,22 @@ NATIVE_TOOLS = [
 
 
 def _fence_for_call(call: dict) -> str:
-    """One native tool call, as a fence. Empty when this computer cannot run it."""
-    name = str(call.get("name") or "").strip().lower().replace("-", "_")
+    """One native tool call, as a fence.
+
+    The name is repaired and the arguments are coerced through the registry
+    first. A call that still cannot run becomes an error fence, so the turn
+    does not end as if the model had said nothing.
+    """
+    raw_name = str(call.get("name") or "").strip()
+    from easyagent.registry import canonical, coerce_tool_args
+    from easyagent.tools import _repair_tool_name
+
+    repaired = _repair_tool_name(raw_name) or raw_name
+    name = repaired.strip().lower().replace("-", "_")
     args = _call_args(call)
+    canon = canonical(name) if name else ""
+    if canon and isinstance(args, dict):
+        args = coerce_tool_args(canon, args)
     path = _string_arg(args, "path", "file", "target_file", "filename")
     body = args.get("content")
     if body is None:
@@ -797,7 +816,45 @@ def _fence_for_call(call: dict) -> str:
         if len(rows) == 1 and body.strip():
             rows.append(body.strip())
         return "```plan\n" + "\n".join(rows) + "\n```"
-    return ""
+    if name == "delegate_task":
+        task = _string_arg(args, "task") or body.strip()
+        listed = args.get("tools")
+        if isinstance(listed, str):
+            listed = [listed]
+        if not isinstance(listed, list):
+            listed = []
+        tools = json.dumps([str(item) for item in listed])
+        if task:
+            return f"```delegate\n{task}\ntools: {tools}\n```"
+    if name == "skill":
+        skill_action = action or "list"
+        skill_name = _string_arg(args, "name", "topic")
+        description = _string_arg(args, "description")
+        if skill_action in {"list", "read", "write"}:
+            rows = [skill_action]
+            if skill_name:
+                rows.append(skill_name)
+            if description:
+                rows.append(description)
+            head = "\n".join(rows)
+            if skill_action == "write" and body.strip():
+                return f"```skill\n{head}\n---\n{body.rstrip()}\n```"
+            return f"```skill\n{head}\n```"
+    return _registry_error_fence(name, args)
+
+
+def _registry_error_fence(name: str, args: dict) -> str:
+    """The registry's own refusal, as a fence the turn can hand back."""
+    if not str(name or "").strip():
+        return ""
+    from easyagent.tools import ToolError, _request_from_call
+
+    try:
+        _request_from_call({"name": name, "arguments": args if isinstance(args, dict) else {}})
+    except ToolError as exc:
+        text = str(exc).strip() or "That tool call was not run."
+        return f"```tool_error\n{text}\n```"
+    return "```tool_error\nThat tool call was not run.\n```"
 
 
 def calls_to_fence(calls: list[dict]) -> str:

@@ -755,6 +755,7 @@ _KNOWN_TOOLS = (
     "execute_command", "run_command", "run_ssh", "run_windows", "connector",
     "create_routine", "edit_routine", "delete_routine", "duckduckgo",
     "save_file", "create_file", "list_directory", "ls", "reaction", "tapback",
+    "delegate_task",
 )
 
 
@@ -856,6 +857,14 @@ def _request_from_call(data: dict) -> ToolRequest:
         if not emoji or not mid:
             raise ToolError("A reaction needs an emoji and the person's message id.")
         return ToolRequest(kind="react", path=mid, body=emoji)
+    if name == "delegate_task":
+        task = str(raw_args.get("task") or content or "").strip()
+        if not task:
+            raise ToolError("Name the task. The child was not started.")
+        listed = raw_args.get("tools")
+        if not isinstance(listed, list):
+            listed = []
+        return ToolRequest(kind="delegate", body=task, command=json.dumps([str(item) for item in listed]))
     if name == "finish":
         status = str(raw_args.get("status") or action or "proven").strip().lower()
         if status not in {"proven", "unproven", "blocked"}:
@@ -1606,6 +1615,8 @@ def clear_activity() -> None:
 
 
 def status_label(request: ToolRequest) -> str:
+    if request.kind == "delegate":
+        return "Running a child agent"
     if request.kind == "plan":
         return "Updating the checklist"
     if request.kind == "question":
@@ -3048,6 +3059,10 @@ async def _execute_now(store: Store, request: ToolRequest, bot_id: str | None = 
     limited = scope_block(request.kind)
     if limited:
         raise ToolError(limited + " It was not run.")
+    if request.kind == "delegate":
+        from easyagent.delegate import run_delegate
+
+        return await run_delegate(store, bot_id, request)
     if request.kind == "routine":
         return await _routine_proposal(store, request, bot_id)
     if request.kind == "browser":

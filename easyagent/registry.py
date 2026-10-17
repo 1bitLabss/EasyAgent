@@ -70,6 +70,7 @@ _KIND_TOOLS = {
     "search": "web_search",
     "question": "question",
     "finish": "finish",
+    "delegate": "delegate_task",
 }
 
 

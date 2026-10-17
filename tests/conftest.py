@@ -38,11 +38,14 @@ def safety_starts_clean():
 
 @pytest.fixture(autouse=True)
 def registry_starts_enabled():
+    from easyagent.delegate import reset_for_tests as reset_delegate
     from easyagent.registry import reset
 
     reset()
+    reset_delegate()
     yield
     reset()
+    reset_delegate()
 
 
 @pytest.fixture(autouse=True)

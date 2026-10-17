@@ -47,8 +47,8 @@ def scope_block(kind: str) -> str | None:
     """None when this call is allowed. A helper cannot widen what the parent can do."""
     if _depth.get() < 1:
         return None
-    if kind in {"routine", "helper"}:
-        return "A helper cannot start another helper or a routine."
+    if kind in {"routine", "helper", "delegate"}:
+        return "A child cannot start another child, a helper, or a routine."
     allowed = _allowed.get()
     if allowed is not None and kind not in allowed:
         return "That tool is outside this helper's list."

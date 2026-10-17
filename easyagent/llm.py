@@ -590,6 +590,13 @@ NATIVE_TOOLS = [
         {"server": _STRING, "tool": _STRING, "arguments": {"type": "object"}},
         ["server", "tool"],
     ),
+    _tool(
+        "delegate_task",
+        "Run one task in a child agent. The child has its own context and only the tools you name. "
+        "It cannot approve more than you can, and it does not inherit /yolo. You receive only its summary.",
+        {"task": _STRING, "tools": {"type": "array", "items": _STRING}},
+        ["task"],
+    ),
 ]
 
 

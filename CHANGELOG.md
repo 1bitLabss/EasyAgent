@@ -1,6 +1,7 @@
 # Changelog
 
 ## 0.3.35
+- delegate_task runs one child agent. The child sees only its task, only the tools the parent named, and nothing the parent cannot use. It does not inherit /yolo, it cannot delegate again, and a third child waits while two are running. Stopping the parent cancels the child. The parent receives the child's summary. A secret file and a path outside the folder are not read.
 - Every native tool is registered with a name, a JSON schema, and a description. A misspelled name is repaired. An unknown name returns an error that lists the valid tools. Disabling a tool removes it from the prompt and blocks the call, including an alias such as shell for terminal. A string limit is coerced to an integer before the call runs. inf and a fractional integer stay as sent. A long tool result keeps its head and its tail around one truncation notice.
 
 ## 0.3.34

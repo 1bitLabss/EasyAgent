@@ -43,6 +43,8 @@ class Slot:
         self.drain_chains = 0
         self.deliver_queue = False
         self.sealed = False
+        self.child_tasks: list = []
+        self.child_procs: list = []
 
 
 _GUARD = threading.Lock()
@@ -122,6 +124,9 @@ def interrupt(store, chat_id: str, reason: str = "") -> None:
     slot.user_stop = slot.reason == "you pressed Stop"
     slot.cancel.set()
     stop_process(slot.proc)
+    from easyagent.delegate import cancel_children
+
+    cancel_children(slot)
     client = slot.client
     if client is None:
         return
@@ -178,6 +183,8 @@ def bind(store, chat_id: str, bot_id: str = "", *, resume: bool = False) -> Slot
     slot.cancel = asyncio.Event()
     slot.client = None
     slot.proc = None
+    slot.child_tasks = []
+    slot.child_procs = []
     slot.reason = ""
     slot.run_id = str(uuid.uuid4())
     slot.job_started = ""

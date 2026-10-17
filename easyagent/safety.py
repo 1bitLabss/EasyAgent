@@ -663,11 +663,15 @@ def _emit_word(word: str, raw: str) -> str:
     """Keep a quoted argument quoted when its interior still has quotes, code, or a star.
 
     A second pass would otherwise read Python quotes or ``'*'`` as shell syntax.
-    A bare verb such as ``format`` stays bare.
+    A bare verb such as ``format`` stays bare. A single-quoted sed address such as
+    ``$p`` or a ``;`` between two substitutions stays one word and is not expanded.
     """
     if raw == word and not any(ch.isspace() for ch in word):
         return word
-    if any(ch.isspace() for ch in word) or any(ch in word for ch in "'\"$*()"):
+    if any(ch.isspace() for ch in word) or any(ch in word for ch in "'\"$*();|&`"):
+        single = len(raw) >= 2 and raw[0] == "'" and raw[-1] == "'" and "'" not in raw[1:-1]
+        if single:
+            return "'" + word.replace("'", "") + "'"
         return '"' + word.replace('"', "") + '"'
     return word
 
@@ -2873,8 +2877,11 @@ def _judge_command_body(
         return effect
     if re.search(r"(?i)(cookies|login data|logins\.json|key4\.db|web data)", text):
         return _verdict(BLOCK, "browser-store", "Browser cookies and saved passwords are never read.", text.strip(), _fp("cmd", text.strip()))
-    from easyagent.scriptgate import plain_loop
+    from easyagent.scriptgate import plain_loop, sed_plain_read
 
+    if sed_plain_read(text, cwd) and ordinary_relax():
+        script = text.strip()
+        return _verdict(ALLOW, "read-command", "That command reads. It does not change the computer.", script, _command_fingerprint(script))
     if plain_loop(text, cwd) and ordinary_relax():
         loop = text.strip()
         return _verdict(ALLOW, "read-command", "That command reads. It does not change the computer.", loop, _command_fingerprint(loop))

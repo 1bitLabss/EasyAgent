@@ -2292,6 +2292,78 @@ def _ssh_reads(args: list[str], cwd: Path, depth: int) -> bool:
     return False
 
 
+_DIFF_REFUSE = {"--ext-diff", "--textconv", "--output", "-c", "--exec"}
+
+
+def _git_name_lines(cwd: Path, argv: list[str]) -> list[str] | None:
+    """Names from a git name-only command. None means the list failed."""
+    import subprocess
+
+    for item in argv:
+        if any(mark in item for mark in ("$(", "`", "\n", "\x00")):
+            return None
+    env = os.environ.copy()
+    env["GIT_EXTERNAL_DIFF"] = ""
+    env["GIT_PAGER"] = "cat"
+    try:
+        proc = subprocess.run(
+            ["git", "-C", str(cwd), "-c", "diff.external=", "-c", "core.pager=cat", *argv],
+            capture_output=True,
+            text=True,
+            timeout=2,
+            check=False,
+            env=env,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    if proc.returncode != 0:
+        return None
+    return [line.strip() for line in (proc.stdout or "").splitlines() if line.strip()]
+
+
+def _git_diff_names(cwd: Path, rest: list[str]) -> list[str] | None:
+    argv: list[str] = []
+    for item in rest:
+        flag = item.split("=", 1)[0]
+        if flag in _DIFF_REFUSE or flag.startswith("--output"):
+            return None
+        argv.append(item)
+    return _git_name_lines(cwd, ["diff", "--name-only", "--no-ext-diff", "--no-textconv", *argv])
+
+
+def _git_log_names(cwd: Path, rest: list[str]) -> list[str] | None:
+    argv: list[str] = []
+    for item in rest:
+        if item in {"-p", "--patch", "-u", "--raw"} or item.startswith("--patch"):
+            continue
+        if item.startswith("-") and not item.startswith("--") and "p" in item[1:] and item[1:].isalpha():
+            return None
+        flag = item.split("=", 1)[0]
+        if flag in _DIFF_REFUSE:
+            return None
+        argv.append(item)
+    return _git_name_lines(cwd, ["log", "--name-only", "--pretty=format:", *argv])
+
+
+def _listed_names_secret(names: list[str], cwd: Path) -> bool:
+    """True when a diff path is secret, or the name list is too large to prove."""
+    if len(names) > 400:
+        return True
+    for name in names:
+        text = name.strip().strip("'\"")
+        if not text or text in {".", "./"} or _token_unresolved(text) or _glob(text):
+            return True
+        path = _try_resolve(text, cwd)
+        if path is None:
+            return True
+        try:
+            if _file_secret(path):
+                return True
+        except Exception:
+            return True
+    return False
+
+
 def _git_reads(args: list[str], cwd: Path) -> bool:
     """git grep, show, cat-file, diff, log -p, blame, and archive read file bodies."""
     index = 0
@@ -2335,11 +2407,12 @@ def _git_reads(args: list[str], cwd: Path) -> bool:
         specific = [item for item in paths if item not in {".", "./"}]
         if specific:
             return _paths_secret_or_uncertain(specific, cwd)
-        revs = _git_rev_args(rest, cwd)
-        # A pathless content diff prints a tracked secret. Excludes do not hide it.
-        if len(revs) < 2 and _tree_has_secret(cwd, recursive=True):
-            return True
-        return any(_revision_has_secret(cwd, rev) for rev in revs)
+        names = _git_diff_names(cwd, rest)
+        if names is None:
+            # Not a repository, or the name list failed. A tree with no secret
+            # cannot print one. A tree that has one still cards.
+            return _tree_has_secret(cwd, recursive=True)
+        return _listed_names_secret(names, cwd)
     if sub == "log":
         shows = any(
             item in {"-p", "--patch", "-u", "--raw"} or item.startswith("-p") or item.startswith("--patch")
@@ -2351,9 +2424,10 @@ def _git_reads(args: list[str], cwd: Path) -> bool:
         specific = [item for item in paths if item not in {".", "./"}]
         if specific:
             return _paths_secret_or_uncertain(specific, cwd)
-        if _tree_has_secret(cwd, recursive=True):
-            return True
-        return any(_revision_has_secret(cwd, rev) for rev in _git_rev_args(rest, cwd))
+        names = _git_log_names(cwd, rest)
+        if names is None:
+            return _tree_has_secret(cwd, recursive=True)
+        return _listed_names_secret(names, cwd)
     if sub == "blame":
         paths = [item for item in rest if item != "--" and not item.startswith("-") and not _git_exclude_token(item) and not _git_rev_token(item, cwd)]
         if not paths:
@@ -2780,6 +2854,8 @@ def _simple_reads(program: str, args: list[str], cwd: Path, depth: int, root: Pa
         return False
     operands = _positionals(program, args)
     if program in _GREP_NAMES or program in _SEARCH_NAMES:
+        if program in _SEARCH_NAMES and _lists_files(args) and not _search_unsafe(program, args):
+            return False
         if program in _SEARCH_NAMES or _has_recursive(args):
             return _recursive_stage_reads(program, args, operands, cwd)
     for token in operands:
@@ -2788,6 +2864,16 @@ def _simple_reads(program: str, args: list[str], cwd: Path, depth: int, root: Pa
     scope = root or cwd
     if _unresolved_words(operands) and _tree_has_secret(scope, recursive=True):
         return True
+    return False
+
+
+def _lists_files(args: list[str]) -> bool:
+    """``rg --files`` before ``--``. That mode prints paths, not file bodies."""
+    for arg in args:
+        if arg == "--":
+            return False
+        if arg == "--files":
+            return True
     return False
 
 
@@ -2922,6 +3008,20 @@ _SED_LONG_OK = frozenset({
     "null-data", "zero-terminated", "sandbox", "follow-symlinks",
     "binary", "help", "version",
 })
+
+
+def sed_plain_read(line: str, cwd: Path) -> bool:
+    """True when this is one sed command and the script does not read or write a file.
+
+    ``$p`` and ``s/a/b/;s/c/d/`` are addresses and substitutions. ``r`` and ``w`` are not.
+    """
+    words, redirects = _tokenize(line or "")
+    if redirects:
+        return False
+    program, args = _split_program(words)
+    if program != "sed" or not args:
+        return False
+    return not _sed_invocation_reads(args, cwd)
 
 
 def _sed_invocation_reads(args: list[str], cwd: Path) -> bool:

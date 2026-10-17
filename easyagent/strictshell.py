@@ -45,6 +45,22 @@ _DOCKER_READ = {"ps", "images", "version", "info", "inspect", "logs", "top", "po
 
 _CARGO_SAFE = {"build", "test", "check", "clippy", "fmt", "metadata", "tree", "version", "run"}
 
+# Exact version queries. A later word, -c, -e, or -m is not one of these.
+_VERSION_ONLY = {
+    "python": frozenset({"--version", "-V"}),
+    "py": frozenset({"--version", "-V"}),
+    "node": frozenset({"--version", "-v"}),
+    "deno": frozenset({"--version", "-v"}),
+    "npm": frozenset({"--version", "-v"}),
+    "pnpm": frozenset({"--version", "-v"}),
+    "yarn": frozenset({"--version", "-v"}),
+    "pip": frozenset({"--version", "-V"}),
+    "pip3": frozenset({"--version", "-V"}),
+    "cargo": frozenset({"--version", "-V"}),
+    "curl": frozenset({"--version", "-V"}),
+    "tsc": frozenset({"--version", "-v"}),
+}
+
 _GO_SAFE = {"build", "test", "vet", "fmt", "list", "env", "version", "doc", "mod"}
 
 _WRAPPERS = {
@@ -1382,8 +1398,35 @@ def _timeout_inner(args: str) -> str | None:
     return None
 
 
+def _only_flags(args: str, flags: frozenset[str]) -> bool:
+    words = _words(args)
+    return bool(words) and all(word in flags for word in words)
+
+
+def _plain_sleep(args: str) -> bool:
+    words = _words(args)
+    return len(words) == 1 and re.fullmatch(r"\d+(?:\.\d+)?", words[0]) is not None
+
+
+def _command_lookup(args: str) -> bool:
+    """``command -v name`` prints a path. It does not run the program."""
+    words = _words(args)
+    if len(words) != 2 or words[0] not in {"-v", "-V"}:
+        return False
+    name = words[1]
+    return re.fullmatch(r"[A-Za-z0-9_+=@.-]+", name) is not None and "/" not in name and "\\" not in name
+
+
 def _tool_decision(base: str, args: str, program: str, line: str, cwd, roots, remote, created, mode, denied, depth):
     safety = _safety()
+    if base in _VERSION_ONLY and _only_flags(args, _VERSION_ONLY[base]):
+        return None
+    if base == "sleep" and _plain_sleep(args):
+        return None
+    if base == "command" and _command_lookup(args):
+        return None
+    if base == "tree" and not _words(args):
+        return None
     if safety.ordinary_relax() and base in {"for", "while", "until"}:
         from easyagent.scriptgate import plain_loop
 

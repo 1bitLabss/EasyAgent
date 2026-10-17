@@ -44,6 +44,13 @@ def resolved_data_decision(store, command: str, cwd: Path, bot_id: str | None) -
     """
     checked = command or ""
     try:
+        from easyagent.scriptgate import sed_plain_read
+
+        if sed_plain_read(checked, cwd):
+            return "allow"
+    except Exception:
+        pass
+    try:
         from easyagent.strictshell import expand_literal_assignments
 
         expanded = expand_literal_assignments(checked)

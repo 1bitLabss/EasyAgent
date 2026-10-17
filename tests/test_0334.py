@@ -354,8 +354,6 @@ def test_git_readers_card_in_a_real_repository(tmp_path):
         "git blame bland.txt",
         "git archive HEAD",
         "git cat-file -p HEAD:creds.json",
-        "git diff",
-        "git diff HEAD",
         "git diff HEAD~1",
         "git diff HEAD~1 HEAD",
         "git grep hunter2 feat",
@@ -367,6 +365,8 @@ def test_git_readers_card_in_a_real_repository(tmp_path):
         "git grep hunter2 -- notes.txt",
         "git diff -- notes.txt",
         "git blame notes.txt",
+        "git diff",
+        "git diff HEAD",
     ]
     for command in leaks:
         assert command_reads_secrets(command, folder), command
@@ -1270,19 +1270,13 @@ DEV_COMMANDS = (
 
 DEV_CARDS = {
     'git checkout -b feat': 'unlisted-command',
-    'tree': 'unlisted-command',
-    'python3 --version': 'exec-flag',
     'python3 -m py_compile src/app.py': 'inline-code',
     'python3 -m json.tool package.json': 'inline-code',
-    'pip --version': 'unlisted-command',
-    'npm --version': 'exec-flag',
-    'node --version': 'inline-code',
     "awk 'NR>1' data.csv": 'unmatched-shell',
     "perl -pe 's/a/b/' notes.txt": 'exec-flag',
     'if [ -f README.md ]; then echo yes; fi': 'unlisted-command',
     'env | head -3': 'unlisted-command',
     'nice python3 script.py': 'unlisted-command',
-    'command -v python3': 'unlisted-command',
     'echo hi > out.txt': 'redirect-overwrite',
     'echo hi >> out.txt': 'redirect-overwrite',
     'mv build/README.md build/R2.md': 'move',
@@ -1292,19 +1286,15 @@ DEV_CARDS = {
     'tar tzf b.tgz': 'unlisted-command',
     'zip -q b.zip README.md': 'unlisted-command',
     'unzip -l b.zip': 'unlisted-command',
-    'curl --version': 'unlisted-command',
     'chmod +x run.sh': 'unlisted-command',
     'ln -s README.md rl': 'unlisted-command',
     'tee t.txt < notes.txt': 'unlisted-command',
     'cat notes.txt > n3.txt': 'redirect-overwrite',
     'git diff --no-index notes.txt notes2.txt': 'exec-flag',
-    'sleep 1': 'unlisted-command',
     'git config user.name': 'exec-flag',
     'git push': 'git-destructive',
     'pip install -r requirements.txt': 'install',
     'npm install': 'install',
-    'cargo --version': 'exec-flag',
-    'tsc --version': 'unlisted-command',
     'base64 README.md': 'unlisted-command',
     'xxd README.md | head -1': 'unlisted-command',
     'jq . package.json': 'unlisted-command',
@@ -1318,16 +1308,12 @@ DEV_CARDS = {
     'grep -r TODO .': 'read-secret',
     'rg TODO': 'read-secret',
     'rg -n add src': 'read-secret',
-    'rg --files': 'read-secret',
     'grep -rn def src | sort': 'read-secret',
     "sed -i 's/TODO/DONE/' src/app.py": 'read-secret',
 }
 
 DEV_YOLO_CARDS = frozenset({
     "awk 'NR>1' data.csv",
-    'cargo --version',
-    'command -v python3',
-    'curl --version',
     'env | head -3',
     'git cat-file -p HEAD:src/app.py',
     'git checkout -b feat',
@@ -1337,19 +1323,12 @@ DEV_YOLO_CARDS = frozenset({
     'git push',
     'jq . package.json',
     'mv build/README.md build/R2.md',
-    'node --version',
-    'npm --version',
     'npm install',
     "perl -pe 's/a/b/' notes.txt",
-    'pip --version',
     'pip install -r requirements.txt',
-    'python3 --version',
     'python3 -m json.tool package.json',
     'python3 -m py_compile src/app.py',
     'rm build/x',
-    'sleep 1',
-    'tree',
-    'tsc --version',
     'yq . config.yaml',
     "find . -name '*.py' | xargs wc -l",
     'xargs -a notes.txt echo',
@@ -1358,7 +1337,6 @@ DEV_YOLO_CARDS = frozenset({
     'grep -r TODO .',
     'rg TODO',
     'rg -n add src',
-    'rg --files',
     'grep -rn def src | sort',
     "sed -i 's/TODO/DONE/' src/app.py",
 })
@@ -1481,8 +1459,8 @@ def test_ordinary_dev_commands_card_only_the_unresolved_ones(tmp_path):
     assert normal == DEV_CARDS
     assert yolo == set(DEV_YOLO_CARDS)
     assert len(DEV_COMMANDS) == 188
-    assert len(normal) == 52
-    assert len(yolo) == 37
+    assert len(normal) == 41
+    assert len(yolo) == 26
 
 
 @pytest.mark.parametrize("yolo", [False, True])
@@ -1664,11 +1642,6 @@ def test_revision_grep_cards_and_stat_commit_and_literal_reads_do_not(tmp_path):
             "head -c 200 bland.txt",
             "grep foo bland.txt",
             "grep -rn .",
-            "git diff",
-            "git diff | head",
-            "git diff HEAD",
-            "git diff HEAD~1",
-            "git diff HEAD~1 HEAD",
         ]
         for command in leaks:
             assert command_reads_secrets(command, folder), command
@@ -1687,6 +1660,11 @@ def test_revision_grep_cards_and_stat_commit_and_literal_reads_do_not(tmp_path):
             "git diff -- notes.txt",
             "git diff --stat",
             "git show --stat",
+            "git diff",
+            "git diff | head",
+            "git diff HEAD",
+            "git diff HEAD~1",
+            "git diff HEAD~1 HEAD",
         ]
         for command in allows:
             assert command_reads_secrets(command, folder) is False, command
@@ -1758,14 +1736,11 @@ def test_planted_secrets_keep_the_same_dev_cards(tmp_path):
         turn_mod._slot.set(None)
     planted_extra = {
         "git grep TODO": "read-secret",
-        "git log -p -1": "read-secret",
-        "git diff": "read-secret",
-        "git diff | head": "read-secret",
     }
     assert normal == {**DEV_CARDS, **planted_extra}
     assert yolo == set(DEV_YOLO_CARDS) | set(planted_extra)
-    assert len(normal) == 56
-    assert len(yolo) == 41
+    assert len(normal) == 42
+    assert len(yolo) == 27
 
 
 def _assert_quiet(blob: str, yolo: bool) -> None:
@@ -1868,9 +1843,9 @@ def test_live_proc_pwd_git_revision_and_scripts_do_not_print(tmp_path, monkeypat
         "git show --stat",
         "git commit -qam wip",
         "git diff -- notes.txt",
+        "git diff",
+        "git diff HEAD",
     ]
-    leaks.append("git diff")
-    leaks.append("git diff HEAD")
     leaks.append("git diff feat")
 
     def setup(folder: Path) -> None:
@@ -2101,10 +2076,6 @@ def test_live_allow_list_leaks_do_not_print(tmp_path, monkeypatch, yolo):
         "git grep hunter2 feat",
         "git grep -i KEYBODY feat",
         "git show refs/stash",
-        "git diff",
-        "git diff HEAD",
-        "git diff feat",
-        "git diff 'stash@{0}'",
         "cat ' .env.example'",
     ]
     controls = [
@@ -2114,6 +2085,10 @@ def test_live_allow_list_leaks_do_not_print(tmp_path, monkeypatch, yolo):
         "git diff --stat",
         "git diff -- notes.txt",
         "find . -name '*.py'",
+        "git diff",
+        "git diff HEAD",
+        "git diff feat",
+        "git diff 'stash@{0}'",
     ]
 
     def setup(folder: Path) -> None:
@@ -2212,6 +2187,8 @@ def test_live_script_writes_and_ordinary_notes_do_not_print_secrets(tmp_path, mo
         "awk '{print $1}' notes.txt",
         "node ok.js",
         "python3 ok.py",
+        "git diff",
+        "git diff HEAD",
     ]
     leaks = [
         "node r.js",
@@ -2222,8 +2199,6 @@ def test_live_script_writes_and_ordinary_notes_do_not_print_secrets(tmp_path, mo
         "awk 'BEGIN{ARGV[1]=\"bland.txt\"} {print}' notes.txt",
         "node -e \"console.log(require('fs')['read'+'FileSync']('bland.txt','utf8'))\"",
         "node -e \"import('fs').then(fs=>fs.readFileSync('bland.txt'))\"",
-        "git diff",
-        "git diff HEAD",
         "git diff HEAD~1",
         "git grep hunter2 feat",
         "git show refs/stash",

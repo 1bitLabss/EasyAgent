@@ -92,25 +92,60 @@ def concrete_counterexample(text: str, messages: list[dict]) -> str | None:
     return None
 
 
+_CHAT_UPDATED = re.compile(br'"updated_at"\s*:\s*"([^"\\]*)"')
+
+
+def _chat_updated(path: Path) -> str | None:
+    """The updated_at in the file head. The message array is not parsed."""
+    try:
+        if not path.is_file() or path.is_symlink():
+            return None
+        with path.open("rb") as handle:
+            head = handle.read(65536)
+    except OSError:
+        return None
+    match = _CHAT_UPDATED.search(head)
+    if match is None:
+        return ""
+    return match.group(1).decode("ascii", "ignore")
+
+
 def _newest_chat(store: Store) -> tuple[dict, dict] | None:
-    best = None
-    best_key = ""
+    """The chat with the newest updated_at. One transcript is read, the winner's."""
+    from easyagent.store import ID_RE
+
+    best_bot = None
+    best_id = ""
+    best_key = None
     for bot in store.list_bots():
         try:
-            chats = store.list_chats(bot["id"])
+            folder = store._bot_dir(bot["id"]) / "chats"
         except Exception:
             continue
-        for listed in chats:
-            key = listed.get("updated_at") or ""
-            if key < best_key:
+        if not folder.is_dir():
+            continue
+        try:
+            paths = list(folder.iterdir())
+        except OSError:
+            continue
+        for path in paths:
+            if path.suffix != ".json" or not ID_RE.fullmatch(path.stem):
                 continue
-            try:
-                chat = store.get_chat(bot["id"], listed["id"])
-            except Exception:
+            key = _chat_updated(path)
+            if key is None:
+                continue
+            if best_key is not None and key <= best_key:
                 continue
             best_key = key
-            best = (bot, chat)
-    return best
+            best_bot = bot
+            best_id = path.stem
+    if best_bot is None or not best_id:
+        return None
+    try:
+        chat = store.get_chat(best_bot["id"], best_id)
+    except Exception:
+        return None
+    return best_bot, chat
 
 
 def _transcript(messages: list[dict]) -> str:

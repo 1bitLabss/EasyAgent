@@ -2815,10 +2815,11 @@ def _run_memory(store: Store, request: ToolRequest, bot_id: str | None) -> str:
                 return "No memory topics."
             return "Memory index\n" + "\n".join(slugs)
         if request.action == "read":
+            text = store.topic_text(bot_id, request.path)
             try:
                 from easyagent.journal import scrub_text
 
-                return scrub_text(store, store.topic_text(bot_id, request.path))
+                return scrub_text(store, text)
             except Exception:
                 return "[redacted]"
         if request.action == "file":

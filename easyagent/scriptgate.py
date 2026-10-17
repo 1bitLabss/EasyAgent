@@ -1238,13 +1238,27 @@ def _raw_token_secret(token: str, cwd: Path) -> bool:
 
 
 def _raw_stage_secret(stage: str, cwd: Path) -> bool:
-    words = _raw_words(stage)
-    if not words:
+    return _raw_words_secret(_raw_words(stage), cwd)
+
+
+def _raw_words_secret(words: list[str], cwd: Path, depth: int = 0) -> bool:
+    """Peel ``command`` and the other wrappers before an operand is judged.
+
+    ``command echo .npmrc`` is echo, which does not read the file.
+    ``command cat .npmrc`` is still a secret read.
+    """
+    if not words or depth > 8:
         return False
     program = _program_name(words[0])
+    args = words[1:]
+    if program in _PEEL:
+        rest = _wrapper_tail(program, args)
+        if not rest:
+            return False
+        return _raw_words_secret(rest, cwd, depth + 1)
     redirect = False
     operands: list[str] = []
-    for word in words[1:]:
+    for word in args:
         if word in {"<", ">"}:
             redirect = True
             continue

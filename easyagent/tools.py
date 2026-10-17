@@ -3941,13 +3941,53 @@ def _names_page(text: str, path: str) -> bool:
     return wanted in (text or "").replace("/", "\\").casefold()
 
 
+def _extend_existing_path(text: str, path: str) -> str:
+    """Read one more folder name when that folder is already there.
+
+    ``/tmp/Application Support/nested`` is one folder. A sentence period and
+    the words after a folder that is not there stay out of the path.
+    """
+    if not path or path not in (text or ""):
+        return path
+    rest = (text or "").split(path, 1)[1]
+    current = path.rstrip("\\/").rstrip(".,);]")
+    while True:
+        match = re.match(r"[ \t]+([^\\/\s]+)|[/\\]([^\\/\s]+)", rest)
+        if match is None:
+            break
+        nxt = (match.group(1) or match.group(2) or "").rstrip(".,);]")
+        if not nxt or nxt in {".", ".."}:
+            break
+        if match.group(1):
+            joined = current + " " + nxt
+        else:
+            sep = "\\" if "\\" in current else "/"
+            joined = current.rstrip("\\/") + sep + nxt
+        try:
+            there = Path(joined).is_dir() or Path(joined).is_file()
+        except OSError:
+            there = False
+        if not there:
+            break
+        current = joined
+        rest = rest[match.end():]
+        try:
+            if Path(current).is_file():
+                break
+        except OSError:
+            break
+    return current
+
+
 def _find_path(text: str) -> str:
     win = _WIN_PATH.search(text or "")
     if win:
-        return win.group(0).rstrip("\\").rstrip(".,);]")
+        found = win.group(0).rstrip("\\").rstrip(".,);]")
+        return _extend_existing_path(text or "", found)
     posix = _POSIX_PATH.search(text or "")
     if posix:
-        return posix.group(1).rstrip(".,);]")
+        found = posix.group(1).rstrip(".,);]")
+        return _extend_existing_path(text or "", found)
     return ""
 
 
@@ -4435,6 +4475,18 @@ def _prose_tail(rest: str, filename: str) -> bool:
     return len(words) >= 4
 
 
+def _segment_is_dir(prefix: list[str], part: str, drive: str = "") -> bool:
+    """A real folder whose name contains a space. Prose after that name is not one."""
+    if drive:
+        text = drive + "\\" + "\\".join([*prefix, part])
+    else:
+        text = "/".join([*prefix, part])
+    try:
+        return Path(text).is_dir()
+    except OSError:
+        return False
+
+
 def _with_write_body(target: str, content: str, prose: str, ask: str) -> tuple[str, str]:
     if (content or "").strip() == _PNG_MARK:
         return target, _PNG_MARK
@@ -4476,6 +4528,9 @@ def _clean_write_target(path: str, body: str, ask: str = "") -> tuple[str, str]:
                 prose_words.extend(part.split())
                 continue
             if " " in part:
+                if _segment_is_dir(clean, part, letter):
+                    clean.append(part)
+                    continue
                 words = part.split()
                 following = " ".join(words[1:] + parts[index + 1:])
                 if words and _prose_tail(following, filename):
@@ -4510,6 +4565,9 @@ def _clean_write_target(path: str, body: str, ask: str = "") -> tuple[str, str]:
                 prose_words.extend(part.split())
                 continue
             if " " in part:
+                if _segment_is_dir(clean, part):
+                    clean.append(part)
+                    continue
                 words = part.split()
                 clean.append(words[0])
                 prose_words.extend(words[1:])
@@ -4542,9 +4600,9 @@ def _write_from_history(messages: list[dict]) -> ToolRequest | None:
     found_body = ""
     for message in messages or []:
         text = _message_text(message)
-        if not text or _is_harness(text):
+        if not text or _is_harness(text) or message.get("pin") or text.startswith("Open tasks:"):
             continue
-        span = _smashed_span(text) or _find_path(text)
+        span = _extend_existing_path(text, _smashed_span(text)) or _find_path(text)
         if not span:
             continue
         ask = text if message.get("role") == "user" else ""

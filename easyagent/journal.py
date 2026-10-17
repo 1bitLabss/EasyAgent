@@ -57,15 +57,23 @@ _CITE = re.compile(r"\[m:([A-Za-z0-9_-]+)\]")
 _LONG = re.compile(r"[a-z0-9]{6,}")
 _DATE = re.compile(r"\d{4}-\d{2}-\d{2}")
 _LEAK = re.compile(
-    r"(?i)(?<![A-Za-z0-9])(?:"
+    r"(?i)(?:"
+    r"(?<![A-Za-z0-9])(?:"
     r"sk-[A-Za-z0-9_-]{8,}"
+    r"|sk_(?:live|test)_[A-Za-z0-9]+"
+    r"|rk_live_[A-Za-z0-9]+"
     r"|pk-[A-Za-z0-9_-]{8,}"
     r"|ghp_[A-Za-z0-9]{8,}"
     r"|github_pat_[A-Za-z0-9_]{8,}"
     r"|xox[abprs]-[A-Za-z0-9-]{8,}"
     r"|AKIA[0-9A-Z]{16}"
+    r"|AIza[0-9A-Za-z_-]{20,}"
     r"|Bearer\s+[A-Za-z0-9._-]{12,}"
-    r"|(?:api[_-]?key|token|secret|password)\s*[:=]\s*[^\s\]]{8,}"
+    r"|eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}"
+    r"|(?:api[_-]?(?:key|token)|token|secret|password|passwd)\s*[:=]\s*\S+"
+    r"|_authToken=\S+"
+    r")"
+    r"|-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----[\s\S]*?-----END [A-Z0-9 ]*PRIVATE KEY-----"
     r")"
 )
 _GENERIC = frozenset("please check later still around expected actual would could should there their about".split())
@@ -231,6 +239,11 @@ def find_leaks(text: str) -> list[str]:
     return [match.group(0) for match in _LEAK.finditer(text or "")]
 
 
+def redact_leaks(text: str) -> str:
+    """The shared scrubber. Memory, search, spill, undo, and provider logs all use it."""
+    return _LEAK.sub("[redacted]", text or "")
+
+
 def saved_secrets(store: Store) -> list[str]:
     found: list[str] = []
     try:
@@ -262,7 +275,7 @@ def scrub_text(store: Store, text: str) -> str:
     for secret in saved_secrets(store):
         if secret in cleaned:
             cleaned = cleaned.replace(secret, "[redacted]")
-    return _LEAK.sub("[redacted]", cleaned)
+    return redact_leaks(cleaned)
 
 
 def _auto_clean(store: Store, text: str) -> bool:

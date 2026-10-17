@@ -36,6 +36,7 @@ _BLOCKED_DEVICES = frozenset({
 _SKIP_DIRS = frozenset({
     ".git", "node_modules", "venv", ".venv", "__pycache__",
     ".tox", ".mypy_cache", ".pytest_cache", "dist", "build",
+    ".ea-undo", ".ea-spill",
 })
 SEARCH_SECONDS = 20.0
 SEARCH_MAX_FILES = 4000
@@ -536,6 +537,7 @@ def _rg_search(root: Path, pattern: str, file_glob: str, limit: int, skip) -> li
         "--max-filesize", f"{SEARCH_MAX_BYTES}",
         "-g", "!.git", "-g", "!node_modules", "-g", "!venv",
         "-g", "!.venv", "-g", "!__pycache__",
+        "-g", "!.ea-undo", "-g", "!.ea-spill",
     ]
     for glob in (*_RG_SECRET_GLOBS, *_content_secret_globs(root)):
         command.extend(["-g", glob])
@@ -613,7 +615,9 @@ def search_tree(root: Path, pattern: str, *, file_glob: str = "", limit: int = 5
             body += " Results truncated. Narrow the pattern or the folder."
     if note:
         body += "\n" + note
-    return truncate_head_tail(body, 8000, label="SEARCH")
+    from easyagent.journal import redact_leaks
+
+    return truncate_head_tail(redact_leaks(body), 8000, label="SEARCH")
 
 
 def verified_line(path: Path) -> str:

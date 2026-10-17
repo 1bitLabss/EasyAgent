@@ -126,7 +126,9 @@ def scrub(text: str, keys: list[str]) -> str:
     for key in sorted({item for item in keys if item and len(item) >= 6}, key=len, reverse=True):
         if key in out:
             out = out.replace(key, "[redacted]")
-    return out
+    from easyagent.journal import redact_leaks
+
+    return redact_leaks(out)
 
 
 def secret_values(rows: list[dict]) -> list[str]:

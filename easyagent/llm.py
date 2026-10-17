@@ -270,8 +270,10 @@ def _server_failure_path() -> Path:
 
 def note_server_failure(status: int, body: str, retry: int) -> str:
     """Store a short 5xx excerpt and the try number before any plain sentence replaces it."""
-    excerpt = _short_excerpt(body)
-    line = f"http {int(status)} retry={int(retry)} {excerpt}".strip()
+    from easyagent.journal import redact_leaks
+
+    excerpt = redact_leaks(_short_excerpt(body))
+    line = redact_leaks(f"http {int(status)} retry={int(retry)} {excerpt}".strip())
     print(f"model call: {line}", flush=True)
     path = _server_failure_path()
     with _raw_lock:
@@ -1313,8 +1315,10 @@ def _fail_http(status: int, body: str, *, sent_parallel_flag: bool, attempt: int
         raise _ToolParseAgain(drop_flag=True, excerpt=_short_excerpt(full))
     if action == "retry":
         raise _ToolParseAgain(excerpt=_short_excerpt(full))
-    detail = full[:300]
-    raise ProviderError(f"{code} from {base_url}: {detail}")
+    from easyagent.journal import redact_leaks
+
+    detail = redact_leaks(full[:300])
+    raise ProviderError(redact_leaks(f"{code} from {base_url}: {detail}"))
 
 
 async def _complete_once(

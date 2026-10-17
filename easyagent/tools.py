@@ -1959,6 +1959,16 @@ def _measure_largest(path: Path) -> str:
     return f"The largest file in {path} is {best_name}, {best_size} bytes. {count} files were measured."
 
 
+def _scrub_spill_read(path: Path, text: str) -> str:
+    """A spill or undo copy is not a place a secret may be read back from."""
+    parts = {part.lower() for part in path.parts}
+    if ".ea-spill" not in parts and ".ea-undo" not in parts:
+        return text
+    from easyagent.journal import redact_leaks
+
+    return redact_leaks(text)
+
+
 def _read_path(path: Path) -> str:
     if not path.exists():
         raise ToolError(f"Could not read {path}: that file is not there.")
@@ -2220,8 +2230,10 @@ def _run_files(store: Store, request: ToolRequest) -> str:
         return _list_path(path)
     if request.action == "read":
         if request.offset or request.limit:
-            return _read_window(path, request.offset or 1, request.limit or 2000)
-        return _read_path(path)
+            text = _read_window(path, request.offset or 1, request.limit or 2000)
+        else:
+            text = _read_path(path)
+        return _scrub_spill_read(path, text)
     if request.action == "write":
         if body.strip() == _PNG_MARK:
             return _write_bytes(path, _draw_png())

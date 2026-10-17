@@ -242,9 +242,14 @@ def search_history(store: Store, bot_id: str, query: str) -> str:
                 hits.append(_scrubbed(store, f"- {label}: {_snippet(row, terms[0] if terms else needle)}"))
                 if len(hits) >= _SEARCH_HITS * 2:
                     break
+    from easyagent.journal import redact_leaks
+
+    shown = redact_leaks(needle)
+    if shown != needle:
+        shown = "[redacted]"
     if not hits:
-        return _scrubbed(store, f"Nothing in your chats or memory matches \"{needle}\".")
-    return _scrubbed(store, f"Matches for \"{needle}\":\n" + "\n".join(hits))
+        return _scrubbed(store, f"Nothing in your chats or memory matches \"{shown}\".")
+    return _scrubbed(store, f"Matches for \"{shown}\":\n" + "\n".join(hits))
 
 
 def _find_chat(store: Store, bot_id: str, key: str) -> tuple[Path, dict] | None:

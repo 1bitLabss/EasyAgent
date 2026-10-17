@@ -1024,6 +1024,8 @@ def test_python_search_hits_the_twenty_second_cap(tmp_path, monkeypatch):
 
 
 def test_search_still_skips_node_modules_from_tmp(tmp_path):
+    import shutil
+
     from easyagent.coding import search_tree
 
     folder = tmp_path.parent / f"ea-cwd-{tmp_path.name}"
@@ -1035,7 +1037,8 @@ def test_search_still_skips_node_modules_from_tmp(tmp_path):
     found = search_tree(folder, "NEEDLE")
     assert "NEEDLE visible" in found
     assert "NEEDLE hidden" not in found
-    assert "via rg" in found
+    if shutil.which("rg") is not None:
+        assert "via rg" in found
 
 
 SHELL_CLUSTER_LEAKS = [

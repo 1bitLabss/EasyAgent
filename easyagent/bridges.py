@@ -7,6 +7,7 @@ Messaging anyone else waits for a card. Tokens stay in the keychain.
 from __future__ import annotations
 
 import asyncio
+import hmac
 import json
 import re
 from pathlib import Path
@@ -16,7 +17,7 @@ import httpx
 from easyagent.secrets import delete_secret, get_secret, put_secret
 from easyagent.store import Store, StoreError, atomic_write_json, new_id, now_iso, read_json
 
-_KINDS = ("telegram", "discord")
+_KINDS = ("telegram", "discord", "webhook")
 _IGNORED_TO = {"the person", "person", "the user", "user", ""}
 _IGNORED_TEXT = {"the message", "message", ""}
 _LOG_CAP = 200
@@ -89,7 +90,7 @@ def add_bridge(
 ) -> dict:
     platform = kind if kind in _KINDS else ""
     if not platform:
-        raise StoreError("A bridge is Telegram or Discord.", 400)
+        raise StoreError("A bridge is Telegram, Discord, or a webhook.", 400)
     label = " ".join((name or platform).split())[:80]
     ids = _ids(allow_ids)
     if not ids:
@@ -203,12 +204,38 @@ def remember_sender(store: Store, bridge_id: str, user_id: str, chat_id: str) ->
     _save(store, rows)
 
 
+def _same_secret(left: str, right: str) -> bool:
+    try:
+        return hmac.compare_digest(left, right)
+    except Exception:
+        return False
+
+
+def accept_webhook(store: Store, bridge_id: str, user_id: str, text: str, token: str) -> bool:
+    """One inbound webhook message. A bad token or a stranger does not touch the chat."""
+    row = next((item for item in list_records(store) if item.get("id") == bridge_id), None)
+    if row is None or row.get("kind") != "webhook" or row.get("enabled") is False:
+        log_event(store, "webhook", user_id, "ignored")
+        return False
+    saved = get_secret(secret_account(bridge_id), store) or ""
+    if not saved or not _same_secret(saved, token or ""):
+        log_event(store, "webhook", user_id, "ignored")
+        return False
+    return take_inbound(store, row, user_id, text, user_id)
+
+
 def take_inbound(store: Store, row: dict, user_id: str, text: str, chat_id: str) -> bool:
     """Append the person's message. A stranger is logged and does not touch the chat."""
     if not admitted(row, user_id):
         log_event(store, row.get("kind") or "", user_id, "ignored")
         return False
     body = " ".join(scrub(text or "", store).split())
+    try:
+        from easyagent.journal import scrub_text
+
+        body = " ".join(scrub_text(store, body).split())
+    except Exception:
+        pass
     if not body:
         return False
     if len(body) > 8000:
@@ -263,6 +290,12 @@ def judge_bridge(request, store: Store, bot_id: str | None = None):
     name = (getattr(request, "path", "") or "").strip()
     recipient = (getattr(request, "command", "") or "").strip()
     text = scrub(getattr(request, "body", "") or "", store)
+    try:
+        from easyagent.journal import scrub_text
+
+        text = scrub_text(store, text)
+    except Exception:
+        pass
     row = find(store, name, bot_id)
     if row is None:
         return _verdict(BLOCK, "bridge-missing", "That bridge is not saved or it is turned off.", name, _fp("bridge", name, recipient))
@@ -556,6 +589,12 @@ async def deliver(store: Store, request, bot_id: str | None = None) -> str:
         raise ToolError("That bridge is not saved.")
     recipient = str(getattr(request, "command", "") or "").strip()
     text = scrub(getattr(request, "body", "") or "", store).strip()
+    try:
+        from easyagent.journal import scrub_text
+
+        text = " ".join(scrub_text(store, text).split())
+    except Exception:
+        pass
     if not text:
         from easyagent.tools import ToolError
 
@@ -566,7 +605,9 @@ async def deliver(store: Store, request, bot_id: str | None = None) -> str:
 
         raise ToolError("That bridge has no token in the keychain. It was not sent.")
     try:
-        if row.get("kind") == "discord":
+        if row.get("kind") == "webhook":
+            _remember_webhook(store, row, recipient, text)
+        elif row.get("kind") == "discord":
             await discord_send(token, recipient, text)
         else:
             await telegram_send(token, recipient, text)
@@ -577,6 +618,25 @@ async def deliver(store: Store, request, bot_id: str | None = None) -> str:
     log_event(store, row.get("kind") or "", recipient, "sent")
     who = "you" if admitted(row, recipient) else recipient
     return f"Sent on {row.get('kind')} to {who}."
+
+
+def outbox_path(store: Store) -> Path:
+    return store.root / "webhook-outbox.json"
+
+
+def _remember_webhook(store: Store, row: dict, recipient: str, text: str) -> None:
+    """Keep a webhook send on disk. The bridge token is not copied here."""
+    path = outbox_path(store)
+    rows = read_json(path) if path.is_file() else []
+    if not isinstance(rows, list):
+        rows = []
+    rows.append({
+        "at": now_iso(),
+        "bridge_id": row.get("id") or "",
+        "recipient": recipient,
+        "text": text,
+    })
+    atomic_write_json(path, rows[-_LOG_CAP:])
 
 
 def prompt_block(store: Store) -> str:

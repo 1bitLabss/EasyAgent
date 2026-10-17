@@ -3192,23 +3192,56 @@ def _turn_messages(store: Store, bot_id: str, chat: dict) -> tuple[dict, list[di
     messages = coalesce_assistants([{"role": "system", "content": system}, *tail])
     if desktop:
         messages = _with_window(messages, desktop)
+    messages = _insert_pins(messages, _kept_pins(view))
     return endpoint, messages
 
 
+def _kept_pins(view) -> list[dict]:
+    """Pin rows that survived the budget. The pin mark itself is not sent."""
+    pins = []
+    for item in getattr(view, "tail", None) or []:
+        if not isinstance(item, dict) or item.get("pin") not in {"request", "tasks", "approvals"}:
+            continue
+        pins.append({"role": "user", "content": str(item.get("content") or "")})
+    return pins
+
+
+def _insert_pins(messages: list[dict], pins: list[dict]) -> list[dict]:
+    if not pins:
+        return messages
+    index = None
+    for position in range(len(messages) - 1, -1, -1):
+        if messages[position].get("role") == "user":
+            index = position
+            break
+    if index is None:
+        return [*messages, *pins]
+    return [*messages[:index], *pins, *messages[index:]]
+
+
 def _model_pairs(store: Store, bot_id: str, chat: dict, view) -> list[tuple]:
-    """Pair each tail row with the stored message it came from. Harness rows are already gone."""
+    """Pair each tail row with the stored message it came from. Harness rows are already gone.
+
+    Pin rows are not stored messages. They are inserted later, in front of the
+    last user line, so they do not shift the zip.
+    """
+    body = [
+        item
+        for item in view.tail
+        if not (isinstance(item, dict) and item.get("pin") in {"request", "tasks", "approvals"})
+    ]
     stored = [
         item
         for item in list(chat.get("messages") or [])[view.summarized_through :]
         if isinstance(item, dict) and not is_harness_message(item)
     ]
-    if len(stored) >= len(view.tail):
-        stored = stored[len(stored) - len(view.tail) :]
-    if len(stored) != len(view.tail):
-        return [(None, item) for item in view.tail]
+    if len(stored) >= len(body):
+        stored = stored[len(stored) - len(body) :]
+    if len(stored) != len(body):
+        return [(None, item) for item in body]
     return [
         (row, _model_message(store, bot_id, chat["id"], row, item))
-        for row, item in zip(stored, view.tail)
+        for row, item in zip(stored, body)
     ]
 
 

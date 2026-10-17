@@ -133,19 +133,49 @@ def _trim_block(block: str, room: int) -> str:
     return "\n".join(kept)
 
 
-def fit_context(summary: str, tail: list[dict], earlier: str, budget: int) -> tuple[str, list[dict], str, int]:
-    """Keep summary + tail + earlier inside `budget`. Trim retrieval before the tail."""
+def _row_protected(row: dict, latest: str) -> bool:
+    """The latest request, the open task list, and pending approvals stay in the tail."""
+    if not isinstance(row, dict):
+        return False
+    if row.get("pin") in {"request", "tasks", "approvals"}:
+        return True
+    if latest and row.get("role") == "user" and str(row.get("content") or "").strip() == latest:
+        return True
+    return False
+
+
+def fit_context(
+    summary: str,
+    tail: list[dict],
+    earlier: str,
+    budget: int,
+    latest: str = "",
+) -> tuple[str, list[dict], str, int]:
+    """Keep summary + tail + earlier inside `budget`. Trim retrieval before the tail.
+
+    Rows are dropped from the front, and only when that row is not the latest
+    request, the task list, or a pending approval. A protected row can leave
+    the budget over the cap. A call with no protected row behaves as before.
+    """
     summary = summary or ""
     rows = list(tail or [])
     block = earlier or ""
+    kept = (latest or "").strip()
 
     def cost(body: str, items: list[dict]) -> int:
         return len(summary) + sum(len(item.get("content") or "") for item in items) + len(body)
 
+    def drop_front() -> bool:
+        if len(rows) <= 1 or _row_protected(rows[0], kept):
+            return False
+        rows.pop(0)
+        return True
+
     if block:
         reserve = min(len(block), RETRIEVAL_RESERVE)
         while len(rows) > 1 and cost("", rows) > max(0, budget - reserve):
-            rows.pop(0)
+            if not drop_front():
+                break
         room = budget - cost("", rows)
         block = _trim_block(block, room)
     used = cost(block, rows)
@@ -154,6 +184,50 @@ def fit_context(summary: str, tail: list[dict], earlier: str, budget: int) -> tu
         block = _trim_block(block, max(0, budget - cost("", rows)))
         used = cost(block, rows)
     return summary, rows, block, used
+
+
+def _latest_request(messages: list) -> str:
+    from easyagent.context import is_harness_message
+
+    for message in reversed(messages or []):
+        if not isinstance(message, dict) or message.get("role") != "user":
+            continue
+        if is_harness_message(message):
+            continue
+        return str(message.get("content") or "").strip()
+    return ""
+
+
+def _context_pins(store: Store, bot: dict, chat: dict, tail: list[dict], latest: str) -> list[dict]:
+    """Rows the compressor must keep. Empty when the tail already holds the request and there is no list."""
+    pins: list[dict] = []
+    if latest and not any(
+        item.get("role") == "user" and str(item.get("content") or "").strip() == latest for item in tail
+    ):
+        pins.append({"role": "user", "content": latest, "pin": "request"})
+    try:
+        from easyagent.plan import describe, load_plan
+
+        plan = load_plan(store, str(bot.get("id") or ""), str(chat.get("id") or ""))
+        steps = [step for step in (plan or {}).get("steps") or [] if isinstance(step, dict)]
+        if steps and not (plan or {}).get("dismissed"):
+            pins.append({"role": "user", "content": "Open tasks:\n" + describe(plan), "pin": "tasks"})
+    except Exception:
+        pass
+    try:
+        from easyagent.safety import list_pending
+
+        lines = []
+        for card in list_pending(str(bot.get("id") or "")):
+            rule = str(card.get("rule") or "")
+            detail = str(card.get("detail") or card.get("why") or "")
+            if rule or detail:
+                lines.append(f"{rule}: {detail}".strip())
+        if lines:
+            pins.append({"role": "user", "content": "Pending approvals:\n" + "\n".join(lines), "pin": "approvals"})
+    except Exception:
+        pass
+    return pins
 
 
 @dataclass
@@ -194,7 +268,10 @@ def model_turn(store: Store, bot: dict, chat: dict, endpoint: dict | None = None
     if notes:
         earlier = notes if not earlier else notes + "\n\n" + earlier
     summary = prompt_summary(chat, prepared, messages)
-    summary, tail, earlier, used = fit_context(summary, prepared.tail, earlier, budget)
+    latest = _latest_request(messages)
+    tail_rows = list(prepared.tail)
+    tail_rows.extend(_context_pins(store, bot, chat, tail_rows, latest))
+    summary, tail, earlier, used = fit_context(summary, tail_rows, earlier, budget, latest=latest)
     recalled = scan_chats(store, bot["id"], chat, int(prepared.summarized_through or 0))
     return ModelTurn(
         summary=summary,

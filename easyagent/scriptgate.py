@@ -1267,7 +1267,39 @@ def _raw_words_secret(words: list[str], cwd: Path, depth: int = 0) -> bool:
         operands.append(word)
     if program in _RAW_NONREADERS and not redirect:
         return False
-    return any(_raw_token_secret(token, cwd) for token in operands)
+    if any(_raw_token_secret(token, cwd) for token in operands):
+        return True
+    # The bash tokenizer drops backslashes, so ``grep C:\folder`` never reaches
+    # the tree check. These words still have the separators. A reader aimed at
+    # that directory cards when the directory holds a secret. A POSIX ``find .``
+    # stays on the existing check.
+    if program not in _READERS:
+        return False
+    recursive = program in {"rg", "ag", "ack", "find"} or bool(_RECURSIVE.search(" ".join(words)))
+    for token in operands:
+        if not _windows_path_spelling(token):
+            continue
+        path = _try_resolve(token, cwd)
+        if path is None:
+            continue
+        try:
+            is_dir = path.is_dir()
+        except OSError:
+            return True
+        if is_dir and _tree_has_secret(path, recursive=recursive):
+            return True
+    return False
+
+
+def _windows_path_spelling(token: str) -> bool:
+    """A drive, a UNC path, or a backslash. The bash tokenizer would eat the slash."""
+    text = token or ""
+    if "\\" in text:
+        return True
+    folded = text.replace("\\", "/")
+    if folded.startswith("//"):
+        return True
+    return bool(re.match(r"^[A-Za-z]:", folded))
 
 
 def _raw_operand_secret(segment: str, cwd: Path) -> bool:

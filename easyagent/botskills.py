@@ -8,6 +8,7 @@ and does not change approvals.
 
 from __future__ import annotations
 
+import os
 import re
 from pathlib import Path
 
@@ -22,14 +23,38 @@ class SkillError(Exception):
     """The skill was not read or written."""
 
 
+def _place_key(path) -> str:
+    """One spelling for a folder check. Drive case, slashes, and \\\\?\\ match."""
+    from easyagent.strictshell import windows_key
+
+    return windows_key(os.fspath(path))
+
+
+def _same_place(left, right) -> bool:
+    left_key = _place_key(left)
+    right_key = _place_key(right)
+    return bool(left_key) and left_key == right_key
+
+
+def _stays_under(child, parent) -> bool:
+    """True when child is inside parent. The folder itself is not inside itself."""
+    from easyagent.strictshell import _key_under
+
+    child_key = _place_key(child)
+    parent_key = _place_key(parent)
+    if not child_key or not parent_key or child_key == parent_key:
+        return False
+    return _key_under(child_key, parent_key)
+
+
 def skills_dir(store, bot_id: str) -> Path:
     if not bot_id or any(part in bot_id for part in ("/", "\\", "..")):
         raise SkillError("That bot has no skills folder.")
     root = (Path(store.root) / "bots").resolve()
     folder = (root / bot_id / "skills").resolve()
-    if folder.parent.resolve() != (root / bot_id).resolve():
+    if not _same_place(folder.parent, root / bot_id):
         raise SkillError("That skill stays in the skills folder.")
-    if not str(folder).startswith(str(root) + "/"):
+    if not _stays_under(folder, root):
         raise SkillError("That skill stays in the skills folder.")
     return folder
 
@@ -44,7 +69,7 @@ def _file(store, bot_id: str, name: str) -> Path:
     folder = skills_dir(store, bot_id)
     folder.mkdir(parents=True, exist_ok=True)
     path = (folder / f"{slug}.md").resolve()
-    if path.parent != folder:
+    if not _same_place(path.parent, folder):
         raise SkillError("That skill stays in the skills folder. It was not written.")
     return path
 
@@ -57,7 +82,7 @@ def list_skills(store, bot_id: str) -> list[dict]:
     for path in sorted(folder.glob("*.md")):
         if not path.is_file() or path.is_symlink():
             continue
-        if path.resolve().parent != folder.resolve():
+        if not _same_place(path.resolve().parent, folder.resolve()):
             continue
         parsed = parse_skill_document(path.read_text(encoding="utf-8"))
         if not parsed:
@@ -128,7 +153,7 @@ def write_skill(store, bot_id: str, name: str, body: str, description: str = "")
     from easyagent.store import atomic_write_text
 
     atomic_write_text(path, render_skill(document))
-    if path.resolve().parent != skills_dir(store, bot_id).resolve():
+    if not _same_place(path.resolve().parent, skills_dir(store, bot_id).resolve()):
         path.unlink(missing_ok=True)
         raise SkillError("That skill stays in the skills folder. It was not written.")
     return document

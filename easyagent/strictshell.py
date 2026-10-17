@@ -1570,6 +1570,65 @@ def _strip_extended(text: str) -> str:
     return text
 
 
+def secret_components(text: str) -> list[str]:
+    """Path pieces before a secret-name check. The disk is not touched.
+
+    ``\\\\?\\`` and ``//?/`` are removed first. A drive colon stays. A later
+    colon is an NTFS stream (``.env::$DATA``) and is dropped. Each piece loses
+    trailing dots and spaces, then ``ntpath`` folds case. A leading space stays,
+    so ``' .env.example'`` is not turned into a template. ``.`` is skipped.
+    ``..`` is kept so the caller can still see the parent piece.
+    """
+    import ntpath
+
+    raw = _strip_extended(os.fspath(text or ""))
+    if len(raw) >= 2 and raw[0].isalpha() and raw[1] == ":":
+        rest = raw[2:]
+        body = raw[:2] + rest.split(":", 1)[0]
+    else:
+        body = raw.split(":", 1)[0]
+    parts: list[str] = []
+    for part in body.replace("\\", "/").split("/"):
+        if part in {"", "."}:
+            continue
+        if part == "..":
+            parts.append("..")
+            continue
+        trimmed = part.rstrip(" .")
+        parts.append(ntpath.normcase(trimmed if trimmed else part))
+    return parts
+
+
+def secret_basename(text: str) -> str:
+    """The file name a secret check should see, after the Windows folds above."""
+    parts = [part for part in secret_components(text) if part != ".."]
+    return parts[-1] if parts else ""
+
+
+def windows_long_basename(path: Path) -> str | None:
+    """8.3 short name to its long basename. Only on Windows, and only if the path exists."""
+    if os.name != "nt":
+        return None
+    text = os.fspath(path)
+    if "~" not in text:
+        return None
+    try:
+        if not path.exists():
+            return None
+    except OSError:
+        return None
+    try:
+        import ctypes
+
+        buf = ctypes.create_unicode_buffer(32768)
+        size = ctypes.windll.kernel32.GetLongPathNameW(text, buf, len(buf))
+    except (AttributeError, OSError, ValueError):
+        return None
+    if not size or size >= len(buf):
+        return None
+    return secret_basename(buf.value)
+
+
 def windows_key(text: str) -> str:
     """One Windows spelling of a path string, without touching the disk.
 

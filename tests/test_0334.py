@@ -594,8 +594,8 @@ def test_a_one_letter_typo_does_not_patch(tmp_path):
 
 
 def test_rg_never_opens_a_named_secret(tmp_path):
-    if shutil.which("strace") is None:
-        pytest.skip("strace is not installed")
+    from easyagent.coding import search_tree
+
     folder = tmp_path.parent / f"ea-rg-{tmp_path.name}"
     folder.mkdir(exist_ok=True)
     (folder / "id_rsa").write_text("KEYBODYXYZ\n", encoding="utf-8")
@@ -603,6 +603,14 @@ def test_rg_never_opens_a_named_secret(tmp_path):
     nested = folder / "node_modules" / "pkg"
     nested.mkdir(parents=True)
     (nested / "index.js").write_text("NEEDLE hidden\n", encoding="utf-8")
+    found = search_tree(folder, "NEEDLE")
+    assert "NEEDLE line" in found
+    assert "KEYBODYXYZ" not in found
+    assert "NEEDLE hidden" not in found
+    if shutil.which("rg") is not None:
+        assert "via rg" in found
+    if shutil.which("strace") is None:
+        return
     runner = tmp_path / "search_once.py"
     runner.write_text(
         "import sys\nfrom pathlib import Path\nfrom easyagent.coding import search_tree\n"
@@ -802,7 +810,12 @@ def test_live_cd_persists_inside_the_folder(tmp_path, monkeypatch):
         yolo=False,
         ask="Move into sub and print the folder.",
     )
-    assert str(folder / "sub") in heard
+    expected = str(folder / "sub")
+    if os.name == "nt":
+        folded = os.path.normcase(heard).replace("/", "\\")
+        assert os.path.normcase(expected).replace("/", "\\") in folded
+    else:
+        assert expected in heard
     assert "outside" in heard or "not run" in heard
 
 
@@ -1035,7 +1048,8 @@ def test_search_still_skips_node_modules_from_tmp(tmp_path):
     found = search_tree(folder, "NEEDLE")
     assert "NEEDLE visible" in found
     assert "NEEDLE hidden" not in found
-    assert "via rg" in found
+    if shutil.which("rg") is not None:
+        assert "via rg" in found
 
 
 SHELL_CLUSTER_LEAKS = [
@@ -1922,7 +1936,11 @@ def test_template_bytes_past_the_head_and_padded_names_are_secret(tmp_path):
     assert secret_class(nested) == "name"
     for name in (" .env.example", "\t.env.example", "\n.env.example"):
         path = folder / name
-        path.write_text("API_KEY=your_key_here\nCOLOR=blue\n", encoding="utf-8")
+        try:
+            path.write_text("API_KEY=your_key_here\nCOLOR=blue\n", encoding="utf-8")
+        except OSError as exc:
+            # Windows rejects a trailing space, a tab, or a newline in a file name.
+            assert exc.errno in {22, 123}, exc
         assert secret_class(path) == "name", repr(name)
     if os.name != "nt":
         real = folder / ".env"

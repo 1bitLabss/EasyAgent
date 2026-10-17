@@ -866,6 +866,9 @@ def _resolve(raw: str, cwd: Path) -> Path:
         resolved = os.path.realpath(text)
     except (OSError, ValueError, RuntimeError):
         resolved = text
+    # realpath can put the prefix back. The printed cwd and the folder check
+    # have to see one spelling.
+    resolved = _strip_extended(resolved)
     return Path(resolved)
 
 
@@ -1053,24 +1056,67 @@ _OBVIOUS_PLACEHOLDER = re.compile(
 )
 
 
-def _classify_names(path: Path) -> str | None:
-    """Name, suffix, and directory classification. Does not open the file."""
-    raw = path.name
-    if raw != raw.strip() and (_env_template_name(raw.strip()) or raw.strip().lower().startswith(".env")):
-        return "name"
+def _basename_is_secret(name: str) -> bool:
+    """True when this one component is a secret name. It does not open a file.
+
+    The caller passes either the raw component or a name that was already
+    normalized (case, trailing dot, NTFS stream). A leading or trailing space
+    on a template is still a secret name.
+    """
+    raw = name or ""
+    if raw != raw.strip() and (
+        _env_template_name(raw.strip()) or raw.strip().lower().startswith(".env")
+    ):
+        return True
     low = raw.lower()
     if "env" in low and any(part in _ENV_REAL_PARTS for part in _env_name_parts(low)):
+        return True
+    if _env_template_name(raw):
+        return False
+    if low in {".env", ".env.local", ".env.production"} or low.startswith(".env."):
+        return True
+    if low in {"id_rsa", "id_ed25519", "id_ecdsa"} or low.endswith(".pem"):
+        return True
+    if low in {"cookies", "cookies.sqlite", "login data", "logins.json", "key4.db", "web data"}:
+        return True
+    if "wallet" in low or low in {"keystore", "credentials", "secrets.json"}:
+        return True
+    if low in _SECRET_NAMES or low.endswith(_SECRET_SUFFIXES):
+        return True
+    suffix = Path(low).suffix.lower()
+    stem = Path(low).stem.lower()
+    if "token" in stem and suffix in _TEXT_SUFFIXES:
+        return True
+    return False
+
+
+def _classify_names(path: Path) -> str | None:
+    """Name, suffix, and directory classification. Does not open the file.
+
+    The Windows spelling is folded first: backslashes, a drive letter, ``\\\\?\\``,
+    case, a trailing dot or space, and an NTFS stream. An 8.3 short name is
+    folded only on Windows, and only when that path is already on disk.
+    """
+    from easyagent.strictshell import secret_basename, secret_components, windows_long_basename
+
+    raw = path.name
+    if _basename_is_secret(raw):
+        return "name"
+    normalized = secret_basename(os.fspath(path))
+    if normalized and _basename_is_secret(normalized):
+        return "name"
+    long_name = windows_long_basename(path)
+    if long_name and _basename_is_secret(long_name):
         return "name"
     if _secret_kind(path):
         return "name"
-    name = low
-    if name in _SECRET_NAMES or name.endswith(_SECRET_SUFFIXES):
-        return "name"
-    if {part.lower() for part in path.parts} & _SECRET_DIRS:
-        return "name"
-    suffix = Path(name).suffix.lower()
-    stem = Path(name).stem.lower()
-    if "token" in stem and suffix in _TEXT_SUFFIXES:
+    parts: set[str] = set()
+    try:
+        parts.update(part.lower() for part in path.parts)
+    except (OSError, ValueError):
+        parts = set()
+    parts.update(part.casefold() for part in secret_components(os.fspath(path)))
+    if parts & _SECRET_DIRS:
         return "name"
     return None
 
@@ -1098,7 +1144,7 @@ def _shares_secret_inode(path: Path) -> bool:
         if path.is_symlink() or not path.is_file():
             return False
         st = path.stat()
-        if not stat.S_ISREG(st.st_mode):
+        if not stat.S_ISREG(st.st_mode) or not st.st_ino:
             return False
         siblings = list(path.parent.iterdir())
     except OSError:
@@ -1280,7 +1326,12 @@ def secret_class(path: Path) -> str | None:
 
     A template name is not an exemption by itself. The bytes have to be placeholder-only,
     the name cannot also be a real env or a key, and a symlink is classified as its target.
+    The name is classified before any stat, so a trailing dot or an NTFS stream does not
+    have to be a file the operating system can open.
     """
+    named = _classify_names(path)
+    if named:
+        return named
     try:
         linked = path.is_symlink()
     except OSError:

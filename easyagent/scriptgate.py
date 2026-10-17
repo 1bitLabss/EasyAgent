@@ -1163,11 +1163,108 @@ def _search_excludes(program: str, args: list[str]) -> set[str]:
 
 
 def _expand_pwd(text: str, cwd: Path, old: Path | None) -> str:
-    """``$PWD`` is the cwd after ``cd``. ``$OLDPWD`` is the folder before it."""
-    out = re.sub(r"\$\{PWD\}|\$PWD\b", str(cwd), text or "")
+    """``$PWD`` is the cwd after ``cd``. ``$OLDPWD`` is the folder before it.
+
+    The folder is substituted as literal text. A Windows path contains
+    backslashes, and a replacement string would treat ``\\U`` as an escape.
+    """
+    folder = str(cwd)
+    out = re.sub(r"\$\{PWD\}|\$PWD\b", lambda _match: folder, text or "")
     if old is not None:
-        out = re.sub(r"\$\{OLDPWD\}|\$OLDPWD\b", str(old), out)
+        previous = str(old)
+        out = re.sub(r"\$\{OLDPWD\}|\$OLDPWD\b", lambda _match: previous, out)
     return out
+
+
+_RAW_NONREADERS = frozenset({
+    "echo", "printf", "true", "false", "pwd", "whoami", "date", "uname",
+    "hostname", "id", "ls", "dir", "cd", "pushd", "popd", "mkdir", "sleep",
+    "which", "where",
+})
+
+
+def _raw_words(statement: str) -> list[str]:
+    """Words with backslashes kept. The bash tokenizer eats them later."""
+    words: list[str] = []
+    buf: list[str] = []
+    quote = ""
+    text = statement or ""
+    i = 0
+    while i < len(text):
+        ch = text[i]
+        if quote:
+            if ch == quote:
+                quote = ""
+            else:
+                buf.append(ch)
+            i += 1
+            continue
+        if ch in {"'", '"'}:
+            quote = ch
+            i += 1
+            continue
+        if ch.isspace() or ch in {"|", ";", "&"}:
+            if buf:
+                words.append("".join(buf))
+                buf = []
+            i += 1
+            continue
+        if ch in {"<", ">"}:
+            if buf:
+                words.append("".join(buf))
+                buf = []
+            words.append(ch)
+            i += 1
+            continue
+        buf.append(ch)
+        i += 1
+    if buf:
+        words.append("".join(buf))
+    return words
+
+
+def _raw_token_secret(token: str, cwd: Path) -> bool:
+    from easyagent.safety import _basename_is_secret
+    from easyagent.strictshell import secret_basename
+
+    base = secret_basename(token)
+    if base and _basename_is_secret(base):
+        return True
+    name = token.replace("/", "\\").rsplit("\\", 1)[-1]
+    if name != name.strip() and _basename_is_secret(name):
+        return True
+    path = _try_resolve(token, cwd)
+    return bool(path is not None and _path_secret(path))
+
+
+def _raw_stage_secret(stage: str, cwd: Path) -> bool:
+    words = _raw_words(stage)
+    if not words:
+        return False
+    program = _program_name(words[0])
+    redirect = False
+    operands: list[str] = []
+    for word in words[1:]:
+        if word in {"<", ">"}:
+            redirect = True
+            continue
+        if word.startswith("-") and not re.match(r"^[A-Za-z]:", word):
+            continue
+        operands.append(word)
+    if program in _RAW_NONREADERS and not redirect:
+        return False
+    return any(_raw_token_secret(token, cwd) for token in operands)
+
+
+def _raw_operand_secret(segment: str, cwd: Path) -> bool:
+    """A Windows path, before bash treats a backslash as an escape.
+
+    ``cat ..\\.env`` and ``type .env`` card. ``echo hi``, ``cat notes.txt``,
+    and ``git status`` do not. ``c\\at .env`` still cards because the operand
+    is ``.env`` before the escape is applied. Each side of a pipe is its own
+    command, so ``echo a | cat ..\\.env`` still cards.
+    """
+    return any(_raw_stage_secret(stage, cwd) for stage in _pipe_parts(segment))
 
 
 _UNPROVED_SCRIPT = re.compile(
@@ -1789,6 +1886,8 @@ def _command_reads(text: str, cwd: Path, depth: int = 0, root: Path | None = Non
             continue
         here = location or base
         expanded = _expand_pwd(segment, here, previous)
+        if _raw_operand_secret(expanded, here):
+            return True
         handled, moved, stack = _directory_update(expanded, here, stack)
         if handled:
             if moved is not None and moved != here:
@@ -2793,6 +2892,11 @@ def _file_body_reads(path: Path, cwd: Path, depth: int) -> bool:
 
 
 def _simple_reads(program: str, args: list[str], cwd: Path, depth: int, root: Path | None = None) -> bool:
+    # On Windows ``type`` reads a file. On Linux it is a builtin. A secret
+    # operand cards in both places. ``type file.txt`` still does not.
+    if program == "type":
+        operands = [arg for arg in args if arg != "--" and not (arg.startswith("-") and arg != "-")]
+        return any(_operand_secret(token, cwd, wide=True) for token in operands)
     if program == "xargs":
         return True
     if program == "find" and _find_option_blocks(args):
@@ -3399,12 +3503,14 @@ def _operand_secret(token: str, cwd: Path, *, wide: bool) -> bool:
     if not raw or raw == "-" or raw.startswith("-"):
         return False
     folded = raw.replace("\\", "/")
+    # A drive letter or a UNC path is not the Linux /proc tree.
+    windows_spelling = bool(re.match(r"^[A-Za-z]:", folded)) or folded.startswith("//")
     if re.match(r"^/dev/fd/\d+$", folded):
         path = _try_resolve(raw, cwd)
         if path is not None and path.is_file():
             return _path_secret(path)
         return _tree_has_secret(cwd, recursive=True)
-    if folded.startswith("/proc/") or "/proc/" in folded:
+    if not windows_spelling and (folded.startswith("/proc/") or "/proc/" in folded):
         if _PROC_CWD.match(folded):
             rewritten = _rewrite_proc(raw, cwd)
             if rewritten != raw:

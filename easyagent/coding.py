@@ -387,11 +387,19 @@ def search_root_error(root: Path) -> str | None:
 
 
 def _within(root: Path, path: Path) -> bool:
+    """True when path is root or a file inside it.
+
+    Case and a ``\\\\?\\`` prefix are the same file on Windows. A relative
+    comparison that keeps the caller's case drops that file.
+    """
+    from easyagent.strictshell import _canonical_key, _fold_text, _key_under
+
     try:
-        path.resolve().relative_to(root.resolve())
-    except (OSError, ValueError):
+        path_key = _canonical_key(path) or _fold_text(os.fspath(path))
+        root_key = _canonical_key(root) or _fold_text(os.fspath(root))
+    except (OSError, ValueError, RuntimeError):
         return False
-    return True
+    return _key_under(path_key, root_key)
 
 
 def _system_dir(path: Path) -> bool:

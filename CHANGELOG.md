@@ -1,6 +1,7 @@
 # Changelog
 
 ## 0.3.35
+- A Windows path is folded before the secret check. Backslashes, a drive letter, `\\?\`, case, a trailing dot or space, an 8.3 short name, and an NTFS stream such as `.env::$DATA` are the same name as the file. `type .env`, `cat ..\.env`, `.ENV`, `.env.`, and a key file still wait. `echo hi`, `cat notes.txt`, and `git status` do not. A folder under `C:\Users` is not itself a secret read.
 - An MCP server starts only when it is this product's own server or its command or address is on the allow list. A tool call still waits on the same card, a secret in the result is removed, and the result is data. It does not approve a card or read a secret file.
 - A webhook bridge uses the same allow list, scrub, and approval card as Telegram and Discord. A bad token or a stranger is ignored. The token is not written into the chat or the outbox. Inbound text is stored as a message, and it does not run a tool.
 - A connection can name fallback connections. A 429, a 5xx, or a dropped connection tries the next one, and each request carries only that connection's key. A key stored for one host is refused on a different host. The first provider's error is not sent onward, and a key in that error is removed before the error is shown.

@@ -1095,13 +1095,14 @@ async def _routine_loop(store: Store, bot: dict, endpoint: dict, messages: list[
     steps = 0
     limit = routine_step_budget()
     seconds = routine_second_budget()
+    deadline = started + seconds
     visible = ""
     while steps < limit:
         if cancel.is_set():
             raise _Stopped("Stopped.")
-        if asyncio.get_running_loop().time() - started > seconds:
+        if asyncio.get_running_loop().time() >= deadline:
             raise _Stopped("Stopped. The routine ran past its time limit.")
-        text = await _complete_yielding(endpoint, bot, messages, cancel)
+        text = await _complete_yielding(endpoint, bot, messages, cancel, deadline)
         visible = text
         try:
             requests = parse_tools(text)
@@ -1128,10 +1129,16 @@ async def _routine_loop(store: Store, bot: dict, endpoint: dict, messages: list[
     raise _Stopped("Stopped. The routine ran past its step limit.")
 
 
-async def _complete_yielding(endpoint: dict, bot: dict, messages: list[dict], cancel: asyncio.Event) -> str:
+async def _complete_yielding(
+    endpoint: dict, bot: dict, messages: list[dict], cancel: asyncio.Event, deadline: float
+) -> str:
+    """One model call. The routine time limit cancels the call, not only the next step."""
     while True:
         if cancel.is_set():
             raise _Stopped("Stopped.")
+        remaining = deadline - asyncio.get_running_loop().time()
+        if remaining <= 0:
+            raise _Stopped("Stopped. The routine ran past its time limit.")
         purpose = llm.bind_purpose("routine")
         try:
             task = asyncio.create_task(llm.complete(
@@ -1144,14 +1151,19 @@ async def _complete_yielding(endpoint: dict, bot: dict, messages: list[dict], ca
         finally:
             llm.reset_purpose(purpose)
         waiter = asyncio.create_task(cancel.wait())
-        done, _pending = await asyncio.wait({task, waiter}, return_when=asyncio.FIRST_COMPLETED)
-        if cancel.is_set() and task not in done:
+        done, _pending = await asyncio.wait(
+            {task, waiter}, timeout=remaining, return_when=asyncio.FIRST_COMPLETED
+        )
+        if task not in done:
             task.cancel()
+            waiter.cancel()
             try:
                 await task
             except (asyncio.CancelledError, Exception):
                 pass
-            raise _Stopped("Stopped.")
+            if cancel.is_set():
+                raise _Stopped("Stopped.")
+            raise _Stopped("Stopped. The routine ran past its time limit.")
         waiter.cancel()
         try:
             return await task

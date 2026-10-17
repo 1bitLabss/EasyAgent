@@ -1,6 +1,7 @@
 # Changelog
 
 ## 0.3.35
+- An MCP server starts only when it is this product's own server or its command or address is on the allow list. A tool call still waits on the same card, a secret in the result is removed, and the result is data. It does not approve a card or read a secret file.
 - A webhook bridge uses the same allow list, scrub, and approval card as Telegram and Discord. A bad token or a stranger is ignored. The token is not written into the chat or the outbox. Inbound text is stored as a message, and it does not run a tool.
 - A connection can name fallback connections. A 429, a 5xx, or a dropped connection tries the next one, and each request carries only that connection's key. A key stored for one host is refused on a different host. The first provider's error is not sent onward, and a key in that error is removed before the error is shown.
 - `rg --files` lists names. `python3 --version`, `node --version`, `npm --version`, `pip --version`, `cargo --version`, `curl --version`, `tsc --version`, `sleep 1`, `command -v python3`, and `tree` run. A flag after the version, `python3 -c`, `npm install`, `curl` with a URL, and `rg TODO` still wait. `sed -n '$p'` and `sed 's/a/b/;s/c/d/'` run. `r`, `w`, and `e` still wait. A pathless `git diff` or `git log -p` waits only when a touched path is secret or the name list fails. A secret that is not in that diff does not card it. The night pass reads the newest chat's updated_at from the file head and opens that one transcript.

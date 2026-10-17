@@ -273,6 +273,9 @@ def test_a_poisoned_tool_result_does_not_act(tmp_path):
     server = _http_server(_Poison)
     port = server.server_address[1]
     try:
+        from easyagent.connectors import grant_server
+
+        grant_server(store, url=f"http://127.0.0.1:{port}/mcp")
         row = add_connector(
             store,
             bot["id"],
@@ -321,6 +324,9 @@ def test_streamable_http_and_sqlite_and_git(tmp_path):
     server = _http_server(_Handler)
     port = server.server_address[1]
     try:
+        from easyagent.connectors import grant_server
+
+        grant_server(store, url=f"http://127.0.0.1:{port}/mcp")
         row = add_connector(
             store,
             bot["id"],

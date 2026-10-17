@@ -144,6 +144,56 @@ def _is_builtin(command: list[str]) -> bool:
     return "-m" in command and "easyagent.mcpstd" in blob
 
 
+def allow_path(store: Store) -> Path:
+    return store.root / "mcp-allow.json"
+
+
+def list_grants(store: Store) -> list[dict]:
+    path = allow_path(store)
+    if not path.is_file():
+        return []
+    data = read_json(path)
+    return [row for row in data if isinstance(row, dict)] if isinstance(data, list) else []
+
+
+def grant_server(store: Store, *, command: list[str] | None = None, url: str = "") -> dict:
+    """Remember one server the person allowed. A tool result cannot call this."""
+    argv = [str(part) for part in (command or []) if str(part).strip()]
+    address = (url or "").strip()
+    if address and not address.startswith(("http://", "https://")):
+        raise StoreError("An allowed address must start with http:// or https://.", 400)
+    if not argv and not address:
+        raise StoreError("Name the command or the address to allow.", 400)
+    row = {"command": argv, "url": address}
+    rows = list_grants(store)
+    if row not in rows:
+        rows.append(row)
+        atomic_write_json(allow_path(store), rows)
+    return row
+
+
+def server_allowed(store: Store, record: dict) -> bool:
+    """True for this product's own server, or a command or address that was granted."""
+    command = [str(part) for part in (record.get("command") or []) if str(part).strip()]
+    if _is_builtin(command):
+        return True
+    address = str(record.get("url") or "").strip()
+    for row in list_grants(store):
+        granted_url = str(row.get("url") or "").strip()
+        granted_cmd = [str(part) for part in (row.get("command") or []) if str(part).strip()]
+        if address and granted_url and address == granted_url:
+            return True
+        if command and granted_cmd and command == granted_cmd:
+            return True
+    return False
+
+
+def require_allowed(store: Store, *, command: list[str] | None, url: str) -> None:
+    record = {"command": command or [], "url": url or ""}
+    if not server_allowed(store, record):
+        raise StoreError("That server is not on the allow list. It was not saved.", 400)
+
+
 def _is_package_manager(command: list[str]) -> bool:
     if not command:
         return False
@@ -227,6 +277,7 @@ def add_connector(
         raise StoreError("A streamable HTTP connector needs an http or https address.", 400)
     if kind == "stdio" and not argv:
         raise StoreError("A stdio connector needs a command.", 400)
+    require_allowed(store, command=argv, url=address if kind == "http" else "")
     secret_map = {str(key).strip(): value for key, value in (secrets or {}).items() if str(key).strip() and value}
     _reject_secret_in_launch(argv, address, secret_map)
     if kind == "stdio" and _is_package_manager(argv) and not pinned_version(argv, version):

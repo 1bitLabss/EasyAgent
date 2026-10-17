@@ -104,7 +104,7 @@ def web_injection() -> tuple[str, str]:
 
 def mcp_injection() -> tuple[str, str]:
     """Connector output is data. It cannot install a server or write a grant."""
-    from easyagent.connectors import add_connector, install_from_text, list_records
+    from easyagent.connectors import add_connector, grant_server, install_from_text, list_records
     from easyagent.safety import classify, reset_for_tests, wrap_output
     from easyagent.tools import ToolRequest
 
@@ -123,6 +123,7 @@ def mcp_injection() -> tuple[str, str]:
         )
         if missing.tier != "block":
             return "FAIL", "an unknown connector was allowed"
+        grant_server(store, command=["echo", "probe"])
         add_connector(
             store,
             bot["id"],

@@ -1577,8 +1577,11 @@ def _delegate_from_body(body: str) -> ToolRequest:
     return ToolRequest(kind="delegate", body=task, command=json.dumps(tools))
 
 
-def _skill_from_body(body: str) -> ToolRequest:
+def _skill_from_body(body: str) -> ToolRequest | None:
     text = body or ""
+    # A saved skill document opens with ---. It is not list, read, or write.
+    if text.lstrip().startswith("---"):
+        return None
     if "\n---\n" in text:
         head, _, rest = text.partition("\n---\n")
     else:

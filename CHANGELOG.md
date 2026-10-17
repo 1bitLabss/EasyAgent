@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.3.37
+- search_files sniffs the whole file before it prints a match, the same way a shell grep does, and scrubs each matched line. A key past the first 8 KB is not printed.
+- A skill document in a reply is saved again. The opening --- is not treated as a skill tool call.
+- A clipped message leaves room for the native tool list, so the turn still fits in the context window.
+- A write path keeps a real folder whose name contains a space. A clipped task list is not used as the file body.
+- A skill folder check folds drive letters, slashes, and a `\\?\` prefix. The folder still has to stay inside that bot's skills directory. A name with `..` or a slash is still refused.
+- A reader aimed at a Windows directory cards when that directory holds a secret. Backslashes stay in that check. `command echo .npmrc` still does not card. `command cat .npmrc` still does.
+- A skill body with a bash fence, a delegate fence, or another action fence is not stored.
+- A child agent's request lists only the tools it was allowed.
+- A skill path is normalized before the folder check. A name such as `..\x`, `C:\x`, or `\\?\` is still refused.
+
 ## 0.3.36
 - A native tool call is repaired and coerced through the registry, including delegate_task and skill. A call that cannot run returns that error instead of ending the turn with no tool call.
 - A webhook is accepted on its HTTP route. The token is checked from the header. A bad token does not touch the chat, and the token is not written to disk.

@@ -576,6 +576,14 @@ class BridgeIn(BaseModel):
     token: str = ""
 
 
+class WebhookIn(BaseModel):
+    """Inbound webhook text. The token is a header, not a field that gets stored."""
+
+    model_config = ConfigDict(extra="ignore")
+    user_id: str = ""
+    text: str = ""
+
+
 class BridgePatch(BaseModel):
     model_config = ConfigDict(extra="ignore")
     enabled: bool | None = None
@@ -1198,6 +1206,14 @@ def create_app(data_dir: str | Path | None = None) -> FastAPI:
         except StoreError as exc:
             raise HTTPException(exc.status, exc.message) from exc
         return {"ok": True}
+
+    @app.post("/api/bridges/{bridge_id}/webhook")
+    def post_bridge_webhook(bridge_id: str, body: WebhookIn, request: Request):
+        from easyagent.bridges import accept_webhook
+
+        token = _webhook_header_token(request)
+        accepted = accept_webhook(store, bridge_id, body.user_id, body.text, token)
+        return {"ok": bool(accepted)}
 
     @app.get("/api/browser/install")
     def get_browser_install():
@@ -3296,6 +3312,17 @@ def _connectors_prompt(store: Store, bot_id: str) -> str:
     from easyagent.connectors import prompt_block
 
     return prompt_block(store, bot_id)
+
+
+def _webhook_header_token(request: Request) -> str:
+    """The bridge token from a header. It is not read from the query or the body."""
+    dedicated = (request.headers.get("x-webhook-token") or "").strip()
+    if dedicated:
+        return dedicated
+    header = (request.headers.get("authorization") or "").strip()
+    if header.lower().startswith("bearer "):
+        return header[7:].strip()
+    return ""
 
 
 def _bridges_prompt(store: Store) -> str:

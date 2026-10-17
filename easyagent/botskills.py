@@ -8,9 +8,14 @@ and does not change approvals.
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 from easyagent.skills import parse_skill_document, render_skill, slugify
+
+_SKILL_BYTES = 64 * 1024
+_PASSWORD_LINE = re.compile(r"(?im)^[^\n]*password\s*:")
+_TOOL_FENCE = re.compile(r"(?i)```(?:shell|files|terminal|memory)\b|<tool_call\b")
 
 
 class SkillError(Exception):
@@ -79,11 +84,20 @@ def catalog(store, bot_id: str) -> str:
         return "(none yet)"
     lines = ["Skills:"]
     for row in rows:
-        desc = " ".join((row.get("description") or "").split())
-        if len(desc) > 120:
-            desc = desc[:119] + "…"
-        lines.append(f"- {row['name']}: {desc}" if desc else f"- {row['name']}")
+        desc = _flat_description(row.get("description") or "")
+        if desc:
+            lines.append(f"- {row['name']}:\n```text\n{desc}\n```")
+        else:
+            lines.append(f"- {row['name']}")
     return "\n".join(lines)
+
+
+def _flat_description(text: str) -> str:
+    """One line, with fence markers removed, so a description cannot add instructions."""
+    flat = " ".join((text or "").replace("`", "'").split())
+    if len(flat) > 120:
+        flat = flat[:119] + "…"
+    return flat
 
 
 def read_skill(store, bot_id: str, name: str) -> str:
@@ -103,10 +117,12 @@ def write_skill(store, bot_id: str, name: str, body: str, description: str = "")
     from easyagent.tools import contains_secret
 
     raw = body or ""
+    if len(raw.encode("utf-8")) > _SKILL_BYTES:
+        raise SkillError("That skill is larger than 64 KB. It was not written.")
     leaked = bool(find_leaks(raw)) or "BEGIN PRIVATE KEY" in raw or "BEGIN OPENSSH PRIVATE KEY" in raw
-    if leaked or contains_secret(store, raw.encode("utf-8")) or scrub_text(store, raw) != raw:
+    if leaked or _PASSWORD_LINE.search(raw) or contains_secret(store, raw.encode("utf-8")) or scrub_text(store, raw) != raw:
         raise SkillError("That skill contains a secret. It was not written.")
-    if "```shell" in raw.lower() or "```files" in raw.lower():
+    if _TOOL_FENCE.search(raw):
         raise SkillError("A skill cannot carry a tool call. It was not written.")
     document = {"name": path.stem, "description": " ".join((description or "").split()), "body": raw.strip()}
     from easyagent.store import atomic_write_text

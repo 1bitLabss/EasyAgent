@@ -2769,12 +2769,18 @@ def _record_turn_meter(chat: dict, *, detail: str = "", clear_overflow: bool = F
 
 
 def _message_cap(store: Store, chat: dict) -> int:
+    from easyagent.nctx import tool_schema_tokens
     from easyagent.turnctx import message_cap_chars
 
     try:
         overhead = int(chat.get("system_tokens") or 0)
     except (TypeError, ValueError):
         overhead = 0
+    if overhead < 0:
+        overhead = 0
+    # The meter adds the native tool list on top of the system prompt.
+    # A clip that ignores that list still overflows a small window.
+    overhead += tool_schema_tokens()
     return message_cap_chars(_window_for(store, chat), overhead, 2)
 
 

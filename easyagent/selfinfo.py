@@ -175,6 +175,16 @@ def list_chats(store: Store, bot_id: str) -> str:
     return "Your chats, newest first:\n" + "\n".join(rows)
 
 
+def _scrubbed(store: Store, text: str) -> str:
+    """Search text the model sees. A scrub failure is not the original line."""
+    try:
+        from easyagent.journal import scrub_text
+
+        return scrub_text(store, text or "")
+    except Exception:
+        return "[redacted]"
+
+
 def search_history(store: Store, bot_id: str, query: str) -> str:
     """Case-insensitive search over this bot's chats and memory files."""
     needle = " ".join((query or "").split())
@@ -198,8 +208,11 @@ def search_history(store: Store, bot_id: str, query: str) -> str:
             text = _line(message)
             if matches(text):
                 hits.append(
-                    f"- chat \"{title}\" (id {chat.get('id')}) message {index + 1}, {message.get('role', 'user')}, "
-                    f"{message.get('created_at') or '?'}: {_snippet(text, terms[0] if terms else needle)}"
+                    _scrubbed(
+                        store,
+                        f"- chat \"{title}\" (id {chat.get('id')}) message {index + 1}, {message.get('role', 'user')}, "
+                        f"{message.get('created_at') or '?'}: {_snippet(text, terms[0] if terms else needle)}",
+                    )
                 )
                 if len(hits) >= _SEARCH_HITS:
                     break
@@ -213,8 +226,11 @@ def search_history(store: Store, bot_id: str, query: str) -> str:
             if passage.text and passage.text[:80] in seen:
                 continue
             hits.append(
-                f"- chat \"{passage.title}\" (id {passage.chat_id}) message {passage.index + 1}, "
-                f"{passage.role}, {passage.created_at or '?'}: {_snippet(passage.text, terms[0] if terms else needle)}"
+                _scrubbed(
+                    store,
+                    f"- chat \"{passage.title}\" (id {passage.chat_id}) message {passage.index + 1}, "
+                    f"{passage.role}, {passage.created_at or '?'}: {_snippet(passage.text, terms[0] if terms else needle)}",
+                )
             )
             if len(hits) >= _SEARCH_HITS:
                 break
@@ -223,12 +239,12 @@ def search_history(store: Store, bot_id: str, query: str) -> str:
     for label, text in _memory_sources(store, bot_id):
         for row in text.splitlines():
             if row.strip() and matches(row):
-                hits.append(f"- {label}: {_snippet(row, terms[0] if terms else needle)}")
+                hits.append(_scrubbed(store, f"- {label}: {_snippet(row, terms[0] if terms else needle)}"))
                 if len(hits) >= _SEARCH_HITS * 2:
                     break
     if not hits:
-        return f"Nothing in your chats or memory matches \"{needle}\"."
-    return f"Matches for \"{needle}\":\n" + "\n".join(hits)
+        return _scrubbed(store, f"Nothing in your chats or memory matches \"{needle}\".")
+    return _scrubbed(store, f"Matches for \"{needle}\":\n" + "\n".join(hits))
 
 
 def _find_chat(store: Store, bot_id: str, key: str) -> tuple[Path, dict] | None:
@@ -262,14 +278,19 @@ def read_chat(store: Store, bot_id: str, key: str) -> str:
     skipped = len(messages) - len(shown)
     rows = []
     for offset, message in enumerate(shown, start=skipped + 1):
-        rows.append(f"[{offset}] {message.get('role', 'user')} {message.get('created_at') or ''}: {_line(message)}")
+        rows.append(
+            _scrubbed(
+                store,
+                f"[{offset}] {message.get('role', 'user')} {message.get('created_at') or ''}: {_line(message)}",
+            )
+        )
     body = "\n".join(rows)
     if len(body) > _READ_CHARS:
         body = "…" + body[-_READ_CHARS:]
     head = f"Chat \"{chat.get('title') or 'New chat'}\" ({len(messages)} messages) at {_show(path)}"
     if skipped:
         head += f". Showing the last {len(shown)}; search to find older lines."
-    return f"{head}\n{body}"
+    return _scrubbed(store, f"{head}\n{body}")
 
 
 def _memory_sources(store: Store, bot_id: str) -> list[tuple[str, str]]:

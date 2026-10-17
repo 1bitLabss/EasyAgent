@@ -2814,9 +2814,15 @@ def _execute(store: Store, request: ToolRequest, bot_id: str | None = None) -> s
         if not bot_id:
             raise ToolError("This turn has no bot, so no history was opened.")
         try:
-            return redact(store, run_history(store, bot_id, request.action, request.path))
+            text = run_history(store, bot_id, request.action, request.path)
         except StoreError as exc:
             raise ToolError(str(exc)) from exc
+        try:
+            from easyagent.journal import scrub_text
+
+            return scrub_text(store, text)
+        except Exception:
+            return "[redacted]"
     if request.kind == "failed":
         raise ToolError(request.body or "That call could not be run.")
     if request.kind == "shell":

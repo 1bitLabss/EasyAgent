@@ -573,7 +573,11 @@ def _remember_run(store: Store, bot_id: str, schedule: dict, entry: dict, now: d
 
 
 async def _deliver(store: Store, bot: dict, schedule: dict, entry: dict) -> None:
-    """Post a finished routine into the ongoing chat. Quiet runs stay in the log only."""
+    """Queue a finished routine, then send it. Quiet runs stay in the log only.
+
+    The queue row is durable before the chat write. A kill after the claim
+    retries that one row, and the delivery id keeps the chat from gaining a copy.
+    """
     status = entry.get("status")
     if status == "nothing new":
         return
@@ -584,13 +588,17 @@ async def _deliver(store: Store, bot: dict, schedule: dict, entry: dict) -> None
         text = entry.get("error") or "Stopped. The routine ran past its limit."
     else:
         text = (entry.get("output") or "").strip() or "(empty reply)"
-    store.append_routine_message(
-        bot["id"],
-        text,
-        routine_id=str(schedule.get("id") or ""),
-        routine_name=name,
-    )
-    await _post_outside(store, bot, schedule, text, name)
+    from easyagent.delivery import enqueue, flush
+
+    enqueue(store, {
+        "bot_id": bot["id"],
+        "text": text,
+        "routine_id": str(schedule.get("id") or ""),
+        "routine_name": name,
+        "deliver": str(schedule.get("deliver") or ""),
+        "deliver_chat": str(schedule.get("deliver_chat") or ""),
+    })
+    await flush(store)
 
 
 async def _post_outside(store: Store, bot: dict, schedule: dict, text: str, name: str) -> None:

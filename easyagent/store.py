@@ -1290,15 +1290,25 @@ class Store:
         atomic_write_json(path, chat)
         return chat
 
-    def append_routine_message(self, bot_id: str, text: str, routine_id: str = "", routine_name: str = "") -> dict:
+    def append_routine_message(
+        self,
+        bot_id: str,
+        text: str,
+        routine_id: str = "",
+        routine_name: str = "",
+        delivery_id: str = "",
+    ) -> dict:
         """Append one finished routine reply. Re-reads the chat so a live save cannot drop it.
 
         Does not set the chat's run. A background routine must not look like a live turn.
+        The same delivery id is written once, so a retry after a killed send does not duplicate it.
         """
         chat = self.ongoing_chat(bot_id)
         with self._lock:
             chat = self.get_chat(bot_id, chat["id"])
             messages = list(chat.get("messages") or [])
+            if delivery_id and any(str(item.get("delivery_id") or "") == delivery_id for item in messages):
+                return chat
             messages.append({
                 "id": new_id(),
                 "role": "assistant",
@@ -1306,6 +1316,7 @@ class Store:
                 "created_at": now_iso(),
                 "routine_id": routine_id,
                 "routine_name": routine_name,
+                **({"delivery_id": delivery_id} if delivery_id else {}),
             })
             chat["messages"] = messages
             chat["updated_at"] = now_iso()

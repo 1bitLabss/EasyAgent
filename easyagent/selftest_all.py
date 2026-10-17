@@ -802,7 +802,7 @@ def _fingerprint(root: Path) -> dict[str, str]:
         if not path.is_file() or path.is_symlink():
             continue
         rel = path.relative_to(root).as_posix()
-        if _under_selftest(rel, skip) or rel.endswith(_SIDECAR_SUFFIXES):
+        if _under_selftest(rel, skip) or rel.endswith(_SIDECAR_SUFFIXES) or rel == "deliveries.sqlite":
             continue
         digest = hashlib.sha256()
         with path.open("rb") as handle:
@@ -820,7 +820,7 @@ def _drop_extras(root: Path, before: dict[str, str]) -> None:
         rel = path.relative_to(root).as_posix()
         if rel in before or _under_selftest(rel, skip):
             continue
-        if rel == "host.json" or rel.startswith("skills/") or rel.endswith(_SIDECAR_SUFFIXES):
+        if rel in {"host.json", "deliveries.sqlite"} or rel.startswith("skills/") or rel.endswith(_SIDECAR_SUFFIXES):
             path.unlink(missing_ok=True)
 
 

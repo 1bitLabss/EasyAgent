@@ -96,6 +96,11 @@ def data_decision(store, command: str, cwd: Path, bot_id: str | None) -> str:
     env = dict(os.environ)
     if store is not None:
         env.setdefault("EASYAGENT_DATA", str(store.root))
+    # PowerShell's $PWD is the current location, not an environment variable.
+    # Windows leaves PWD unset, so $PWD would stay unresolved and an ordinary
+    # read of this folder would wait. A PWD that is already set is kept.
+    if not (env.get("PWD") or "").strip():
+        env["PWD"] = os.fspath(Path(cwd))
     touched, unresolved, cwd_after = _walk(text, Path(cwd), env, store, bot_id)
     if _blocked(store, touched, bot_id) or any(is_protected_secret(store, path) for path in touched):
         return "block"

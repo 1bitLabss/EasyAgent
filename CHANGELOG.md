@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.3.43
+- A message sent while a job is running is stored at once and stays visible. It is folded into the next model step. If that cannot happen, it runs after this turn, after Stop, after an error, or after a restart.
+- The busy status is one line, rewritten in place. Retry is hidden when the last turn already has a reply. Otherwise it resends the last unanswered message. A real failure is still an error.
+- Two minutes with no token ends the turn. The reply can be retried. An unreachable model says it cannot be reached. A held message stays in order.
+- The message box keeps a stable height while typing, stays usable while a job is running, sends on Enter, and starts a new line on Shift+Enter. A send that fails while the job is busy keeps the draft and shows the error.
+- `awk -f -` is a program read from stdin, including while /yolo is on. A secret read still waits. A harmless awk body still runs.
+- A full queue, a full waiting list, or a follow-up chain that has to stop shows the drop. Those lines are not left queued on an idle chat.
+- A Stop flag from a finished turn, and a busy flag with nobody running it, do not cancel the next run.
+- Dismissing a runaway card does not make that card the reply to a later message.
+
 ## 0.3.42
 - A script file redirected into an interpreter still waits when another redirection sits beside it. `python3 < script.py 2>&1`, `2>/dev/null`, and `>out` are the same program as `python3 < script.py`. python, node, ruby, perl, php, sh, bash, and dash are included, including while /yolo is on. A harmless script still runs.
 - `python3 < p2.py 2>&1`, and the same command with `1>&2`, `3>&1`, and `1>&1`, wait for python3, node, sh, bash, and perl, including while /yolo is on. `<&1` copies a descriptor. A leading `&` on any other redirected name (`<&p2.py`) is still that file. A harmless script still runs.

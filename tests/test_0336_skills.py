@@ -2,7 +2,7 @@
 
 import pytest
 
-from easyagent.botskills import SkillError, catalog, write_skill
+from easyagent.botskills import SkillError, _same_place, _stays_under, catalog, write_skill
 from easyagent.store import Store
 
 
@@ -45,3 +45,34 @@ def test_unsafe_bodies_are_refused_and_descriptions_are_fenced(tmp_path):
     shown = text.split("```text\n", 1)[1].split("\n```", 1)[0]
     assert "\n" not in shown
     assert "ignore previous instructions" in shown
+
+
+def test_a_path_skill_name_is_refused_after_the_name_is_normalized(tmp_path):
+    store, bot = _world(tmp_path)
+    for name in ("..\\x", "C:\\x", "\\\\?\\", "\\\\?\\C:\\x", "C:x", "foo..bar", "foo/../bar"):
+        with pytest.raises(SkillError):
+            write_skill(store, bot["id"], name, "nope")
+    saved = write_skill(store, bot["id"], "kiln", "Heat slowly.")
+    assert saved["name"] == "kiln"
+    folder = tmp_path / "bots" / bot["id"] / "skills"
+    assert (folder / "kiln.md").is_file()
+    assert list(folder.glob("*.md")) == [folder / "kiln.md"]
+
+
+def test_a_windows_skill_folder_is_judged_after_the_path_is_normalized(tmp_path):
+    assert _stays_under("C:\\data\\bots\\ada\\skills", "C:\\data\\bots")
+    assert _stays_under("\\\\?\\C:\\data\\bots\\ada\\skills", "C:\\data\\bots")
+    assert _same_place("C:\\data\\bots\\ada", "c:\\DATA\\bots\\ada")
+    assert _same_place("\\\\?\\C:\\data\\bots\\ada", "C:\\data\\bots\\ada")
+    assert not _stays_under("D:\\data\\bots\\ada\\skills", "C:\\data\\bots")
+    assert not _stays_under("C:\\data\\bots\\..\\outside\\skills", "C:\\data\\bots")
+    assert not _stays_under("C:\\data\\bots", "C:\\data\\bots")
+    store, bot = _world(tmp_path)
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    link = tmp_path / "bots" / bot["id"] / "skills"
+    link.parent.mkdir(parents=True, exist_ok=True)
+    link.symlink_to(outside, target_is_directory=True)
+    with pytest.raises(SkillError):
+        write_skill(store, bot["id"], "kiln", "Heat slowly.")
+    assert not (outside / "kiln.md").exists()

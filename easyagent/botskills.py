@@ -46,7 +46,10 @@ def _same_place(left, right) -> bool:
 
 
 def _stays_under(child, parent) -> bool:
-    """True when child is inside parent. The folder itself is not inside itself."""
+    """True when child is inside parent. The folder itself is not inside itself.
+
+    Both sides are folded before the check.
+    """
     from easyagent.strictshell import _key_under
 
     child_key = _place_key(child)
@@ -56,21 +59,60 @@ def _stays_under(child, parent) -> bool:
     return _key_under(child_key, parent_key)
 
 
+def _refuses_skill_name(name: str) -> bool:
+    """True when this skill name is a path. The name is folded first.
+
+    ``\\\\?\\`` can strip to nothing, and ``ntpath`` can collapse ``..``.
+    Those folds still count as a path, and a raw slash or ``..`` stays refused.
+    """
+    from easyagent.strictshell import _strip_extended
+
+    raw = name or ""
+    folded = _strip_extended(raw).replace("/", "\\")
+    key = _place_key(raw)
+    if raw.strip() and not folded.strip():
+        return True
+    if any(part in key for part in ("/", "\\", "..")):
+        return True
+    if key.startswith("//"):
+        return True
+    if len(key) >= 2 and key[0].isalpha() and key[1] == ":":
+        return True
+    if any(part in raw for part in ("/", "\\", "..")):
+        return True
+    if len(folded) >= 2 and folded[0].isalpha() and folded[1] == ":":
+        return True
+    return False
+
+
 def skills_dir(store, bot_id: str) -> Path:
-    if not bot_id or any(part in bot_id for part in ("/", "\\", "..")):
+    if not bot_id or _refuses_skill_name(bot_id):
         raise SkillError("That bot has no skills folder.")
     root = (Path(store.root) / "bots").resolve()
-    folder = (root / bot_id / "skills").resolve()
-    if not _same_place(folder.parent, root / bot_id):
-        raise SkillError("That skill stays in the skills folder.")
-    if not _stays_under(folder, root):
+    logical_parent = root / bot_id
+    folder = (logical_parent / "skills").resolve()
+    folder_key = _place_key(folder)
+    root_key = _place_key(root)
+    parent_key = _place_key(folder.parent)
+    expected_parent = _place_key(logical_parent)
+    from easyagent.strictshell import _key_under
+
+    if (
+        not folder_key
+        or not root_key
+        or not parent_key
+        or not expected_parent
+        or parent_key != expected_parent
+        or folder_key == root_key
+        or not _key_under(folder_key, root_key)
+    ):
         raise SkillError("That skill stays in the skills folder.")
     return folder
 
 
 def _file(store, bot_id: str, name: str) -> Path:
     raw = name or ""
-    if any(part in raw for part in ("/", "\\", "..")):
+    if _refuses_skill_name(raw):
         raise SkillError("That skill name is not a path. It was not written.")
     slug = slugify(raw)
     if not slug:

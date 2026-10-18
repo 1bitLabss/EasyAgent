@@ -2545,6 +2545,10 @@ def _run_shell(store: Store, command: str, *, timeout: int = -1, workdir: str = 
     if proc.returncode == 0:
         if next_cwd and slot is not None:
             slot.cwd = next_cwd
+        # cd itself prints nothing. pwd is not a Windows command, so the new
+        # folder has to be in this result or the chat cannot see where it landed.
+        if next_cwd and next_cwd not in output:
+            output = f"{output}\n{next_cwd}"
         target = shell_read_target(original)
         if target is not None:
             _note_shell_read(store, target[0], cwd_path, partial=target[1])

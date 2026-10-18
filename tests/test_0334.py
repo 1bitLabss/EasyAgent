@@ -757,6 +757,23 @@ def test_live_search_hides_sniffed_and_named_secrets(tmp_path, monkeypatch):
             assert marker not in heard, (yolo, marker, heard)
 
 
+def _path_shown(heard: str, folder: Path) -> bool:
+    """True when heard contains this folder in either slash, case, or \\\\?\\ spelling."""
+    from easyagent.strictshell import _canonical_key, _fold_text, _strip_extended
+
+    folded = os.path.normcase(_strip_extended(heard)).replace("\\", "/")
+    raw = os.fspath(folder)
+    candidates = [raw, _fold_text(raw)]
+    key = _canonical_key(folder)
+    if key:
+        candidates.append(key)
+    for item in candidates:
+        text = os.path.normcase(item).replace("\\", "/")
+        if text and text in folded:
+            return True
+    return False
+
+
 def test_live_native_read_offset_timeout_and_workdir(tmp_path, monkeypatch):
     monkeypatch.setenv("EASYAGENT_APPROVAL_SECONDS", "1")
     from easyagent.safety import set_mode
@@ -822,12 +839,7 @@ def test_live_cd_persists_inside_the_folder(tmp_path, monkeypatch):
         yolo=False,
         ask="Move into sub and print the folder.",
     )
-    expected = str(folder / "sub")
-    if os.name == "nt":
-        folded = os.path.normcase(heard).replace("/", "\\")
-        assert os.path.normcase(expected).replace("/", "\\") in folded
-    else:
-        assert expected in heard
+    assert _path_shown(heard, folder / "sub"), heard
     assert "outside" in heard or "not run" in heard
 
 

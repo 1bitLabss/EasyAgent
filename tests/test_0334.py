@@ -403,9 +403,12 @@ def test_live_flag_wrapper_and_empty_pattern_reads_do_not_print(tmp_path, monkey
         assert "_authToken=" not in row, (yolo, command)
     notes, numbered, empty_grep, envrc = rows[len(FLAG_LEAKS) : len(FLAG_LEAKS) + 4]
     assert "visible-note" in notes and "was not run" not in notes
-    assert "visible-note" in numbered and "was not run" not in numbered
-    assert "visible-note" in empty_grep and "was not run" not in empty_grep
     assert "export PATH" in envrc and "was not run" not in envrc
+    # cat -n is GNU cat. PowerShell's cat is Get-Content and has no -n.
+    # grep is not a Windows command. Both are still sent, and neither may print a secret.
+    if os.name != "nt":
+        assert "visible-note" in numbered and "was not run" not in numbered
+        assert "visible-note" in empty_grep and "was not run" not in empty_grep
 
 
 _LIVE_EXEC_CONTROLS = (
@@ -467,11 +470,13 @@ def test_live_eval_awk_cd_proc_and_git_do_not_print(tmp_path, monkeypatch, yolo)
     for command, row in zip(commands, rows):
         assert "was not run" in row, (yolo, command, row)
     echo, awk_notes, envrc, notes, moved = rows[len(commands) : len(commands) + 5]
-    assert "hi" in echo and "was not run" not in echo
-    assert "visible-note" in awk_notes and "was not run" not in awk_notes
     assert "export PATH" in envrc and "was not run" not in envrc
     assert "visible-note" in notes and "was not run" not in notes
-    assert "ok-note" in moved and "was not run" not in moved
+    # eval, awk, and `&&` are Unix shell. Windows PowerShell 5.1 runs none of them.
+    if os.name != "nt":
+        assert "hi" in echo and "was not run" not in echo
+        assert "visible-note" in awk_notes and "was not run" not in awk_notes
+        assert "ok-note" in moved and "was not run" not in moved
 
 
 def test_listing_1500_chats_does_not_reread_every_transcript(tmp_path):

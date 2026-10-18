@@ -519,7 +519,14 @@ def test_readers_and_obfuscation_card_and_controls_do_not(tmp_path):
     folder = tmp_path / "tree"
     folder.mkdir()
     _plant(folder)
-    for command in READERS + OBFUSCATED:
+    obfuscated = list(OBFUSCATED)
+    # A Windows runner without developer mode cannot create the symlink or the
+    # hardlink. Those names are not planted, so they are not secret reads.
+    if not (folder / "link").exists():
+        obfuscated = [command for command in obfuscated if command != "cat link"]
+    if not (folder / "hard").exists():
+        obfuscated = [command for command in obfuscated if command != "cat hard"]
+    for command in READERS + obfuscated:
         assert command_reads_secrets(command, folder), command
     for command in CONTROLS:
         assert command_reads_secrets(command, folder) is False, command

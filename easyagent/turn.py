@@ -99,10 +99,11 @@ def cancelled() -> bool:
     if event is None or not event.is_set():
         return False
     slot = _slot.get()
-    if slot is None or slot.cancel is not event:
-        return False
-    worker = slot.worker
-    return worker is not None and not worker.done()
+    if slot is not None and slot.cancel is event:
+        worker = slot.worker
+        if worker is None or worker.done():
+            return False
+    return True
 
 
 def raise_if_cancelled() -> None:

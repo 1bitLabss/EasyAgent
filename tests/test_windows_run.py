@@ -217,6 +217,57 @@ def test_windows_shell_is_powershell_and_empty_output_names_the_exit_code(tmp_pa
     assert ".ps1" in prompt
 
 
+def test_windows_powershell_utf16_and_a_quiet_workdir_still_name_the_folder(tmp_path, monkeypatch):
+    from easyagent import turn as turn_mod
+    from easyagent.tools import _command_text, _run_shell
+    from easyagent.workspace import bot_workspace
+
+    assert _command_text("bye".encode("utf-16-le")) == "bye"
+    assert _command_text(b"\xff\xfe" + "ok".encode("utf-16-le")) == "ok"
+    store, bot, _chat = _store(tmp_path)
+    folder = bot_workspace(store, bot["id"], create=True)
+    (folder / "sub").mkdir()
+    slot = turn_mod.bind(store, "win-shell", bot["id"])
+    slot.cwd = str(folder)
+
+    class Proc:
+        def __init__(self, code, out):
+            self.returncode = code
+            self._out = out
+
+        def communicate(self, timeout=None):
+            return self._out, b""
+
+    seen = {}
+
+    def fake_popen(args, **kwargs):
+        seen["text"] = kwargs.get("text")
+        seen["cwd"] = kwargs.get("cwd")
+        return Proc(3, "bye".encode("utf-16-le"))
+
+    monkeypatch.setattr(sys, "platform", "win32")
+    monkeypatch.setattr(subprocess, "Popen", fake_popen)
+    try:
+        with pytest.raises(ToolError) as caught:
+            _run_shell(store, "echo bye; exit 3", workdir="sub")
+        text = str(caught.value)
+        assert "bye" in text
+        assert "exit code 3" in text
+        assert str(folder / "sub") in text
+        assert seen["text"] is False
+        assert seen["cwd"] == str(folder / "sub") or str((folder / "sub").resolve()) in str(seen["cwd"])
+
+        def quiet_popen(args, **kwargs):
+            return Proc(0, b"")
+
+        monkeypatch.setattr(subprocess, "Popen", quiet_popen)
+        quiet = _run_shell(store, "echo ok", workdir="sub")
+        assert "command produced no output, exit code 0" in quiet
+        assert str(folder / "sub") in quiet
+    finally:
+        turn_mod._slot.set(None)
+
+
 def test_a_quoted_program_is_invoked_with_powershells_call_operator(tmp_path, monkeypatch):
     from easyagent.sandbox import popen_contained
     from easyagent.tools import _powershell_command, _shell_invocation

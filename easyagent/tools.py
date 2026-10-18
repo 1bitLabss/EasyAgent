@@ -2329,6 +2329,77 @@ def _empty_command(code: int | None) -> str:
     return f"command produced no output, exit code {shown}"
 
 
+def _command_text(data: object) -> str:
+    """Shell output as text. PowerShell 5.1 writes UTF-16LE into a pipe."""
+    if data is None:
+        return ""
+    if isinstance(data, str):
+        return data
+    if not isinstance(data, (bytes, bytearray)):
+        return str(data)
+    blob = bytes(data)
+    if not blob:
+        return ""
+    if blob.startswith((b"\xff\xfe", b"\xfe\xff")):
+        return blob.decode("utf-16", errors="replace").lstrip("\ufeff")
+    sample = blob[:120]
+    nuls = sample.count(0)
+    if len(sample) >= 4 and nuls >= max(2, len(sample) // 3):
+        if sample[1] == 0:
+            return blob.decode("utf-16-le", errors="replace").lstrip("\ufeff")
+        if sample[0] == 0:
+            return blob.decode("utf-16-be", errors="replace").lstrip("\ufeff")
+    return blob.decode("utf-8", errors="replace")
+
+
+def _display_cwd(path: str) -> str:
+    from easyagent.strictshell import _strip_extended
+
+    return _strip_extended(path or "")
+
+
+def _process_cwd(path: str) -> str:
+    """A cwd Windows can start. A long path keeps the \\\\?\\ prefix. The report does not."""
+    shown = _display_cwd(path)
+    if sys.platform != "win32":
+        return shown or path
+    if len(shown) >= 240:
+        from easyagent.store import _extended_win
+
+        return _extended_win(shown)
+    return shown or path
+
+
+def _workdir_spellings(store: Store, workdir: str, resolved: str) -> list[str]:
+    """Spellings of the folder a command was started in.
+
+    ``resolve`` can expand an 8.3 name or a junction. The workspace join is the
+    spelling the rest of this turn already uses. Both name the same folder.
+    """
+    names: list[str] = []
+    text = (workdir or "").strip().strip('"')
+    if text:
+        raw = Path(text)
+        if not raw.is_absolute():
+            caller = _caller_bot()
+            if caller:
+                from easyagent.workspace import bot_workspace
+
+                raw = bot_workspace(store, caller, create=False) / raw
+            else:
+                try:
+                    raw = Path(turn_mod.tool_cwd()) / raw
+                except OSError:
+                    raw = Path(resolved)
+        names.append(_display_cwd(str(raw)))
+    names.append(_display_cwd(resolved))
+    found: list[str] = []
+    for name in names:
+        if name and name not in found:
+            found.append(name)
+    return found
+
+
 _SHELL_DEFAULT_TIMEOUT = 120
 _SHELL_MAX_TIMEOUT = 900
 
@@ -2490,8 +2561,11 @@ def _run_shell(store: Store, command: str, *, timeout: int = -1, workdir: str = 
                 shell=use_shell,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
-                text=True,
-                cwd=cwd_text,
+                # PowerShell 5.1 writes UTF-16LE to a pipe. Text mode decodes
+                # with the ANSI code page and either hides the text in NULs or
+                # raises UnicodeDecodeError before the folder can be reported.
+                text=sys.platform != "win32",
+                cwd=_process_cwd(cwd_text),
                 env=env,
                 start_new_session=True,
             )
@@ -2510,6 +2584,8 @@ def _run_shell(store: Store, command: str, *, timeout: int = -1, workdir: str = 
             raise turn_mod.TurnCancelled()
         try:
             stdout, stderr = proc.communicate(timeout=wait)
+        except UnicodeDecodeError:
+            stdout, stderr = "", ""
         except subprocess.TimeoutExpired as exc:
             turn_mod.stop_process(proc)
             try:
@@ -2525,7 +2601,8 @@ def _run_shell(store: Store, command: str, *, timeout: int = -1, workdir: str = 
     from easyagent.coding import shell_read_target
     from easyagent.truncate import truncate_head_tail
 
-    raw_output = ((stdout or "") + (stderr or "")).strip()
+    raw_output = (_command_text(stdout) + _command_text(stderr)).replace("\x00", "").strip()
+    shown_cwd = _display_cwd(cwd_text)
     if not raw_output:
         output = _empty_command(proc.returncode)
     else:
@@ -2537,9 +2614,16 @@ def _run_shell(store: Store, command: str, *, timeout: int = -1, workdir: str = 
             spilled = spill_output(raw_output, Path(cwd_text) / ".ea-spill")
             if spilled is not None:
                 output = output + f"\nFull output: {spilled}"
-        output = f"exit code {proc.returncode}\ncwd {cwd_text}\n{output}"
+        output = f"exit code {proc.returncode}\ncwd {shown_cwd}\n{output}"
     if notice:
         output = (notice + "\n" + output).strip()
+    # An explicit workdir is part of the result even when PowerShell prints
+    # nothing. resolve() may spell a junction or an 8.3 name differently from
+    # the workspace path this turn already uses, so both spellings are kept.
+    if (workdir or "").strip():
+        for spelling in _workdir_spellings(store, workdir, cwd_text):
+            if spelling not in output:
+                output = f"{output}\n{spelling}"
     if proc.returncode != 0:
         raise ToolError(output)
     if proc.returncode == 0:

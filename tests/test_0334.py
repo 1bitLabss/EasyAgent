@@ -781,7 +781,7 @@ def test_live_search_hides_sniffed_and_named_secrets(tmp_path, monkeypatch):
 
 def _path_shown(heard: str, folder: Path) -> bool:
     """True when heard contains this folder in either slash, case, or \\\\?\\ spelling."""
-    from easyagent.strictshell import _canonical_key, _fold_text, _strip_extended
+    from easyagent.strictshell import _canonical_key, _fold_text, _strip_extended, windows_key
 
     folded = os.path.normcase(_strip_extended(heard)).replace("\\", "/")
     raw = os.fspath(folder)
@@ -792,6 +792,17 @@ def _path_shown(heard: str, folder: Path) -> bool:
     for item in candidates:
         text = os.path.normcase(item).replace("\\", "/")
         if text and text in folded:
+            return True
+    wanted = windows_key(raw)
+    for line in heard.splitlines():
+        piece = line.strip()
+        if piece.lower().startswith("cwd "):
+            piece = piece[4:].strip()
+        if not piece or len(piece) > 400:
+            continue
+        if windows_key(piece) == wanted:
+            return True
+        if key and _canonical_key(piece) == key:
             return True
     return False
 
@@ -814,8 +825,8 @@ def test_live_native_read_offset_timeout_and_workdir(tmp_path, monkeypatch):
     (folder / "sub" / "here.txt").write_text("in-sub\n", encoding="utf-8")
     (folder / "slow.sh").write_text("#!/bin/sh\nsleep 5\necho late\n", encoding="utf-8")
     (folder / "bye.sh").write_text("#!/bin/sh\necho bye\nexit 3\n", encoding="utf-8")
-    # sh and pwd are not Windows commands. sleep and echo run in PowerShell,
-    # and the workdir is reported on the cwd line of a command that prints.
+    # sh and pwd are not Windows commands. sleep and echo run in PowerShell.
+    # The workdir is reported even when that command prints nothing.
     if os.name == "nt":
         shell_scripts = [
             _tool_sse("terminal", {"command": "sleep 5", "timeout": 2}, "call_to"),

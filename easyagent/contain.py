@@ -1403,7 +1403,9 @@ class _PipeProcess:
         read = wintypes.DWORD()
         while kernel32.ReadFile(handle, buf, 4096, ctypes.byref(read), None) and read.value:
             chunks.append(buf.raw[: read.value])
-        return b"".join(chunks).decode("utf-8", errors="replace")
+        from easyagent.tools import _command_text
+
+        return _command_text(b"".join(chunks)).replace("\x00", "")
 
 
 class _StdioProcess:

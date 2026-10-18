@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.3.38
+- A here-string fed to sh, bash, dash, or zsh is that shell's script, including `sh -s`. `sh <<< 'cat .env'` and a key file wait. `grep x <<< foo` does not.
+- A missing PWD is this command's folder. `echo $PWD` and `cat $PWD/src/app.py` stay allowed. `cat $PWD/.env` still waits.
+- A successful `cd` prints the folder it landed in. Case, slashes, and a `\\?\` prefix are the same folder. `pwd` is still not a Windows command.
+- search_files uses the Python walk when `rg` is missing or the program on PATH is not ripgrep. A named secret is still not opened.
+- A symlink or hardlink that was not created is not a reader check. `eval`, `awk`, `cat -n`, `grep`, `sh`, and `&&` are not required to print under PowerShell. `sleep`, `echo`, and `cat` of an ordinary note still run.
+
 ## 0.3.37
 - search_files sniffs the whole file before it prints a match, the same way a shell grep does, and scrubs each matched line. A key past the first 8 KB is not printed.
 - A skill document in a reply is saved again. The opening --- is not treated as a skill tool call.

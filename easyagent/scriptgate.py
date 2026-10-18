@@ -1918,6 +1918,9 @@ def _command_reads(text: str, cwd: Path, depth: int = 0, root: Path | None = Non
         return _tree_has_secret(base, recursive=True)
     if depth == 0 and _staged_code_reads(text, base):
         return True
+    # python - <<'EOF' is one script. The body is not a shell line.
+    if depth == 0 and _stdin_heredoc_reads(text, cwd):
+        return True
     if _for_loop_reads(text, cwd):
         return True
     location: Path | None = cwd
@@ -2295,13 +2298,17 @@ def _fed_script_reads(
     depth: int,
     root: Path | None,
 ) -> bool:
-    """True when a stdin shell is handed a script that reads a secret, or an unreadable one.
+    """True when a stdin program reads a secret, or the script cannot be proved.
 
-    The script may be a here-string, a ``< <(...)`` process substitution, or the
-    previous stage of a pipe. A proved ``echo hi`` does not card. A producer
-    that is not a literal echo or printf does, because the script is unknown.
+    Shells and the interpreters that take a program on stdin (``python -``,
+    ``node -``, ``ruby``, and the same for perl, php, deno, and bun) are
+    included. The script may be a here-string, a ``< <(...)`` process
+    substitution, or the previous stage of a pipe. ``python - <<< 'print(1)'``
+    does not card. A producer that is not a literal echo or printf does,
+    because the script is unknown.
     """
-    if not _stdin_shell(program, args):
+    seen, _seen_args = _peeled_program(program, args)
+    if not _reads_program_stdin(program, args):
         return False
     bodies, unreadable = _here_strings(stage)
     more, bad = _stdin_process_sources(stage)
@@ -2318,7 +2325,7 @@ def _fed_script_reads(
     if unreadable:
         return True
     base = root or cwd
-    return any(_command_reads(body, cwd, depth + 1, root=base) for body in bodies)
+    return any(_stdin_body_reads(seen, body, cwd, depth, base) for body in bodies)
 
 
 def _here_strings(text: str) -> tuple[list[str], bool]:
@@ -2357,19 +2364,272 @@ def _here_strings(text: str) -> tuple[list[str], bool]:
     return bodies, unreadable
 
 
-def _stdin_shell(program: str, args: list[str]) -> bool:
-    """True when a wrapper's real program is a shell that reads its script from stdin."""
+def _peeled_program(program: str, args: list[str]) -> tuple[str, list[str]]:
+    """The program after ``command``, ``env``, ``timeout``, and the other wrappers."""
     seen = program
-    seen_args = args
+    seen_args = list(args)
     for _ in range(6):
         if seen not in _PEEL:
             break
         rest = _wrapper_tail(seen, seen_args)
         if not rest:
-            return False
+            return "", []
         seen = _program_name(rest[0])
         seen_args = rest[1:]
+    return seen, seen_args
+
+
+def _stdin_shell(program: str, args: list[str]) -> bool:
+    """True when a wrapper's real program is a shell that reads its script from stdin."""
+    seen, seen_args = _peeled_program(program, args)
     return seen in _SHELLS and _shell_reads_stdin(seen_args)
+
+
+_STDIN_LANGS = _PYTHONS | frozenset({"perl", "ruby", "node", "nodejs", "php", "bun", "deno"})
+_PY_VALUE_FLAGS = frozenset({"-W", "-X", "-Q"})
+_NODE_VALUE_FLAGS = frozenset({
+    "-r", "--require", "--loader", "--import", "--experimental-loader",
+    "--experimental-require-module",
+})
+_RUBY_VALUE_FLAGS = frozenset({"-r", "--require", "-I", "-C", "--disable"})
+_PHP_VALUE_FLAGS = frozenset({"-d", "-c", "--define", "--php-ini"})
+_PERL_VALUE_FLAGS = frozenset({"-I"})
+_LANG_READ = re.compile(
+    r"(?i)(?:"
+    r"readFileSync|readFile|readTextFile|"
+    r"file_get_contents|\bfopen\s*\(|"
+    r"File\.read|IO\.read|"
+    r"\bopen\s*\(|"
+    r"Bun\.file|Deno\.read|"
+    r"\bfs\s*\.\s*read|"
+    r"read_text|read_bytes|"
+    r"\bgetline\b"
+    r")"
+)
+_LANG_LITERAL = re.compile(r"""(['"])(.*?)\1""")
+_LANG_SKIP_LITERAL = frozenset({
+    "utf8", "utf-8", "utf16", "ascii", "latin1", "binary", "text",
+    "rb", "r", "w", "a", "fs", "path", "node:fs",
+})
+_HARMLESS_LANG = re.compile(
+    r"""(?is)^\s*(?:<\?php\s+)?(?:"""
+    r"""console\.log\s*\(\s*(?:[0-9]+|true|false|null|'[^']*'|\"[^\"]*\")\s*\)\s*;?"""
+    r"""|puts\s+(?:[0-9]+|'[^']*'|\"[^\"]*\")\s*;?"""
+    r"""|print\s+(?:[0-9]+|'[^']*'|\"[^\"]*\")\s*;?"""
+    r"""|echo\s+(?:[0-9]+|'[^']*'|\"[^\"]*\")\s*;?"""
+    r""")\s*;?\s*$"""
+)
+
+_STDIN_HEREDOC = re.compile(
+    r"(?s)(?:^|[;&|\n])\s*"
+    r"(?P<cmd>[^;&|\n]*?)"
+    r"<<(?!<)-?\s*(?P<q>['\"]?)(?P<delim>[A-Za-z_][A-Za-z0-9_]*)(?P=q)[ \t]*\n"
+    r"(?P<body>.*?)\n[ \t]*(?P=delim)[ \t]*(?:\n|$)"
+)
+
+
+def _reads_program_stdin(program: str, args: list[str]) -> bool:
+    """True when this program's source is stdin, not ``-c`` / ``-e`` and not a file."""
+    seen, seen_args = _peeled_program(program, args)
+    if not seen:
+        return False
+    if seen in _SHELLS:
+        return _shell_reads_stdin(seen_args)
+    if seen == "deno":
+        return _deno_reads_stdin(seen_args)
+    if seen == "bun":
+        rest = seen_args[1:] if seen_args[:1] == ["run"] else seen_args
+        return _generic_reads_stdin("node", rest)
+    if seen in _STDIN_LANGS:
+        return _generic_reads_stdin(seen, seen_args)
+    return False
+
+
+def _deno_reads_stdin(args: list[str]) -> bool:
+    """``deno run -`` reads a program. ``deno eval`` and ``deno run file`` do not."""
+    if not args or args[0] != "run":
+        return False
+    return _generic_reads_stdin("node", args[1:])
+
+
+def _inline_program_flag(program: str, arg: str) -> bool:
+    """True when this flag supplies the program, so stdin is not the script."""
+    if program in _PYTHONS:
+        return arg in {"-c", "-m", "--command"} or arg.startswith(("-c", "-m"))
+    if program in {"node", "nodejs", "bun"}:
+        return arg in {"-e", "-p", "--eval", "--print"} or arg.startswith(("--eval=", "--print=", "-e", "-p"))
+    if program == "ruby":
+        return arg in {"-e", "--eval"} or arg.startswith(("--eval=", "-e"))
+    if program == "perl":
+        return arg == "-E" or re.fullmatch(r"-[0-9A-Za-z]*e[0-9A-Za-z]*", arg) is not None
+    if program == "php":
+        return arg in {"-r", "--run"} or arg.startswith("--run=")
+    return False
+
+
+def _script_file_flag(program: str, arg: str) -> bool:
+    """``php -f file`` names a file. The next word is not a flag to skip."""
+    return program == "php" and arg in {"-f", "--file"}
+
+
+def _value_flag_width(program: str, arg: str) -> int:
+    """Args this flag consumes, including itself. 0 when it is not a value flag."""
+    if "=" in arg:
+        return 0
+    head = arg.split("=", 1)[0]
+    if program in _PYTHONS and head in _PY_VALUE_FLAGS:
+        return 2
+    if program in {"node", "nodejs", "bun"} and head in _NODE_VALUE_FLAGS:
+        return 2
+    if program == "ruby" and head in _RUBY_VALUE_FLAGS:
+        return 2
+    if program == "php" and head in _PHP_VALUE_FLAGS:
+        return 2
+    if program == "perl" and head in _PERL_VALUE_FLAGS:
+        return 2
+    return 0
+
+
+def _generic_reads_stdin(program: str, args: list[str]) -> bool:
+    """True when no script file and no inline code flag were given.
+
+    A lone ``-`` is the program on stdin. ``py -3 -`` is the same. A following
+    word is that program's argv, not another file. No file at all is also
+    stdin: ``ruby <<< 'puts 1'`` and ``node <<< 'console.log(1)'`` run it.
+    """
+    index = 0
+    while index < len(args):
+        arg = args[index]
+        if arg == "--":
+            rest = args[index + 1:]
+            if not rest or rest[0] == "-":
+                return True
+            return False
+        if arg == "-":
+            return True
+        if _inline_program_flag(program, arg) or _script_file_flag(program, arg):
+            return False
+        width = _value_flag_width(program, arg)
+        if width:
+            index += width
+            continue
+        if arg.startswith("-"):
+            index += 1
+            continue
+        return False
+    return True
+
+
+def _stdin_body_reads(program: str, body: str, cwd: Path, depth: int, root: Path | None) -> bool:
+    """The stdin script reads a secret, or it is not on the allow-list."""
+    if program in _SHELLS:
+        return _command_reads(body, cwd, depth + 1, root=root or cwd)
+    if program in _PYTHONS:
+        return _python_stdin_reads(body, cwd, depth)
+    if program in _STDIN_LANGS:
+        return _lang_stdin_reads(body, cwd)
+    return True
+
+
+def _python_stdin_reads(code: str, cwd: Path, depth: int) -> bool:
+    """Allow-list for a Python program read from stdin.
+
+    ``print(1)`` and ``open("notes.txt")`` run. A syntax error, an import, an
+    unknown call, and a path that is not a literal non-secret all card.
+    """
+    if depth > 6:
+        return True
+    if not (code or "").strip():
+        return False
+    try:
+        tree = ast.parse(code)
+    except SyntaxError:
+        return True
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.Import, ast.ImportFrom)):
+            return True
+        if isinstance(node, ast.Call) and _python_stdin_call(node, cwd, depth):
+            return True
+    return False
+
+
+def _py_known_file_read(node: ast.Call) -> bool:
+    func = node.func
+    if isinstance(func, ast.Name) and func.id == "open":
+        return True
+    if isinstance(func, ast.Attribute):
+        name = func.attr
+        owner = _receiver_name(func.value)
+        if name in {"read_text", "read_bytes", "listdir", "scandir", "walk", "glob", "iglob"}:
+            return True
+        if name == "open" and owner in {"io", "codecs", "os", "pathlib", "Path"}:
+            return True
+    return False
+
+
+def _python_stdin_call(node: ast.Call, cwd: Path, depth: int) -> bool:
+    func = node.func
+    if _py_known_file_read(node):
+        return _py_call_reads(node, cwd, depth) is not False
+    if isinstance(func, ast.Name) and (func.id in _SAFE_FUNCS or func.id == "Path"):
+        return False
+    if isinstance(func, ast.Attribute):
+        owner = _receiver_name(func.value)
+        if func.attr == "Path" and owner == "pathlib":
+            return False
+        if func.attr in _SAFE_METHODS and not isinstance(func.value, ast.Name):
+            return False
+    return True
+
+
+def _lang_quoted(text: str) -> list[str]:
+    return [literal for _quote, literal in _LANG_LITERAL.findall(text or "")]
+
+
+def _lang_stdin_reads(code: str, cwd: Path) -> bool:
+    """Allow a proved print, or a read of one non-secret path. Everything else cards."""
+    text = code or ""
+    if not text.strip():
+        return False
+    if _script_text_unproved(text):
+        return True
+    literals = _lang_quoted(text)
+    for literal in literals:
+        if literal and _operand_secret(literal, cwd, wide=True):
+            return True
+    if _HARMLESS_LANG.match(text) is not None:
+        return False
+    if not _LANG_READ.search(text):
+        return True
+    paths = [
+        literal
+        for literal in literals
+        if literal and literal.lower() not in _LANG_SKIP_LITERAL and ("/" in literal or "\\" in literal or "." in literal)
+    ]
+    if not paths:
+        return True
+    return any(_operand_secret(literal, cwd, wide=True) for literal in paths)
+
+
+def _stdin_heredoc_reads(text: str, cwd: Path) -> bool:
+    """An interpreter heredoc is one program. Card only when that program must.
+
+    The heredoc stays in the command. A shell heredoc is judged line by line,
+    the same as before. ``python - <<'EOF'`` is not.
+    """
+    for match in _STDIN_HEREDOC.finditer(text or ""):
+        words = _literal_words(match.group("cmd").strip())
+        if not words:
+            continue
+        program, args = _split_program(words)
+        seen, _seen_args = _peeled_program(program, args)
+        if seen in _SHELLS or seen not in _STDIN_LANGS:
+            continue
+        if not _reads_program_stdin(program, args):
+            continue
+        if _stdin_body_reads(seen, match.group("body"), cwd, 0, cwd):
+            return True
+    return False
 
 
 def _tokenize(statement: str) -> tuple[list[str], list[str]]:
@@ -2464,8 +2724,13 @@ def _tokenize(statement: str) -> tuple[list[str], list[str]]:
             i += 1
             while i < len(text) and text[i].isspace():
                 i += 1
+            # `< <(...)` and `<(` are a process substitution, not a file name.
+            # The body is not an argument: `ruby < <(echo 'puts 1')` has no script file.
+            if op == "<" and text.startswith("<(", i):
+                _body, i, _closed = _read_paren_body(text, i + 2)
+                continue
             if op == "<" and i < len(text) and text[i] == "(":
-                i += 1
+                _body, i, _closed = _read_paren_body(text, i + 1)
                 continue
             target: list[str] = []
             while i < len(text) and not text[i].isspace():

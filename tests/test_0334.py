@@ -1481,6 +1481,116 @@ def test_process_substitution_into_a_shell_stays_a_card_under_yolo(tmp_path):
         turn_mod._slot.set(None)
 
 
+def test_interpreter_stdin_program_cards(tmp_path):
+    """A program on stdin is the script. ``python - <<< 'print(1)'`` still runs."""
+    folder = tmp_path / "tree"
+    folder.mkdir()
+    _plant(folder)
+    secret_py = 'print(open(".env").read())'
+    node_secret = 'console.log(require("fs").readFileSync(".env","utf8"))'
+    ruby_secret = 'puts File.read(".env")'
+    forms = (
+        "python - <<< '{body}'",
+        "python3 - <<< '{body}'",
+        "python - <<'EOF'\n{body}\nEOF",
+        "python - < <(echo '{body}')",
+        "echo '{body}' | python -",
+    )
+    for form in forms:
+        assert command_reads_secrets(form.format(body=secret_py), folder), form
+    assert command_reads_secrets(f"node - <<< '{node_secret}'", folder)
+    assert command_reads_secrets(f"node - <<'EOF'\n{node_secret}\nEOF", folder)
+    assert command_reads_secrets(f"node - < <(echo '{node_secret}')", folder)
+    assert command_reads_secrets(f"echo '{node_secret}' | node -", folder)
+    assert command_reads_secrets(f"ruby <<< '{ruby_secret}'", folder)
+    assert command_reads_secrets(f"ruby <<'EOF'\n{ruby_secret}\nEOF", folder)
+    assert command_reads_secrets(f"ruby < <(echo '{ruby_secret}')", folder)
+    assert command_reads_secrets(f"echo '{ruby_secret}' | ruby", folder)
+    assert command_reads_secrets("perl - <<< 'open F, \".env\"; print <F>'", folder)
+    assert command_reads_secrets("php <<< '<?php echo file_get_contents(\".env\");'", folder)
+    assert command_reads_secrets("deno run - <<< 'Deno.readTextFileSync(\".env\")'", folder)
+    assert command_reads_secrets("bun - <<< 'await Bun.file(\".env\").text()'", folder)
+    # Windows spelling: .exe, the py launcher, and a backslash inside the script.
+    assert command_reads_secrets("python.exe - <<< 'print(open(\".env\").read())'", folder)
+    assert command_reads_secrets("py -3 - <<< 'print(open(\".env\").read())'", folder)
+    assert command_reads_secrets(f"node.exe - <<< '{node_secret}'", folder)
+    assert command_reads_secrets("ruby.exe <<< 'puts File.read(\".env\")'", folder)
+    assert command_reads_secrets(r"""python - <<< 'print(open(".\\.env").read())'""", folder)
+    # Default-deny: a syntax error, a variable path, and a call that is not on the list.
+    assert command_reads_secrets("python - <<< 'print('", folder)
+    assert command_reads_secrets("python - <<< 'print(open(path).read())'", folder)
+    assert command_reads_secrets("node - <<< 'require(\"fs\").readFileSync(name)'", folder)
+    assert command_reads_secrets("python - <<< 'import shutil; shutil.rmtree(\"/\")'", folder)
+    for command in (
+        "python - <<< 'print(1)'",
+        "node - <<< 'console.log(1)'",
+        "ruby <<< 'puts 1'",
+        "perl - <<< 'print 1'",
+        "php <<< '<?php echo 1;'",
+        "deno run - <<< 'console.log(1)'",
+        "bun - <<< 'console.log(1)'",
+        "python - <<< 'print(open(\"notes.txt\").read())'",
+        "node - <<< 'require(\"fs\").readFileSync(\"notes.txt\",\"utf8\")'",
+        "ruby <<< 'puts File.read(\"notes.txt\")'",
+        "python -c 'print(1)'",
+        "python --version",
+        "node --version",
+        "echo 'print(1)' | python -",
+        "python - < <(echo 'print(1)')",
+        "python script.py <<< 'print(open(\".env\").read())'",
+        "grep x <<< foo",
+        "head <(echo hi)",
+    ):
+        assert command_reads_secrets(command, folder) is False, command
+
+
+def test_interpreter_stdin_stays_a_card_under_yolo(tmp_path):
+    """``/yolo`` does not approve a program on stdin that reads a secret."""
+    from easyagent import turn as turn_mod
+    from easyagent.safety import classify, set_mode
+    from easyagent.store import Store
+    from easyagent.workspace import bot_workspace
+    from easyagent.yolo import _enable, covers
+
+    store = Store(tmp_path / "data")
+    store.ensure()
+    endpoint = store.add_endpoint(name="local", base_url="http://127.0.0.1:9/v1", api_key="")
+    bot = store.add_bot(name="Ada", endpoint_id=endpoint["id"], model=None)
+    set_mode(store, bot["id"], "strict")
+    folder = bot_workspace(store, bot["id"], create=True)
+    _plant(folder)
+    chat = store.create_chat(bot["id"])
+    _enable(store, bot["id"], chat["id"], seconds=3600, idle_seconds=3600)
+    slot = turn_mod.bind(store, chat["id"], bot["id"])
+    slot.cwd = str(folder)
+    slot.store = store
+    secret = (
+        "python - <<< 'print(open(\".env\").read())'",
+        "python - < <(echo 'print(open(\".env\").read())')",
+        "node - <<< 'console.log(require(\"fs\").readFileSync(\".env\",\"utf8\"))'",
+        "ruby <<< 'puts File.read(\".env\")'",
+    )
+    harmless = (
+        "python - <<< 'print(1)'",
+        "node - <<< 'console.log(1)'",
+        "ruby <<< 'puts 1'",
+    )
+    try:
+        for command in secret:
+            request = ToolRequest(kind="shell", command=command)
+            assert command_reads_secrets(command, folder), command
+            verdict = classify(store, request, bot["id"])
+            assert verdict.tier == "ask", (command, verdict.tier, verdict.rule)
+            assert covers(store, bot["id"], request, verdict) is False, command
+        for command in harmless:
+            request = ToolRequest(kind="shell", command=command)
+            assert command_reads_secrets(command, folder) is False, command
+            verdict = classify(store, request, bot["id"])
+            assert verdict.tier == "allow", (command, verdict.tier, verdict.rule)
+    finally:
+        turn_mod._slot.set(None)
+
+
 def test_shell_clusters_ampersand_env_split_and_globs_card(tmp_path):
     folder = tmp_path / "tree"
     folder.mkdir()

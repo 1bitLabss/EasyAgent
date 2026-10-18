@@ -7,6 +7,7 @@ import json
 import os
 import shutil
 import subprocess
+import sys
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -638,7 +639,11 @@ def test_rg_never_opens_a_named_secret(tmp_path, monkeypatch):
     assert "NEEDLE hidden" not in found
     if not used_python and shutil.which("rg") is not None:
         assert "via rg" in found
-    if shutil.which("strace") is None:
+    # openat is a Linux strace check. It still runs on Linux and on macOS when
+    # both strace and rg are installed. Windows has no strace, so it stops here.
+    if sys.platform not in {"linux", "darwin"}:
+        return
+    if shutil.which("strace") is None or shutil.which("rg") is None:
         return
     runner = tmp_path / "search_once.py"
     runner.write_text(

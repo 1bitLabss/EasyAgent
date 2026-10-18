@@ -2302,13 +2302,15 @@ def _fed_script_reads(
 
     Shells and the interpreters that take a program on stdin (``python -``,
     ``node -``, ``ruby``, and the same for perl, php, deno, and bun) are
-    included. The script may be a here-string, a ``< <(...)`` process
+    included. ``awk -f -`` and ``awk -f-`` are the same kind of program:
+    with no captured script they card, and a captured script is scanned.
+    The script may be a here-string, a ``< <(...)`` process
     substitution, the previous stage of a pipe, or a file redirected with
     ``< file``. ``python - <<< 'print(1)'`` and ``python3 < ok.py`` do not
     card. A producer that is not a literal echo or printf does, and so does
     a redirected file that cannot be read, because the script is unknown.
     """
-    seen, _seen_args = _peeled_program(program, args)
+    seen, seen_args = _peeled_program(program, args)
     if not _reads_program_stdin(program, args):
         return False
     bodies, unreadable = _here_strings(stage)
@@ -2325,6 +2327,10 @@ def _fed_script_reads(
         else:
             bodies.append(script)
     if not unreadable and not bodies:
+        # ``python -`` with nothing on stdin is not this gap. ``awk -f -``
+        # is: the program was not captured, so it is not proved.
+        if seen in _AWK_NAMES and _awk_reads_program_stdin(seen_args):
+            return True
         return False
     if unreadable:
         return True
@@ -2433,6 +2439,7 @@ def _stdin_shell(program: str, args: list[str]) -> bool:
 
 
 _STDIN_LANGS = _PYTHONS | frozenset({"perl", "ruby", "node", "nodejs", "php", "bun", "deno"})
+_AWK_NAMES = frozenset({"awk", "gawk", "mawk", "nawk"})
 _PY_VALUE_FLAGS = frozenset({"-W", "-X", "-Q"})
 _NODE_VALUE_FLAGS = frozenset({
     "-r", "--require", "--loader", "--import", "--experimental-loader",
@@ -2475,6 +2482,37 @@ _STDIN_HEREDOC = re.compile(
 )
 
 
+def _awk_reads_program_stdin(args: list[str]) -> bool:
+    """True when ``-f -``, ``-f-``, or ``--file=-`` names stdin as the awk program.
+
+    ``awk -f script.awk`` and ``awk '{print $1}' file`` are a file and an
+    inline program. They are not this form. A valued flag (``-F``, ``-v``,
+    ``-e``) does not hide a later ``-f -``.
+    """
+    valued = {"-e", "--source", "-v", "--assign", "-F", "--field-separator"}
+    index = 0
+    while index < len(args):
+        arg = args[index]
+        if arg in {"-f-", "--file=-"}:
+            return True
+        if arg.startswith("--file=") and arg.split("=", 1)[1] == "-":
+            return True
+        if arg in {"-f", "--file"}:
+            nxt = args[index + 1] if index + 1 < len(args) else ""
+            if nxt == "-":
+                return True
+            index += 2
+            continue
+        if arg in valued:
+            index += 2
+            continue
+        if arg.startswith(("--source=", "--assign=", "--field-separator=", "-v", "-F")):
+            index += 1
+            continue
+        index += 1
+    return False
+
+
 def _reads_program_stdin(program: str, args: list[str]) -> bool:
     """True when this program's source is stdin, not ``-c`` / ``-e`` and not a file."""
     seen, seen_args = _peeled_program(program, args)
@@ -2482,6 +2520,8 @@ def _reads_program_stdin(program: str, args: list[str]) -> bool:
         return False
     if seen in _SHELLS:
         return _shell_reads_stdin(seen_args)
+    if seen in _AWK_NAMES:
+        return _awk_reads_program_stdin(seen_args)
     if seen == "deno":
         return _deno_reads_stdin(seen_args)
     if seen == "bun":
@@ -2571,6 +2611,8 @@ def _stdin_body_reads(program: str, body: str, cwd: Path, depth: int, root: Path
     """The stdin script reads a secret, or it is not on the allow-list."""
     if program in _SHELLS:
         return _command_reads(body, cwd, depth + 1, root=root or cwd)
+    if program in _AWK_NAMES:
+        return _code_body_reads(body, cwd, depth)
     if program in _PYTHONS:
         return _python_stdin_reads(body, cwd, depth)
     if program in _STDIN_LANGS:

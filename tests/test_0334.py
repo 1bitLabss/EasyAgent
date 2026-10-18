@@ -1607,6 +1607,65 @@ def test_interpreter_stdin_stays_a_card_under_yolo(tmp_path):
         turn_mod._slot.set(None)
 
 
+def test_awk_program_stdin_cards_under_yolo(tmp_path):
+    """``awk -f -`` is a program on stdin. ``/yolo`` does not approve it."""
+    from easyagent import turn as turn_mod
+    from easyagent.safety import classify, set_mode
+    from easyagent.store import Store
+    from easyagent.workspace import bot_workspace
+    from easyagent.yolo import _enable, covers
+
+    store = Store(tmp_path / "data")
+    store.ensure()
+    endpoint = store.add_endpoint(name="local", base_url="http://127.0.0.1:9/v1", api_key="")
+    bot = store.add_bot(name="Ada", endpoint_id=endpoint["id"], model=None)
+    set_mode(store, bot["id"], "strict")
+    folder = bot_workspace(store, bot["id"], create=True)
+    _plant(folder)
+    (folder / "ok.awk").write_text("{print $1}\n", encoding="utf-8")
+    (folder / "leak.awk").write_text('BEGIN{getline < ".env"; print}\n', encoding="utf-8")
+    (folder / "ok.py").write_text("print(1)\n", encoding="utf-8")
+    (folder / "leak.py").write_text('print(open(".env").read())\n', encoding="utf-8")
+    chat = store.create_chat(bot["id"])
+    _enable(store, bot["id"], chat["id"], seconds=3600, idle_seconds=3600)
+    slot = turn_mod.bind(store, chat["id"], bot["id"])
+    slot.cwd = str(folder)
+    slot.store = store
+    secret = (
+        "awk -f -",
+        "awk -f-",
+        "awk -F: -f -",
+        "gawk -f -",
+        "mawk --file -",
+        "nawk --file=-",
+        "awk.exe -f -",
+        "command awk -f -",
+        "awk -f - <<< 'BEGIN{getline < \".env\"; print}'",
+        "awk -f - < leak.awk",
+        "echo 'BEGIN{system(\"cat .env\")}' | awk -f -",
+    )
+    harmless = (
+        "awk -f - <<< '{print 1}'",
+        "awk -f - <<< '{print $1}' notes.txt",
+        "awk '{print $1}' notes.txt",
+        "awk -f ok.awk notes.txt",
+        "grep x < notes.txt",
+        "python ok.py < leak.py",
+    )
+    try:
+        for command in secret:
+            request = ToolRequest(kind="shell", command=command)
+            assert command_reads_secrets(command, folder), command
+            verdict = classify(store, request, bot["id"])
+            assert verdict.tier == "ask", (command, verdict.tier, verdict.rule)
+            assert covers(store, bot["id"], request, verdict) is False, command
+        for command in harmless:
+            request = ToolRequest(kind="shell", command=command)
+            assert command_reads_secrets(command, folder) is False, command
+    finally:
+        turn_mod._slot.set(None)
+
+
 def test_redirected_interpreter_file_cards(tmp_path):
     """``python3 < script.py`` is the same program as a here-string. A harmless file runs."""
     folder = tmp_path / "tree"

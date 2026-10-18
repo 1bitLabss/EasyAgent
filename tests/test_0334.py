@@ -1356,6 +1356,35 @@ DEV_YOLO_CARDS = frozenset({
 })
 
 
+def test_here_string_into_a_shell_cards(tmp_path):
+    """``sh <<< 'cat .env'`` is a script. ``grep x <<< foo`` is text."""
+    folder = tmp_path / "tree"
+    folder.mkdir()
+    _plant(folder)
+    scripts = (
+        "cat .env",
+        "cat id_rsa",
+        "cat key_material.txt",
+        "head id_rsa",
+        "cat .npmrc",
+    )
+    for shell in ("sh", "bash", "dash", "zsh"):
+        for script in scripts:
+            assert command_reads_secrets(f"{shell} <<< '{script}'", folder), (shell, script)
+            assert command_reads_secrets(f'{shell} <<< "{script}"', folder), (shell, script)
+            assert command_reads_secrets(f"{shell} -s <<< '{script}'", folder), (shell, script)
+    assert command_reads_secrets("sh -s <<< 'cat id_rsa'", folder)
+    assert command_reads_secrets("bash -s -- <<< 'cat .env'", folder)
+    assert command_reads_secrets("command sh <<< 'cat .env'", folder)
+    assert command_reads_secrets("sh <<< 'echo hi'", folder) is False
+    assert command_reads_secrets("sh <<< 'cat notes.txt'", folder) is False
+    assert command_reads_secrets("grep x <<< foo", folder) is False
+    assert command_reads_secrets("grep x <<< 'hello'", folder) is False
+    assert command_reads_secrets("grep -e x <<< foo", folder) is False
+    assert command_reads_secrets("cat < .env", folder)
+    assert command_reads_secrets("sh <<'EOF'\ncat .env\nEOF", folder)
+
+
 def test_shell_clusters_ampersand_env_split_and_globs_card(tmp_path):
     folder = tmp_path / "tree"
     folder.mkdir()

@@ -2052,6 +2052,110 @@ def _pipe_parts(segment: str) -> list[str]:
     return [part for part in parts if part] or [text.strip()]
 
 
+def _skip_shell_word(text: str, i: int) -> int:
+    """Index just after one shell word. Used to drop a here-string that is not literal."""
+    if i < len(text) and text[i] == "$" and i + 1 < len(text) and text[i + 1] in {"'", '"'}:
+        quote = text[i + 1]
+        i += 2
+        while i < len(text) and text[i] != quote:
+            if text[i] == "\\" and i + 1 < len(text):
+                i += 2
+                continue
+            i += 1
+        return i + 1 if i < len(text) else i
+    if i < len(text) and text[i] in {"'", '"'}:
+        quote = text[i]
+        i += 1
+        while i < len(text) and text[i] != quote:
+            i += 1
+        return i + 1 if i < len(text) else i
+    while i < len(text) and not text[i].isspace() and text[i] not in {"|", "&", ";", "\n", "<", ">"}:
+        i += 1
+    return i
+
+
+def _read_here_word(text: str, i: int) -> tuple[int, str | None] | None:
+    """Parse ``<<<`` at ``i``. The body is None when the word is not a literal.
+
+    None as the whole result means this is not a here-string.
+    """
+    if not text.startswith("<<<", i):
+        return None
+    i += 3
+    while i < len(text) and text[i].isspace():
+        i += 1
+    if i >= len(text) or text[i] in {"|", "&", ";", "\n", "<", ">"}:
+        return i, ""
+    if text[i] in {"$", "`"}:
+        return _skip_shell_word(text, i), None
+    if text[i] in {"'", '"'}:
+        quote = text[i]
+        i += 1
+        buf: list[str] = []
+        while i < len(text) and text[i] != quote:
+            buf.append(text[i])
+            i += 1
+        if i >= len(text):
+            return i, None
+        return i + 1, "".join(buf)
+    buf = []
+    while i < len(text) and not text[i].isspace() and text[i] not in {"|", "&", ";", "\n", "<", ">"}:
+        buf.append(text[i])
+        i += 1
+    return i, "".join(buf)
+
+
+def _here_strings(text: str) -> tuple[list[str], bool]:
+    """Literal here-string bodies, and whether one body could not be read.
+
+    A ``<<<`` inside quotes is text, not a here-string.
+    """
+    bodies: list[str] = []
+    unreadable = False
+    quote = ""
+    i = 0
+    raw = text or ""
+    while i < len(raw):
+        ch = raw[i]
+        if quote:
+            if ch == quote:
+                quote = ""
+            i += 1
+            continue
+        if ch in {"'", '"'}:
+            quote = ch
+            i += 1
+            continue
+        if raw.startswith("<<<", i):
+            got = _read_here_word(raw, i)
+            if got is None:
+                i += 1
+                continue
+            i, body = got
+            if body is None:
+                unreadable = True
+            else:
+                bodies.append(body)
+            continue
+        i += 1
+    return bodies, unreadable
+
+
+def _stdin_shell(program: str, args: list[str]) -> bool:
+    """True when a wrapper's real program is a shell that reads its script from stdin."""
+    seen = program
+    seen_args = args
+    for _ in range(6):
+        if seen not in _PEEL:
+            break
+        rest = _wrapper_tail(seen, seen_args)
+        if not rest:
+            return False
+        seen = _program_name(rest[0])
+        seen_args = rest[1:]
+    return seen in _SHELLS and _shell_reads_stdin(seen_args)
+
+
 def _tokenize(statement: str) -> tuple[list[str], list[str]]:
     words: list[str] = []
     redirects: list[str] = []
@@ -2129,6 +2233,14 @@ def _tokenize(statement: str) -> tuple[list[str], list[str]]:
             continue
         if ch in {"<", ">"}:
             flush()
+            if ch == "<" and text.startswith("<<<", i):
+                # A here-string is stdin text, not a file name and not an argument.
+                got = _read_here_word(text, i)
+                if got is None:
+                    i += 1
+                    continue
+                i, _body = got
+                continue
             op = ch
             if i + 1 < len(text) and text[i + 1] == ch:
                 op = ch + ch
@@ -2184,6 +2296,13 @@ def _pipeline_reads(segment: str, cwd: Path, depth: int, root: Path | None = Non
         if _process_sub_reads(stage, here, depth):
             return True
         program, args = _split_program(words)
+        bodies, unreadable = _here_strings(stage)
+        if _stdin_shell(program, args) and (unreadable or bodies):
+            # sh <<< 'cat .env' runs that word. The same word fed to grep is text.
+            if unreadable or any(
+                _command_reads(body, here, depth + 1, root=root or here) for body in bodies
+            ):
+                return True
         if not program and not args:
             if any(mark in " ".join(words) for mark in ("$(", "${", "`")) and _tree_has_secret(here, recursive=True):
                 return True
@@ -2906,6 +3025,23 @@ def _shell_has_command_flag(args: list[str]) -> bool:
     """Any short cluster containing ``c``, or ``--command``. The inner text is not trusted."""
     code, _files = _shell_inline_pieces(args)
     return code is not None
+
+
+def _shell_reads_stdin(args: list[str]) -> bool:
+    """True when this shell reads its script from stdin.
+
+    ``-c`` supplies the script. ``-s``, or no script file, reads stdin.
+    A here-string on that stdin is the script.
+    """
+    code, files = _shell_inline_pieces(args)
+    if code is not None:
+        return False
+    for arg in args:
+        if arg == "--":
+            break
+        if arg.startswith("-") and not arg.startswith("--") and "s" in arg[1:]:
+            return True
+    return not files
 
 
 def _find_option_blocks(args: list[str]) -> bool:

@@ -219,6 +219,77 @@ def test_a_mid_job_message_is_the_next_user_turn(tmp_path, monkeypatch):
     client.close()
 
 
+def test_dismiss_does_not_replay_the_runaway_card(tmp_path, monkeypatch):
+    """Fail a job, Dismiss, then hello? and you there? each get their own reply."""
+    monkeypatch.setenv("EASYAGENT_MODEL_RETRY_SECONDS", "0")
+
+    async def pause(_seconds):
+        return None
+
+    monkeypatch.setattr("easyagent.retry.pause", pause)
+    phase = {"mode": "fail"}
+
+    async def complete(**kwargs):
+        last = ""
+        for item in reversed(kwargs.get("messages") or []):
+            if item.get("role") == "user":
+                last = item.get("content") or ""
+                break
+        if phase["mode"] == "fail":
+            raise GenerationLimit("repeat")
+        if phase["mode"] == "down":
+            raise ProviderError("All connection attempts failed calling http://127.0.0.1:8080/v1")
+        assert RUNAWAY_TEXT not in last
+        return {"hello?": "Hello. I'm here.", "you there?": "Yes, still here."}.get(last, "ok")
+
+    monkeypatch.setattr("easyagent.llm.complete", complete)
+    app, client, bot, chat = _client(tmp_path)
+    client.patch(f"/api/bots/{bot['id']}", json={"check_enabled": False})
+    patched = client.patch(
+        f"/api/endpoints/{bot['endpoint_id']}",
+        json={"base_url": "http://127.0.0.1:8080/v1"},
+    )
+    assert patched.status_code == 200, patched.text
+    store = app.state.store
+    base = f"/api/bots/{bot['id']}/chats/{chat['id']}"
+
+    failed = client.post(f"{base}/messages", json={"content": "finish the checklist"})
+    assert failed.status_code == 200, failed.text
+    saved = store.get_chat(bot["id"], chat["id"])
+    assert any(item.get("kind") == "resume-offer" and item.get("content") == RUNAWAY_TEXT for item in saved["messages"])
+
+    dismissed = client.post(f"{base}/dismiss")
+    assert dismissed.status_code == 200, dismissed.text
+    saved = store.get_chat(bot["id"], chat["id"])
+    assert not any(item.get("kind") == "resume-offer" or item.get("content") == RUNAWAY_TEXT for item in saved["messages"])
+    assert (saved.get("run") or {}).get("status") == "idle"
+
+    phase["mode"] = "answer"
+    first = client.post(f"{base}/messages", json={"content": "hello?"})
+    assert first.status_code == 200, first.text
+    second = client.post(f"{base}/messages", json={"content": "you there?"})
+    assert second.status_code == 200, second.text
+    saved = store.get_chat(bot["id"], chat["id"])
+    assert not any(item.get("kind") == "resume-offer" or item.get("content") == RUNAWAY_TEXT for item in saved["messages"])
+    hello = [item for item in _texts_after(saved["messages"], "hello?") if item.get("content") == "Hello. I'm here."]
+    there = [item for item in _texts_after(saved["messages"], "you there?") if item.get("content") == "Yes, still here."]
+    assert len(hello) == 1 and len(there) == 1
+    assert hello[0]["id"] != there[0]["id"]
+    assert hello[0].get("kind") != "resume-offer"
+    assert there[0].get("kind") != "resume-offer"
+
+    phase["mode"] = "down"
+    missed = client.post(f"{base}/messages", json={"content": "still down?"})
+    assert missed.status_code == 200, missed.text
+    saved = store.get_chat(bot["id"], chat["id"])
+    fresh = [item for item in _texts_after(saved["messages"], "still down?") if item.get("role") == "assistant"]
+    assert len(fresh) == 1
+    assert fresh[0]["content"] == UNREACHABLE
+    assert fresh[0].get("kind") != "resume-offer"
+    assert fresh[0]["content"] != RUNAWAY_TEXT
+    client.close()
+
+
 def test_a_stale_stop_does_not_cancel_the_next_run(tmp_path, monkeypatch):
     from easyagent import turn as turn_mod
 

@@ -712,6 +712,10 @@ async def _lifespan(app: FastAPI):
         yield
     finally:
         stop.set()
+        from easyagent.hermes_busy import flush_overflow_to_file, flush_pending_to_file
+
+        flush_pending_to_file(app.state.store, reason="shutdown")
+        flush_overflow_to_file(app.state.store, reason="shutdown")
         running = turn_mod.stop_all("the server restarted")
         for worker in running:
             worker.cancel()
@@ -740,9 +744,11 @@ async def _lifespan(app: FastAPI):
 def create_app(data_dir: str | Path | None = None) -> FastAPI:
     store = Store(Path(data_dir) if data_dir is not None else default_data_dir())
     store.ensure()
+    from easyagent.hermes_busy import recover_pending_spool
     from easyagent.yolo import forget_process
 
     forget_process(store)
+    recover_pending_spool(store)
     _settle_abandoned_runs(store)
     app = FastAPI(title="EasyAgent", lifespan=_lifespan)
     app.state.store = store
@@ -1865,18 +1871,28 @@ def create_app(data_dir: str | Path | None = None) -> FastAPI:
     def dismiss_chat(bot_id: str, chat_id: str):
         """Leave the checklist saved and clear the resume card. The job is not started."""
         chat = store.get_chat(bot_id, chat_id)
-        if turn_mod.is_busy(store, chat_id):
+        if turn_mod.is_busy(store, chat_id) and turn_mod.request_in_flight(store, chat_id):
             raise HTTPException(409, "This job is still running. Stop is what cancels it.")
+        from easyagent.generation import RUNAWAY_TEXT
         from easyagent.plan import dismiss_plan
 
         dismiss_plan(store, bot_id, chat_id)
         messages = []
         replaced = False
         for message in chat.get("messages") or []:
-            if message.get("kind") == "resume-offer" and not replaced:
+            if not isinstance(message, dict):
+                messages.append(message)
+                continue
+            stale = message.get("kind") == "resume-offer" or (
+                message.get("role") == "assistant" and message.get("content") == RUNAWAY_TEXT
+            )
+            if stale:
                 message = dict(message)
                 message["kind"] = "resume-dismissed"
                 message["content"] = "Dismissed. The checklist is still saved."
+                message.pop("live", None)
+                message.pop("error", None)
+                message.pop("interrupted", None)
                 replaced = True
             messages.append(message)
         if not replaced:
@@ -1892,6 +1908,13 @@ def create_app(data_dir: str | Path | None = None) -> FastAPI:
         _apply_run(chat, status="idle")
         chat["updated_at"] = now_iso()
         store.save_chat(chat)
+        slot = turn_mod.slot_for(store, chat_id)
+        slot.sealed = False
+        slot.user_stop = False
+        slot.deliver_queue = False
+        slot.cancel = asyncio.Event()
+        if not turn_mod.request_in_flight(store, chat_id):
+            turn_mod.clear_busy(store, chat_id)
         return _public_chat(store, chat)
 
     @app.post("/api/bots/{bot_id}/chats/{chat_id}/ask")
@@ -4187,9 +4210,15 @@ def _force_clear_running(store: Store, bot_id: str, chat_id: str, reason: str) -
 def _same_stored_answer(message: dict, text: str) -> bool:
     if not isinstance(message, dict) or message.get("role") != "assistant":
         return False
-    if message.get("kind") in {"status", "pickup", "resume-note", "resume-offer", "activity", "connection"}:
+    if message.get("kind") in {
+        "status", "pickup", "resume-note", "resume-offer", "resume-dismissed", "activity", "connection",
+    }:
         return False
     body = " ".join(str(message.get("content") or "").split())
+    from easyagent.generation import RUNAWAY_TEXT
+
+    if body == RUNAWAY_TEXT:
+        return False
     return bool(body) and body == text and not body.startswith("Stopped:")
 
 
@@ -4520,6 +4549,9 @@ async def _finish_turn(store: Store, bot_id: str, chat_id: str) -> None:
             slot.user_stop = False
             release_hold_for_send(store, bot_id, chat_id)
             _force_clear_running(store, bot_id, chat_id, "you pressed Stop")
+        from easyagent.hermes_busy import handoff_leftover_steer
+
+        handoff_leftover_steer(store, bot_id, chat_id)
         if _run_paused(store, bot_id, chat_id) and not slot.deliver_queue:
             turn_mod.clear_busy(store, chat_id)
             return
@@ -4554,11 +4586,9 @@ async def _answer_while_busy(
     if outcome.get("refused"):
         raise HTTPException(429, outcome.get("text") or "The queue cannot take another message. Nothing was saved.")
     if not outcome.get("duplicate"):
-        try:
-            bot = store.get_bot(bot_id)
-        except StoreError:
-            bot = None
-        turn_mod.redirect_model(store, chat_id)
+        from easyagent.hermes_busy import _hm_handle_running_session_message
+
+        _hm_handle_running_session_message(store, bot_id, chat_id, content)
     public = _public_chat(store, store.get_chat(bot_id, chat_id))
     run = public.get("run") if isinstance(public.get("run"), dict) else {}
     text = outcome["text"]
@@ -5149,6 +5179,24 @@ def _latest_person_index(messages: list) -> int:
     return found
 
 
+def _stale_stop_closed(messages: list) -> bool:
+    """A dismissed runaway card already sits before the newest person line.
+
+    A later message is its own turn. It must not grow another copy of that card.
+    A live resume-offer is still this job's own stop, and stays a card.
+    """
+    latest = _latest_person_index(messages)
+    if latest < 0:
+        return False
+    for message in messages[:latest]:
+        if not isinstance(message, dict) or message.get("role") != "assistant":
+            continue
+        kind = message.get("kind") or ""
+        if kind == "resume-dismissed":
+            return True
+    return False
+
+
 def _follows_latest_person(messages: list, row: dict | None) -> bool:
     """A reply for this turn sits after the newest user line. An older error does not."""
     if row is None:
@@ -5733,7 +5781,9 @@ async def _reply_json(store: Store, bot_id: str, chat_id: str, *, continue_run: 
     except ToolError as exc:
         return _append_error(store, bot_id, chat_id, str(exc))
     except GenerationLimit as exc:
-        if getattr(exc, "reason", "") == "first_token":
+        if getattr(exc, "reason", "") == "first_token" or _stale_stop_closed(
+            store.get_chat(bot_id, chat_id).get("messages") or []
+        ):
             return _append_error(store, bot_id, chat_id, _silence_text(store, bot_id))
         return _pause_for_runaway(store, bot_id, chat_id)
     return await _finish_and_maybe_ask(
@@ -5948,7 +5998,8 @@ async def _stream_reply(
         if emit_done:
             yield _sse({"type": "done", "chat": result["chat"]})
     except GenerationLimit as exc:
-        if getattr(exc, "reason", "") == "first_token":
+        closed = _stale_stop_closed(store.get_chat(bot_id, chat_id).get("messages") or [])
+        if getattr(exc, "reason", "") == "first_token" or closed:
             failed = _append_error(store, bot_id, chat_id, _silence_text(store, bot_id))
             yield _sse({"type": "error", "detail": failed["reply"], "chat": failed["chat"]})
             return

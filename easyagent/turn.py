@@ -47,6 +47,18 @@ class Slot:
         self.claimed_at = 0.0
         self.child_tasks: list = []
         self.child_procs: list = []
+        # Hermes interrupt_control fields. The queue file is the durable FIFO;
+        # these hold only the in-flight steer and redirect for this turn.
+        self._pending_steer: str | None = None
+        self._pending_steer_lock = threading.Lock()
+        self._pending_redirect: str | None = None
+        self._pending_redirect_lock = threading.Lock()
+        self._interrupt_requested = False
+        self._interrupt_message: str | None = None
+        self._executing_tools = False
+        self._model_request_active = threading.Event()
+        self._turn_user_intervened = False
+        self._supports_active_turn_redirect = True
 
 
 _GUARD = threading.Lock()

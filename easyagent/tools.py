@@ -7778,9 +7778,9 @@ async def run_turn(
 
             note_new_generation(store, bot_id, chat_id)
         if store is not None and bot_id and chat_id:
-            from easyagent.plan import steer_into
+            from easyagent.hermes_busy import prepare_iteration
 
-            steer_into(store, bot_id, chat_id, working)
+            prepare_iteration(store, bot_id, chat_id, working)
         stalled = honesty.poll()
         if stalled:
             for event in close(stalled):
@@ -7820,6 +7820,10 @@ async def run_turn(
             held_answer = ""
             return held
 
+        model_slot = turn_mod.current_slot()
+        if model_slot is not None:
+            model_slot._executing_tools = False
+            model_slot._model_request_active.set()
         try:
             async for kind, piece in _pull_model(
                 stream=stream,
@@ -7905,6 +7909,10 @@ async def run_turn(
                 for event in _partial_stream(text_bits):
                     yield event
                 raise
+        finally:
+            if model_slot is not None:
+                model_slot._model_request_active.clear()
+                model_slot._executing_tools = True
         raw_text = "".join(text_bits)
         hidden, answer = llm.peel_thinking(raw_text)
         if hidden:

@@ -16,7 +16,16 @@ from easyagent.skills import parse_skill_document, render_skill, slugify
 
 _SKILL_BYTES = 64 * 1024
 _PASSWORD_LINE = re.compile(r"(?im)^[^\n]*password\s*:")
-_TOOL_FENCE = re.compile(r"(?i)```(?:shell|files|terminal|memory)\b|<tool_call\b")
+# Action fences the tool parser runs. ```text and ```python are not actions.
+_ACTION_FENCES = (
+    "bash", "shell", "terminal", "files", "patch", "search_files", "search",
+    "ssh", "windows", "project", "memory", "history", "finish", "react",
+    "routine", "browser", "fetch", "research", "mcp", "bridge", "plan",
+    "delegate", "skill", "tool_error", "question", "helper",
+)
+_TOOL_FENCE = re.compile(
+    r"(?i)```(?:" + "|".join(_ACTION_FENCES) + r")\b|<tool_call\b|<function_calls\b|<invoke\b"
+)
 
 
 class SkillError(Exception):

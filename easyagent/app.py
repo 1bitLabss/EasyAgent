@@ -4268,7 +4268,8 @@ def _pause_for_runaway(store: Store, bot_id: str, chat_id: str) -> dict:
     target = None
     for message in reversed(messages):
         if isinstance(message, dict) and message.get("role") == "assistant" and message.get("live"):
-            target = message
+            if _follows_latest_person(messages, message):
+                target = message
             break
     if target is None:
         target = {"id": new_id(), "role": "assistant", "created_at": now_iso()}
@@ -5120,6 +5121,41 @@ def _stick_turn_notes(store: Store, chat: dict) -> None:
     end_turn_checks()
 
 
+SILENCE_TEXT = "The model sent nothing for 2 minutes."
+
+
+def _silence_text(store: Store, bot_id: str) -> str:
+    """No token arrived. An unreachable server keeps the connection sentence."""
+    if retry.saw_unreachable():
+        try:
+            endpoint = _require_endpoint(store, bot_id)
+        except HTTPException:
+            return SILENCE_TEXT
+        return retry.unreachable_text(endpoint.get("base_url") or "")
+    return SILENCE_TEXT
+
+
+def _latest_person_index(messages: list) -> int:
+    found = -1
+    for index, message in enumerate(messages or []):
+        if isinstance(message, dict) and message.get("role") == "user" and not message.get("harness"):
+            found = index
+    return found
+
+
+def _follows_latest_person(messages: list, row: dict | None) -> bool:
+    """A reply for this turn sits after the newest user line. An older error does not."""
+    if row is None:
+        return False
+    start = _latest_person_index(messages)
+    if start < 0:
+        return True
+    for index, message in enumerate(messages or []):
+        if message is row:
+            return index > start
+    return False
+
+
 def _append_error(store: Store, bot_id: str, chat_id: str, detail: str) -> dict:
     """Keep every stored turn and append the error. The transcript is not shortened.
 
@@ -5132,9 +5168,10 @@ def _append_error(store: Store, bot_id: str, chat_id: str, detail: str) -> dict:
     cleaned = " ".join((redact(store, detail) or "").split())
     harness = retry.is_unreachable_message(cleaned)
     malformed = llm.is_resumable_model_error(cleaned)
+    plain = cleaned == SILENCE_TEXT
     if malformed:
         shown = llm.resumable_shown(cleaned)
-    elif harness:
+    elif harness or plain:
         shown = cleaned
     else:
         shown = _stopped_text(cleaned)
@@ -5149,11 +5186,13 @@ def _append_error(store: Store, bot_id: str, chat_id: str, detail: str) -> dict:
             message["error"] = True
             if harness:
                 message["kind"] = "connection"
+            elif plain:
+                message.pop("kind", None)
 
-    if chat.get("messages") and chat["messages"][-1].get("live"):
+    if chat.get("messages") and chat["messages"][-1].get("live") and _follows_latest_person(chat["messages"], chat["messages"][-1]):
         last = chat["messages"][-1]
         last.pop("live", None)
-        if harness or not (last.get("content") or "").strip():
+        if harness or plain or not (last.get("content") or "").strip():
             _stamp(last)
             _record_turn_meter(chat, detail=detail)
             stats = _persist_context(store, chat)
@@ -5541,7 +5580,11 @@ def _finish_reply(
     _drop_activity(chat)
     messages = chat.setdefault("messages", [])
     already = _stored_resume_answer(messages, visible)
+    if already is not None and not _follows_latest_person(messages, already):
+        already = None
     replacing = bool(messages and messages[-1].get("live") and messages[-1].get("role") == "assistant")
+    if replacing and not _follows_latest_person(messages, messages[-1]):
+        replacing = False
     if already is not None:
         if replacing and messages[-1] is not already:
             messages.pop()
@@ -5683,7 +5726,9 @@ async def _reply_json(store: Store, bot_id: str, chat_id: str, *, continue_run: 
         return _append_error(store, bot_id, chat_id, str(exc))
     except ToolError as exc:
         return _append_error(store, bot_id, chat_id, str(exc))
-    except GenerationLimit:
+    except GenerationLimit as exc:
+        if getattr(exc, "reason", "") == "first_token":
+            return _append_error(store, bot_id, chat_id, _silence_text(store, bot_id))
         return _pause_for_runaway(store, bot_id, chat_id)
     return await _finish_and_maybe_ask(
         store,
@@ -5896,7 +5941,11 @@ async def _stream_reply(
                 pass
         if emit_done:
             yield _sse({"type": "done", "chat": result["chat"]})
-    except GenerationLimit:
+    except GenerationLimit as exc:
+        if getattr(exc, "reason", "") == "first_token":
+            failed = _append_error(store, bot_id, chat_id, _silence_text(store, bot_id))
+            yield _sse({"type": "error", "detail": failed["reply"], "chat": failed["chat"]})
+            return
         saved = _pause_for_runaway(store, bot_id, chat_id)
         yield _sse({"type": "done", "chat": saved["chat"]})
         return

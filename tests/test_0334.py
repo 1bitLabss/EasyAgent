@@ -1713,6 +1713,83 @@ def test_redirected_interpreter_file_stays_a_card_under_yolo(tmp_path):
         turn_mod._slot.set(None)
 
 
+def test_redirected_file_still_cards_beside_other_redirections(tmp_path):
+    """``2>&1``, ``2>/dev/null``, and ``>out`` do not hide ``< script.py``."""
+    from easyagent import turn as turn_mod
+    from easyagent.safety import classify, set_mode
+    from easyagent.store import Store
+    from easyagent.workspace import bot_workspace
+    from easyagent.yolo import _enable, covers
+
+    store = Store(tmp_path / "data")
+    store.ensure()
+    endpoint = store.add_endpoint(name="local", base_url="http://127.0.0.1:9/v1", api_key="")
+    bot = store.add_bot(name="Ada", endpoint_id=endpoint["id"], model=None)
+    folder = bot_workspace(store, bot["id"], create=True)
+    _plant(folder)
+    (folder / "leak.py").write_text('print(open(".env").read())\n', encoding="utf-8")
+    (folder / "ok.py").write_text("print(1)\n", encoding="utf-8")
+    (folder / "leak.js").write_text('console.log(require("fs").readFileSync(".env","utf8"))\n', encoding="utf-8")
+    (folder / "ok.js").write_text("console.log(1)\n", encoding="utf-8")
+    (folder / "leak.rb").write_text('puts File.read(".env")\n', encoding="utf-8")
+    (folder / "ok.rb").write_text("puts 1\n", encoding="utf-8")
+    (folder / "leak.pl").write_text('open F, ".env"; print <F>\n', encoding="utf-8")
+    (folder / "ok.pl").write_text("print 1\n", encoding="utf-8")
+    (folder / "leak.php").write_text('<?php echo file_get_contents(".env");\n', encoding="utf-8")
+    (folder / "ok.php").write_text("<?php echo 1;\n", encoding="utf-8")
+    (folder / "leak.sh").write_text("cat .env\n", encoding="utf-8")
+    (folder / "ok.sh").write_text("echo hi\n", encoding="utf-8")
+    secret = (
+        "python3 < leak.py 2>&1",
+        "python3 < leak.py 2>/dev/null",
+        "python3 < leak.py >out",
+        "python < leak.py 2>&1",
+        "node < leak.js 2>&1",
+        "node < leak.js 2>/dev/null",
+        "ruby < leak.rb 2>&1",
+        "perl < leak.pl 2>&1",
+        "php < leak.php 2>&1",
+        "sh < leak.sh 2>&1",
+        "bash < leak.sh 2>/dev/null",
+        "dash < leak.sh >out",
+        "bash -s < leak.sh 2>&1",
+    )
+    harmless = (
+        "python3 < ok.py 2>&1",
+        "node < ok.js 2>/dev/null",
+        "ruby < ok.rb >out",
+        "perl < ok.pl 2>&1",
+        "php < ok.php 2>&1",
+        "sh < ok.sh 2>&1",
+        "bash < ok.sh 2>/dev/null",
+        "dash < ok.sh >out",
+        "grep x < notes.txt 2>&1",
+    )
+    for command in secret:
+        assert command_reads_secrets(command, folder), command
+    for command in harmless:
+        assert command_reads_secrets(command, folder) is False, command
+    chat = store.create_chat(bot["id"])
+    _enable(store, bot["id"], chat["id"], seconds=3600, idle_seconds=3600)
+    slot = turn_mod.bind(store, chat["id"], bot["id"])
+    slot.cwd = str(folder)
+    slot.store = store
+    try:
+        for mode in ("careful", "strict"):
+            set_mode(store, bot["id"], mode)
+            for command in ("python3 < leak.py 2>&1", "sh < leak.sh 2>/dev/null", "dash < leak.sh >out"):
+                request = ToolRequest(kind="shell", command=command)
+                verdict = classify(store, request, bot["id"])
+                assert verdict.tier == "ask", (mode, command, verdict.tier, verdict.rule)
+                assert covers(store, bot["id"], request, verdict) is False, (mode, command)
+            if mode == "careful":
+                request = ToolRequest(kind="shell", command="python3 < ok.py 2>&1")
+                verdict = classify(store, request, bot["id"])
+                assert verdict.tier == "allow", (mode, verdict.tier, verdict.rule)
+    finally:
+        turn_mod._slot.set(None)
+
+
 def test_shell_clusters_ampersand_env_split_and_globs_card(tmp_path):
     folder = tmp_path / "tree"
     folder.mkdir()

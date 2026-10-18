@@ -2739,7 +2739,14 @@ def _tokenize(statement: str) -> tuple[list[str], list[str]]:
             i += 1
             continue
         if ch in {"<", ">"}:
-            flush()
+            # `2>&1`, `2>/dev/null`, `1>out`, and `&>out` are redirections.
+            # The digit or `&` is not an argument. Left as a word, it looks
+            # like a script file and `< script.py` is never sniffed.
+            prefix = "".join(buf)
+            if prefix.isdigit() or prefix == "&":
+                buf.clear()
+            else:
+                flush()
             if ch == "<" and text.startswith("<<<", i):
                 # A here-string is stdin text, not a file name and not an argument.
                 got = _read_here_word(text, i)

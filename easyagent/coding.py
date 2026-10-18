@@ -411,10 +411,25 @@ def _system_dir(path: Path) -> bool:
     return any(text == prefix or text.startswith(prefix + "/") for prefix in _SYSTEM_ROOTS)
 
 
+def _whole_file_secret(path: Path) -> bool:
+    """The shell grep gate reads the whole file. The first 8 KB is not enough."""
+    from easyagent.scriptgate import _stream_secret
+
+    return _stream_secret(path)
+
+
+def _shown_match(path: Path, number: int, line: str) -> str:
+    """Scrub the full line, then clip it. Clipping first can cut a token in half."""
+    from easyagent.journal import redact_leaks
+
+    text = redact_leaks(line or "").replace("\r", "").rstrip("\n")
+    return f"{path}:{number}:{text[:400]}"
+
+
 def _skip_secret(path: Path, skip) -> bool:
     from easyagent.safety import secret_file
 
-    if secret_file(path) or _system_dir(path):
+    if secret_file(path) or _system_dir(path) or _whole_file_secret(path):
         return True
     if skip is not None:
         try:
@@ -472,7 +487,7 @@ def _python_search(root: Path, pattern: str, file_glob: str, limit: int, skip) -
                 continue
             for number, line in enumerate(text.splitlines(), start=1):
                 if regex.search(line):
-                    matches.append(f"{file_path}:{number}:{line[:400]}")
+                    matches.append(_shown_match(file_path, number, line))
                     if len(matches) >= limit:
                         return matches, note
         if note:
@@ -496,7 +511,7 @@ def _content_secret_globs(root: Path) -> list[str]:
 
     Name-classified files are already excluded and are not opened here.
     """
-    from easyagent.safety import _name_secret, sniff_secret
+    from easyagent.safety import _name_secret
 
     found: list[str] = []
     seen = 0
@@ -518,7 +533,7 @@ def _content_secret_globs(root: Path) -> list[str]:
                     continue
             except Exception:
                 continue
-            if sniff_secret(path):
+            if _whole_file_secret(path):
                 try:
                     rel = path.resolve().relative_to(root.resolve()).as_posix()
                 except (OSError, ValueError):
@@ -578,7 +593,7 @@ def _rg_search(root: Path, pattern: str, file_glob: str, limit: int, skip) -> li
             file_path = root / file_path
         if file_path.is_symlink() or not _within(root, file_path) or _skip_secret(file_path, skip):
             continue
-        matches.append(f"{file_path}:{line_number}:{line_text.rstrip()[:400]}")
+        matches.append(_shown_match(file_path, int(line_number or 0), line_text))
         if len(matches) >= limit:
             break
     return matches

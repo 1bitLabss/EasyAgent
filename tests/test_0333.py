@@ -648,6 +648,44 @@ def test_search_drops_secret_files_and_stops(tmp_path, monkeypatch):
     assert "5 files" in stopped
 
 
+def test_search_does_not_print_a_key_buried_past_the_head(tmp_path, monkeypatch):
+    """A private key past the first 8 KB used to be printed. The shell gate reads the whole file."""
+    import shutil
+
+    import easyagent.coding as coding
+    from easyagent.coding import search_tree
+    from easyagent.safety import sniff_secret
+
+    folder = tmp_path / "tree"
+    folder.mkdir()
+    buried = folder / "buried.txt"
+    buried.write_text(
+        ("# pad\n" * 2000)
+        + "ordinary-marker\n"
+        + "-----BEGIN OPENSSH PRIVATE KEY-----\n"
+        + "DEEPKEYMATERIAL\n"
+        + "-----END OPENSSH PRIVATE KEY-----\n",
+        encoding="utf-8",
+    )
+    assert buried.stat().st_size > 8192
+    assert sniff_secret(buried) is None
+    (folder / "plain.txt").write_text("visible-note\npassword=hunter2PASS\n", encoding="utf-8")
+
+    def check(found: str) -> None:
+        assert "visible-note" in found, found
+        assert "DEEPKEYMATERIAL" not in found, found
+        assert "PRIVATE KEY" not in found, found
+        assert "ordinary-marker" not in found, found
+        assert "hunter2PASS" not in found, found
+        assert "[redacted]" in found, found
+
+    monkeypatch.setattr(coding.shutil, "which", lambda _name: None)
+    check(search_tree(folder, "DEEPKEYMATERIAL|ordinary-marker|visible-note|password"))
+    monkeypatch.undo()
+    if shutil.which("rg"):
+        check(search_tree(folder, "DEEPKEYMATERIAL|ordinary-marker|visible-note|password"))
+
+
 def test_a_secret_read_still_cards_and_search_of_root_does_not_run(tmp_path):
     from easyagent import turn as turn_mod
     from easyagent.safety import classify

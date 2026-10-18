@@ -243,6 +243,7 @@ def test_windows_powershell_utf16_and_a_quiet_workdir_still_name_the_folder(tmp_
     def fake_popen(args, **kwargs):
         seen["text"] = kwargs.get("text")
         seen["cwd"] = kwargs.get("cwd")
+        seen["args"] = args
         return Proc(3, "bye".encode("utf-16-le"))
 
     monkeypatch.setattr(sys, "platform", "win32")
@@ -255,15 +256,39 @@ def test_windows_powershell_utf16_and_a_quiet_workdir_still_name_the_folder(tmp_
         assert "exit code 3" in text
         assert str(folder / "sub") in text
         assert seen["text"] is False
-        assert seen["cwd"] == str(folder / "sub") or str((folder / "sub").resolve()) in str(seen["cwd"])
+        sub = str(folder / "sub")
+        assert seen["cwd"] == sub or str((folder / "sub").resolve()) in str(seen["cwd"])
+        # The process starts in sub. A cwd line in the report is not enough.
+        command = seen["args"][-1]
+        assert "Set-Location -LiteralPath" in command
+        assert sub in command or str((folder / "sub").resolve()) in command
+        assert "echo bye; exit 3" in command
 
         def quiet_popen(args, **kwargs):
+            seen["cwd"] = kwargs.get("cwd")
+            seen["args"] = args
             return Proc(0, b"")
 
         monkeypatch.setattr(subprocess, "Popen", quiet_popen)
         quiet = _run_shell(store, "echo ok", workdir="sub")
         assert "command produced no output, exit code 0" in quiet
-        assert str(folder / "sub") in quiet
+        assert sub in quiet
+        assert "Set-Location -LiteralPath" in seen["args"][-1]
+        assert sub in seen["args"][-1] or str((folder / "sub").resolve()) in seen["args"][-1]
+
+        calls = {"n": 0}
+
+        def counting_popen(args, **kwargs):
+            calls["n"] += 1
+            return Proc(0, b"")
+
+        secret = folder / ".ssh"
+        secret.mkdir()
+        monkeypatch.setattr(subprocess, "Popen", counting_popen)
+        with pytest.raises(ToolError) as refused:
+            _run_shell(store, "echo ok", workdir=".ssh")
+        assert "secret folder" in str(refused.value)
+        assert calls["n"] == 0
     finally:
         turn_mod._slot.set(None)
 

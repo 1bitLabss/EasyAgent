@@ -2312,6 +2312,17 @@ def _windows_powershell_argv(command: str) -> list[str]:
     return ["powershell.exe", "-NoProfile", "-NonInteractive", "-Command", _powershell_command(command)]
 
 
+def _powershell_in(folder: str, command: str) -> str:
+    """Run command after moving into folder.
+
+    powershell.exe does not keep the directory CreateProcess was given, so the
+    process working directory is Set-Location, not only the cwd line in the
+    report. Safety already judged the command without this prefix.
+    """
+    literal = _process_cwd(folder).replace("'", "''")
+    return f"Set-Location -LiteralPath '{literal}'; {command}"
+
+
 def _shell_invocation(command: str) -> tuple[object, bool]:
     """(argv, shell). On Windows the command is one PowerShell -Command argument.
 
@@ -2545,16 +2556,20 @@ def _run_shell(store: Store, command: str, *, timeout: int = -1, workdir: str = 
         raise ToolError(mode.get("reason") or "The restricted-token fallback did not start. The command was not run.")
     notice = mode.get("notice") or ""
     env = scrub_env(store, turn_mod.tool_env())
+    # The judged text stays as the model wrote it. Only the process moves.
+    launch = text
+    if sys.platform == "win32" and (workdir or "").strip():
+        launch = _powershell_in(cwd_text, text)
     proc = None
     if mode.get("contained"):
         try:
-            proc = popen_contained(store, bot_id or None, text, env, cwd_text)
+            proc = popen_contained(store, bot_id or None, launch, env, cwd_text)
         except (OSError, subprocess.SubprocessError, RuntimeError, ValueError) as exc:
             from easyagent.sandbox import launch_failure
 
             raise ToolError(launch_failure(exc)) from exc
     if proc is None:
-        argv, use_shell = _shell_invocation(text)
+        argv, use_shell = _shell_invocation(launch)
         try:
             proc = subprocess.Popen(
                 argv,
@@ -7207,6 +7222,12 @@ async def run_turn(
             if request.kind == "files" and request.action in {"read", "patch"}:
                 continue
             if near_keys(key, old_key):
+                # The same words in another folder are a different command.
+                # Timeout and the command text stay in the signature; workdir
+                # is not part of arg_key, so a second echo in `sub` was skipped.
+                previous = str(old_sig[-1] or "") if old_sig else ""
+                if request.kind == "shell" and norm_arg(request.workdir or "") != norm_arg(previous):
+                    continue
                 return True
         return False
 

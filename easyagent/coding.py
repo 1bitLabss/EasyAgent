@@ -575,11 +575,13 @@ def _rg_search(root: Path, pattern: str, file_glob: str, limit: int, skip) -> li
     import json
 
     matches: list[str] = []
+    saw_json = False
     for line in (proc.stdout or "").splitlines():
         try:
             event = json.loads(line)
         except json.JSONDecodeError:
             continue
+        saw_json = True
         if event.get("type") != "match":
             continue
         data = event.get("data") or {}
@@ -596,6 +598,10 @@ def _rg_search(root: Path, pattern: str, file_glob: str, limit: int, skip) -> li
         matches.append(_shown_match(file_path, int(line_number or 0), line_text))
         if len(matches) >= limit:
             break
+    # ripgrep --json always writes a summary event, including when nothing matches.
+    # Empty stdout is some other program named rg. The Python walk is the fallback.
+    if not saw_json:
+        return None
     return matches
 
 

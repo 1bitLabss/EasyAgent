@@ -605,7 +605,7 @@ def test_a_one_letter_typo_does_not_patch(tmp_path):
     assert path.read_bytes() == original
 
 
-def test_rg_never_opens_a_named_secret(tmp_path):
+def test_rg_never_opens_a_named_secret(tmp_path, monkeypatch):
     from easyagent.coding import search_tree
 
     folder = tmp_path.parent / f"ea-rg-{tmp_path.name}"
@@ -616,10 +616,19 @@ def test_rg_never_opens_a_named_secret(tmp_path):
     nested.mkdir(parents=True)
     (nested / "index.js").write_text("NEEDLE hidden\n", encoding="utf-8")
     found = search_tree(folder, "NEEDLE")
+    used_python = False
+    if "NEEDLE line" not in found:
+        import easyagent.coding as coding
+
+        # rg is absent, or the program on PATH is not ripgrep. The Python walk
+        # is the result that has to find the ordinary line and skip the key.
+        monkeypatch.setattr(coding.shutil, "which", lambda _name: None)
+        found = search_tree(folder, "NEEDLE")
+        used_python = True
     assert "NEEDLE line" in found
     assert "KEYBODYXYZ" not in found
     assert "NEEDLE hidden" not in found
-    if shutil.which("rg") is not None:
+    if not used_python and shutil.which("rg") is not None:
         assert "via rg" in found
     if shutil.which("strace") is None:
         return

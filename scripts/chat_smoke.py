@@ -242,14 +242,12 @@ def main() -> int:
         messages = []
     last = messages[-1] if messages else {}
     print("last message:", json.dumps({k: last.get(k) for k in ("role", "content")})[:400], flush=True)
+    # Mid-job lines stay in the transcript and are marked seen or answered.
+    # The separate "Picked up your message" row is gone; one Working line replaced it.
     folded = []
     for text, _code, _body in sent:
         row = next((item for item in messages if item.get("role") == "user" and item.get("content") == text), None)
-        pickup = any(
-            item.get("kind") == "pickup" and item.get("about") == (row or {}).get("id")
-            for item in messages
-        )
-        folded.append(bool(row) and row.get("chip") in {"seen", "answered"} and pickup)
+        folded.append(bool(row) and row.get("chip") in {"seen", "answered"})
     ok = (
         status == 200
         and not problems
@@ -261,6 +259,14 @@ def main() -> int:
     if not ok:
         for p in problems:
             print("problem event:", json.dumps(p)[:600])
+        print(
+            "gate:",
+            f"http={status}",
+            f"done={'done' in kinds}",
+            f"last={last.get('role')}",
+            f"reply={REPLY in str(last.get('content') or '')}",
+            f"chips={folded}",
+        )
         print("FAIL: no real assistant reply")
         return 1
     print("PASS: real assistant reply received")

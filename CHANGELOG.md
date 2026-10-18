@@ -1,5 +1,8 @@
 # Changelog
 
+## 0.3.44
+- The installed-app chat gate no longer expects a separate "Picked up your message" row. A message sent during a job stays in the transcript and is marked seen or answered, and the reply is still the model's answer.
+
 ## 0.3.43
 - A message sent while a job is running is stored at once and stays visible. It is folded into the next model step. If that cannot happen, it runs after this turn, after Stop, after an error, or after a restart.
 - The busy status is one line, rewritten in place. Retry is hidden when the last turn already has a reply. Otherwise it resends the last unanswered message. A real failure is still an error.

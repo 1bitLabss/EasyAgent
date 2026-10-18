@@ -94,8 +94,15 @@ def slot_for(store, chat_id: str) -> Slot:
 
 
 def cancelled() -> bool:
+    """True when this turn was stopped. A finished turn's flag does not cancel a later one."""
     event = _cancel.get()
-    return bool(event is not None and event.is_set())
+    if event is None or not event.is_set():
+        return False
+    slot = _slot.get()
+    if slot is None or slot.cancel is not event:
+        return False
+    worker = slot.worker
+    return worker is not None and not worker.done()
 
 
 def raise_if_cancelled() -> None:
@@ -114,8 +121,17 @@ def stop_process(proc: subprocess.Popen | None) -> None:
         if proc.poll() is None:
             proc.kill()
         return
+    pid = getattr(proc, "pid", None)
+    if not isinstance(pid, int):
+        kill = getattr(proc, "kill", None)
+        if callable(kill):
+            try:
+                kill()
+            except Exception:
+                return
+        return
     try:
-        os.killpg(proc.pid, signal.SIGKILL)
+        os.killpg(pid, signal.SIGKILL)
     except OSError:
         proc.kill()
 

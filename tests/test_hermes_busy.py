@@ -43,6 +43,8 @@ def test_redirect_during_a_command_does_not_cancel(tmp_path):
     assert slot.user_stop is False
     assert "change the task" in (slot._pending_steer or "")
     assert slot._pending_redirect is None
+    slot.proc = None
+    slot.client = None
     client.close()
 
 
@@ -61,6 +63,7 @@ def test_redirect_aborts_only_the_model_request(tmp_path):
     assert slot.user_stop is False
     assert slot.proc is None
     assert slot._pending_redirect == "hello?"
+    slot.client = None
     client.close()
 
 

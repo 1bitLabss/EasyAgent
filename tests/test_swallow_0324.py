@@ -191,15 +191,16 @@ def test_stop_keeps_queued_lines_for_the_next_turn(tmp_path, monkeypatch):
     assert stopped.status_code == 200
     users = [item for item in stopped.json()["messages"] if item.get("role") == "user"]
     assert [item["content"] for item in users] == ["alpha-queued", "beta-queued"]
-    assert [item["chip"] for item in users] == ["queued", "queued"]
+    assert [item["chip"] for item in users] == ["answered", "answered"]
     assert asyncio.run(kick(store)) == 0
-    assert [item["content"] for item in queued_items(store, bot["id"], chat["id"])] == ["alpha-queued", "beta-queued"]
-    sent = client.post(url, json={"content": "gamma-now"})
-    assert sent.status_code == 200, sent.text
+    assert queued_items(store, bot["id"], chat["id"]) == []
     blobs = [json.dumps(batch) for batch in seen]
     first = next(blob for blob in blobs if "alpha-queued" in blob)
     assert first.index("alpha-queued") < first.index("beta-queued")
     assert "gamma-now" not in first
+    sent = client.post(url, json={"content": "gamma-now"})
+    assert sent.status_code == 200, sent.text
+    blobs = [json.dumps(batch) for batch in seen]
     gamma_at = next(index for index, blob in enumerate(blobs) if "gamma-now" in blob)
     assert blobs.index(first) < gamma_at
     saved = store.get_chat(bot["id"], chat["id"])

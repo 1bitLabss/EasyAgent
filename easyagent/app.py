@@ -5651,8 +5651,6 @@ def _finish_reply(
     _drop_activity(chat)
     messages = chat.setdefault("messages", [])
     already = _stored_resume_answer(messages, visible)
-    if already is not None and not _follows_latest_person(messages, already):
-        already = None
     replacing = bool(messages and messages[-1].get("live") and messages[-1].get("role") == "assistant")
     if replacing and not _follows_latest_person(messages, messages[-1]):
         replacing = False

@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.3.41
+- A Windows command with a workdir starts in that folder. The same words run again in another folder still run. PowerShell is moved with Set-Location, so the process working directory is that folder, not only the reported cwd line. A secret folder is still refused.
+- A script file redirected into an interpreter waits when that file reads a secret, or when the file cannot be read. python3, python, node, ruby, perl, php, sh, and bash are included (`python3 < script.py`, and the same `< file` form for the others, including while /yolo is on). `python.exe`, `py -3`, `node.exe`, and `ruby.exe` wait the same way. A harmless script (`print(1)`, `console.log(1)`, `puts 1`, `echo hi`) still runs. `grep x < notes.txt` does not wait.
+
 ## 0.3.40
 - A traced search that checks openat runs only on Linux or macOS, and only when strace and rg are both installed. Windows skips that trace. The search still finds an ordinary line and does not open a named secret.
 - A command with a workdir names that folder even when it prints nothing. PowerShell output that arrives as UTF-16 is read as text, so `echo bye` still shows bye. A secret folder is still refused.

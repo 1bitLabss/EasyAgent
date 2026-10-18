@@ -2074,35 +2074,251 @@ def _skip_shell_word(text: str, i: int) -> int:
     return i
 
 
+def _read_concat_word(text: str, i: int) -> tuple[int, str | None]:
+    """One shell word. Adjacent quotes join: ``"cat ."'env'`` is ``cat .env``.
+
+    The body is None when a piece is not a literal (``$``, a backtick, or an
+    unclosed quote). The index is always past the word that was consumed.
+    """
+    buf: list[str] = []
+    unreadable = False
+    saw = False
+    while i < len(text):
+        ch = text[i]
+        if ch.isspace() or ch in {"|", "&", ";", "\n", "<", ">", "(", ")"}:
+            break
+        saw = True
+        if ch in {"$", "`"}:
+            unreadable = True
+            i = _skip_shell_word(text, i)
+            continue
+        if ch in {"'", '"'}:
+            quote = ch
+            i += 1
+            while i < len(text) and text[i] != quote:
+                if quote == '"' and text[i] == "\\" and i + 1 < len(text):
+                    buf.append(text[i + 1])
+                    i += 2
+                    continue
+                if quote == '"' and text[i] in {"$", "`"}:
+                    unreadable = True
+                buf.append(text[i])
+                i += 1
+            if i >= len(text):
+                return i, None
+            i += 1
+            continue
+        buf.append(ch)
+        i += 1
+    if not saw:
+        return i, ""
+    if unreadable:
+        return i, None
+    return i, "".join(buf)
+
+
 def _read_here_word(text: str, i: int) -> tuple[int, str | None] | None:
     """Parse ``<<<`` at ``i``. The body is None when the word is not a literal.
 
     None as the whole result means this is not a here-string.
+    ``"cat ."'env'`` is one word, ``cat .env``.
     """
     if not text.startswith("<<<", i):
         return None
     i += 3
-    while i < len(text) and text[i].isspace():
+    while i < len(text) and text[i].isspace() and text[i] != "\n":
         i += 1
     if i >= len(text) or text[i] in {"|", "&", ";", "\n", "<", ">"}:
         return i, ""
-    if text[i] in {"$", "`"}:
-        return _skip_shell_word(text, i), None
-    if text[i] in {"'", '"'}:
-        quote = text[i]
-        i += 1
-        buf: list[str] = []
-        while i < len(text) and text[i] != quote:
-            buf.append(text[i])
+    return _read_concat_word(text, i)
+
+
+def _literal_words(text: str) -> list[str] | None:
+    """Words of one literal command. None when any word is dynamic or compound."""
+    words: list[str] = []
+    i = 0
+    raw = text or ""
+    while i < len(raw):
+        while i < len(raw) and raw[i].isspace():
             i += 1
-        if i >= len(text):
-            return i, None
-        return i + 1, "".join(buf)
-    buf = []
-    while i < len(text) and not text[i].isspace() and text[i] not in {"|", "&", ";", "\n", "<", ">"}:
-        buf.append(text[i])
+        if i >= len(raw):
+            break
+        if raw[i] in {"|", "&", ";", "<", ">", "(", ")"}:
+            return None
+        i, body = _read_concat_word(raw, i)
+        if body is None:
+            return None
+        words.append(body)
+    return words
+
+
+def _produced_script(command: str) -> str | None:
+    """The literal text ``echo`` or ``printf`` writes. None when it is not proved."""
+    words = _literal_words(command)
+    if not words:
+        return None
+    program = _program_name(words[0])
+    args = words[1:]
+    if program == "echo":
+        operands: list[str] = []
+        for arg in args:
+            if arg in {"-n", "-e", "-E"} or (
+                arg.startswith("-") and len(arg) > 1 and set(arg[1:]) <= set("neE")
+            ):
+                continue
+            operands.append(arg)
+        return " ".join(operands)
+    if program == "printf":
+        values: list[str] = []
+        index = 0
+        while index < len(args):
+            arg = args[index]
+            if arg == "-v" and index + 1 < len(args):
+                index += 2
+                continue
+            if arg.startswith("-"):
+                return None
+            values.append(arg)
+            index += 1
+        if not values:
+            return None
+        fmt = values[0]
+        if "%" not in fmt and "\\" not in fmt:
+            return fmt
+        slots = fmt.count("%s")
+        rest = values[1:]
+        if not re.fullmatch(r"(?:%s|\\n)+", fmt) or slots != len(rest):
+            return None
+        out: list[str] = []
+        used = 0
+        cursor = 0
+        while cursor < len(fmt):
+            if fmt.startswith("%s", cursor):
+                out.append(rest[used])
+                used += 1
+                cursor += 2
+                continue
+            if fmt.startswith("\\n", cursor):
+                out.append("\n")
+                cursor += 2
+                continue
+            return None
+        return "".join(out)
+    return None
+
+
+def _read_paren_body(text: str, start: int) -> tuple[str, int, bool]:
+    """The inside of a ``(`` that starts at ``start``, and whether it closed."""
+    depth = 1
+    index = start
+    quote = ""
+    while index < len(text):
+        ch = text[index]
+        if quote:
+            if ch == "\\" and quote == '"' and index + 1 < len(text):
+                index += 2
+                continue
+            if ch == quote:
+                quote = ""
+            index += 1
+            continue
+        if ch in {"'", '"'}:
+            quote = ch
+            index += 1
+            continue
+        if ch == "(":
+            depth += 1
+        elif ch == ")":
+            depth -= 1
+            if depth == 0:
+                return text[start:index], index + 1, True
+        index += 1
+    return text[start:], len(text), False
+
+
+def _stdin_process_sources(text: str) -> tuple[list[str], bool]:
+    """Scripts a ``< <(...)`` feeds on stdin, and whether one producer is not literal.
+
+    ``bash -s < <(echo 'cat .env')`` runs ``cat .env``. ``cat <(echo hi)`` is not
+    this: the caller only asks when the program is a shell reading stdin.
+    """
+    bodies: list[str] = []
+    unreadable = False
+    quote = ""
+    i = 0
+    raw = text or ""
+    while i < len(raw):
+        ch = raw[i]
+        if quote:
+            if ch == quote:
+                quote = ""
+            i += 1
+            continue
+        if ch in {"'", '"'}:
+            quote = ch
+            i += 1
+            continue
+        if raw.startswith("<<<", i):
+            got = _read_here_word(raw, i)
+            i = got[0] if got else i + 3
+            continue
+        if raw.startswith("<<", i):
+            i += 2
+            while i < len(raw) and raw[i].isspace() and raw[i] != "\n":
+                i += 1
+            if i < len(raw) and not raw[i].isspace() and raw[i] not in {"|", "&", ";", "<", ">"}:
+                i, _body = _read_concat_word(raw, i)
+            continue
+        if ch == "<":
+            j = i + 1
+            while j < len(raw) and raw[j].isspace() and raw[j] != "\n":
+                j += 1
+            if raw.startswith("<(", j):
+                body, i, closed = _read_paren_body(raw, j + 2)
+                script = _produced_script(body) if closed else None
+                if script is None:
+                    unreadable = True
+                else:
+                    bodies.append(script)
+                continue
         i += 1
-    return i, "".join(buf)
+    return bodies, unreadable
+
+
+def _fed_script_reads(
+    stage: str,
+    program: str,
+    args: list[str],
+    previous: str,
+    piped: bool,
+    cwd: Path,
+    depth: int,
+    root: Path | None,
+) -> bool:
+    """True when a stdin shell is handed a script that reads a secret, or an unreadable one.
+
+    The script may be a here-string, a ``< <(...)`` process substitution, or the
+    previous stage of a pipe. A proved ``echo hi`` does not card. A producer
+    that is not a literal echo or printf does, because the script is unknown.
+    """
+    if not _stdin_shell(program, args):
+        return False
+    bodies, unreadable = _here_strings(stage)
+    more, bad = _stdin_process_sources(stage)
+    bodies.extend(more)
+    unreadable = unreadable or bad
+    if piped:
+        script = _produced_script(previous)
+        if script is None:
+            unreadable = True
+        else:
+            bodies.append(script)
+    if not unreadable and not bodies:
+        return False
+    if unreadable:
+        return True
+    base = root or cwd
+    return any(_command_reads(body, cwd, depth + 1, root=base) for body in bodies)
 
 
 def _here_strings(text: str) -> tuple[list[str], bool]:
@@ -2296,13 +2512,19 @@ def _pipeline_reads(segment: str, cwd: Path, depth: int, root: Path | None = Non
         if _process_sub_reads(stage, here, depth):
             return True
         program, args = _split_program(words)
-        bodies, unreadable = _here_strings(stage)
-        if _stdin_shell(program, args) and (unreadable or bodies):
-            # sh <<< 'cat .env' runs that word. The same word fed to grep is text.
-            if unreadable or any(
-                _command_reads(body, here, depth + 1, root=root or here) for body in bodies
-            ):
-                return True
+        # sh <<< 'cat .env' runs that word. The same word fed to grep is text.
+        # A pipe, a heredoc's sibling line, and `< <(...)` are the other ways in.
+        if _fed_script_reads(
+            stage,
+            program,
+            args,
+            stages[index - 1] if index else "",
+            index > 0,
+            here,
+            depth,
+            root,
+        ):
+            return True
         if not program and not args:
             if any(mark in " ".join(words) for mark in ("$(", "${", "`")) and _tree_has_secret(here, recursive=True):
                 return True

@@ -121,9 +121,16 @@ def _plant(folder: Path) -> None:
     (src / "app.py").write_text("print('ok')\n", encoding="utf-8")
     sub = folder / "sub"
     sub.mkdir()
-    if os.name != "nt":
+    # Windows can refuse a symlink without developer mode. A hard link is a
+    # separate try: NTFS allows it, and `cat hard` has to card when the name exists.
+    try:
         (folder / "link").symlink_to(folder / ".env")
+    except OSError:
+        pass
+    try:
         os.link(folder / ".env", folder / "hard")
+    except OSError:
+        pass
 
 
 READERS = [
@@ -208,8 +215,9 @@ def test_secret_class_names_content_and_envrc(tmp_path):
     assert secret_class(folder / "token.txt") == "name"
     assert secret_class(folder / "key_material.txt") == "content"
     assert secret_file(folder / "notes.txt") is False
-    if os.name != "nt":
+    if (folder / "link").is_symlink():
         assert secret_class(folder / "link") == "symlink"
+    if (folder / "hard").exists():
         assert secret_class(folder / "hard") == "hardlink"
 
 
@@ -1403,7 +1411,7 @@ DEV_YOLO_CARDS = frozenset({
 
 
 def test_here_string_into_a_shell_cards(tmp_path):
-    """``sh <<< 'cat .env'`` is a script. ``grep x <<< foo`` is text."""
+    """A shell that reads stdin runs that text. ``grep x <<< foo`` does not."""
     folder = tmp_path / "tree"
     folder.mkdir()
     _plant(folder)
@@ -1414,21 +1422,63 @@ def test_here_string_into_a_shell_cards(tmp_path):
         "head id_rsa",
         "cat .npmrc",
     )
-    for shell in ("sh", "bash", "dash", "zsh"):
+    shells = ("sh", "bash", "dash", "zsh")
+    for shell in shells:
         for script in scripts:
             assert command_reads_secrets(f"{shell} <<< '{script}'", folder), (shell, script)
             assert command_reads_secrets(f'{shell} <<< "{script}"', folder), (shell, script)
             assert command_reads_secrets(f"{shell} -s <<< '{script}'", folder), (shell, script)
+            assert command_reads_secrets(f"echo '{script}' | {shell}", folder), (shell, script)
+            assert command_reads_secrets(f"{shell} <<'EOF'\n{script}\nEOF", folder), (shell, script)
+            assert command_reads_secrets(f"{shell} -s < <(echo '{script}')", folder), (shell, script)
+    assert command_reads_secrets("sh <<< 'cat .env'", folder)
+    assert command_reads_secrets("bash -s <<< 'cat .env'", folder)
+    assert command_reads_secrets("""sh -s <<< "cat ."'env'""", folder)
     assert command_reads_secrets("sh -s <<< 'cat id_rsa'", folder)
     assert command_reads_secrets("bash -s -- <<< 'cat .env'", folder)
     assert command_reads_secrets("command sh <<< 'cat .env'", folder)
+    assert command_reads_secrets("printf '%s\\n' 'cat .env' | dash", folder)
     assert command_reads_secrets("sh <<< 'echo hi'", folder) is False
     assert command_reads_secrets("sh <<< 'cat notes.txt'", folder) is False
     assert command_reads_secrets("grep x <<< foo", folder) is False
     assert command_reads_secrets("grep x <<< 'hello'", folder) is False
     assert command_reads_secrets("grep -e x <<< foo", folder) is False
+    assert command_reads_secrets("echo 'echo hi' | sh", folder) is False
+    assert command_reads_secrets("bash -s < <(echo 'echo hi')", folder) is False
+    assert command_reads_secrets("head <(echo hi)", folder) is False
     assert command_reads_secrets("cat < .env", folder)
     assert command_reads_secrets("sh <<'EOF'\ncat .env\nEOF", folder)
+
+
+def test_process_substitution_into_a_shell_stays_a_card_under_yolo(tmp_path):
+    """``/yolo`` does not approve a script built by ``<(echo 'cat .env')``."""
+    from easyagent import turn as turn_mod
+    from easyagent.safety import classify, set_mode
+    from easyagent.store import Store
+    from easyagent.workspace import bot_workspace
+    from easyagent.yolo import _enable, covers
+
+    store = Store(tmp_path / "data")
+    store.ensure()
+    endpoint = store.add_endpoint(name="local", base_url="http://127.0.0.1:9/v1", api_key="")
+    bot = store.add_bot(name="Ada", endpoint_id=endpoint["id"], model=None)
+    set_mode(store, bot["id"], "strict")
+    folder = bot_workspace(store, bot["id"], create=True)
+    _plant(folder)
+    chat = store.create_chat(bot["id"])
+    _enable(store, bot["id"], chat["id"], seconds=3600, idle_seconds=3600)
+    slot = turn_mod.bind(store, chat["id"], bot["id"])
+    slot.cwd = str(folder)
+    slot.store = store
+    command = "bash -s < <(echo 'cat .env')"
+    request = ToolRequest(kind="shell", command=command)
+    try:
+        assert command_reads_secrets(command, folder)
+        verdict = classify(store, request, bot["id"])
+        assert verdict.tier == "ask", (verdict.tier, verdict.rule, verdict.why)
+        assert covers(store, bot["id"], request, verdict) is False
+    finally:
+        turn_mod._slot.set(None)
 
 
 def test_shell_clusters_ampersand_env_split_and_globs_card(tmp_path):
@@ -1511,6 +1561,37 @@ def _dev_tree(folder: Path) -> None:
     subprocess.check_call(["git", "config", "user.name", "A"], cwd=folder)
     subprocess.check_call(["git", "add", "-A"], cwd=folder)
     subprocess.check_call(["git", "commit", "-qm", "init"], cwd=folder)
+
+
+def test_missing_pwd_keeps_an_ordinary_read_and_still_cards_a_secret(tmp_path, monkeypatch):
+    """Windows does not set PWD. ``echo $PWD`` stays allowed. ``cat $PWD/.env`` still waits."""
+    from easyagent import turn as turn_mod
+    from easyagent.safety import classify, set_mode
+    from easyagent.store import Store
+    from easyagent.workspace import bot_workspace
+
+    monkeypatch.delenv("PWD", raising=False)
+    store = Store(tmp_path / "data")
+    store.ensure()
+    endpoint = store.add_endpoint(name="local", base_url="http://127.0.0.1:9/v1", api_key="")
+    bot = store.add_bot(name="Ada", endpoint_id=endpoint["id"], model=None)
+    set_mode(store, bot["id"], "strict")
+    folder = bot_workspace(store, bot["id"], create=True)
+    _dev_tree(folder)
+    (folder / ".env").write_text("SECRETENV=1\n", encoding="utf-8")
+    chat = store.create_chat(bot["id"])
+    slot = turn_mod.bind(store, chat["id"], bot["id"])
+    slot.cwd = str(folder)
+    slot.store = store
+    try:
+        for command in ("echo $PWD", "cat $PWD/src/app.py"):
+            verdict = classify(store, ToolRequest(kind="shell", command=command), bot["id"])
+            assert verdict.tier == "allow", (command, verdict.tier, verdict.rule)
+        secret = classify(store, ToolRequest(kind="shell", command="cat $PWD/.env"), bot["id"])
+        assert secret.tier == "ask" and secret.rule == "read-secret", (secret.tier, secret.rule)
+        assert command_reads_secrets("cat $PWD/.env", folder)
+    finally:
+        turn_mod._slot.set(None)
 
 
 def test_ordinary_dev_commands_card_only_the_unresolved_ones(tmp_path):

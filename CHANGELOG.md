@@ -1,11 +1,11 @@
 # Changelog
 
 ## 0.3.38
-- A here-string fed to sh, bash, dash, or zsh is that shell's script, including `sh -s`. `sh <<< 'cat .env'` and a key file wait. `grep x <<< foo` does not.
+- A shell that reads its script from stdin waits when that script reads a secret. The text can be a here-string (`sh <<< 'cat .env'`, `bash -s <<< 'cat .env'`, and adjacent quotes `sh -s <<< "cat ."'env'`), a heredoc, a process substitution (`bash -s < <(echo 'cat .env')`, including while /yolo is on), or a pipe (`echo 'cat .env' | sh`). sh, bash, dash, and zsh are included. `grep x <<< foo` and `echo 'echo hi' | sh` do not.
 - A missing PWD is this command's folder. `echo $PWD` and `cat $PWD/src/app.py` stay allowed. `cat $PWD/.env` still waits.
 - A successful `cd` prints the folder it landed in. Case, slashes, and a `\\?\` prefix are the same folder. `pwd` is still not a Windows command.
 - search_files uses the Python walk when `rg` is missing or the program on PATH is not ripgrep. A named secret is still not opened.
-- A symlink or hardlink that was not created is not a reader check. `eval`, `awk`, `cat -n`, `grep`, `sh`, and `&&` are not required to print under PowerShell. `sleep`, `echo`, and `cat` of an ordinary note still run.
+- A symlink or hardlink is created when the operating system allows it, and `cat` of that name waits. A name that could not be created is not a reader check. `eval`, `awk`, `cat -n`, `grep`, `sh`, and `&&` are not required to print under PowerShell. `sleep`, `echo`, and `cat` of an ordinary note still run.
 
 ## 0.3.37
 - search_files sniffs the whole file before it prints a match, the same way a shell grep does, and scrubs each matched line. A key past the first 8 KB is not printed.

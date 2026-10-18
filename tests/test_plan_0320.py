@@ -185,7 +185,8 @@ def test_steer_note_is_untrusted_and_keeps_the_plan(tmp_path):
     working = []
     assert steer_into(store, bot["id"], chat["id"], working) == 1
     assert "UNTRUSTED" in working[0]["content"]
-    assert "Do not start over" in working[0]["content"]
+    assert "what are you doing?" in working[0]["content"]
+    assert "acknowledge the change briefly" in working[0]["content"]
     assert load_plan(store, bot["id"], chat["id"])["steps"][1]["state"] == "doing"
     client.close()
 

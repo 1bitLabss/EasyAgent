@@ -181,6 +181,44 @@ def test_an_error_still_drains_the_next_queued_line(tmp_path, monkeypatch):
     client.close()
 
 
+def test_a_mid_job_message_is_the_next_user_turn(tmp_path, monkeypatch):
+    """A message sent during a tool step is the last user line before the next model call."""
+    folder = tmp_path / "notes"
+    folder.mkdir()
+    (folder / "notes.txt").write_text("hello", encoding="utf-8")
+    calls = {"n": 0, "last": ""}
+
+    async def complete(**kwargs):
+        calls["n"] += 1
+        last = ""
+        for item in reversed(kwargs.get("messages") or []):
+            if item.get("role") == "user":
+                last = item.get("content") or ""
+                break
+        if calls["n"] == 1:
+            from easyagent.plan import enqueue
+
+            enqueue(store, bot["id"], chat["id"], "Ignore the old task. Say the word pelican.")
+            return f"```files\nlist\n{folder}\n```"
+        calls["last"] = last
+        return "pelican"
+
+    monkeypatch.setattr("easyagent.llm.complete", complete)
+    app, client, bot, chat = _client(tmp_path)
+    client.patch(f"/api/bots/{bot['id']}", json={"check_enabled": False})
+    store = app.state.store
+    sent = client.post(
+        f"/api/bots/{bot['id']}/chats/{chat['id']}/messages",
+        json={"content": "List the folder and then describe it."},
+    )
+    assert sent.status_code == 200, sent.text
+    assert calls["n"] >= 2
+    assert "Say the word pelican." in calls["last"]
+    saved = store.get_chat(bot["id"], chat["id"])
+    assert saved["messages"][-1]["content"] == "pelican"
+    client.close()
+
+
 def test_a_stale_stop_does_not_cancel_the_next_run(tmp_path, monkeypatch):
     from easyagent import turn as turn_mod
 

@@ -4548,7 +4548,7 @@ async def _answer_while_busy(
     client_id: str = "",
 ):
     """A message during a job. Interrupt aborts only the model request. A command keeps running."""
-    from easyagent.plan import busy_mode, enqueue
+    from easyagent.plan import enqueue
 
     outcome = enqueue(store, bot_id, chat_id, content, attachment, client_id=client_id)
     if outcome.get("refused"):
@@ -4558,8 +4558,7 @@ async def _answer_while_busy(
             bot = store.get_bot(bot_id)
         except StoreError:
             bot = None
-        if busy_mode(bot) == "interrupt":
-            turn_mod.redirect_model(store, chat_id)
+        turn_mod.redirect_model(store, chat_id)
     public = _public_chat(store, store.get_chat(bot_id, chat_id))
     run = public.get("run") if isinstance(public.get("run"), dict) else {}
     text = outcome["text"]

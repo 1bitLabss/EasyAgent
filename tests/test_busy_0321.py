@@ -76,10 +76,7 @@ def test_steer_marks_seen_and_a_finished_reply_marks_answered(tmp_path):
     user = next(item for item in stored["messages"] if item.get("content") == "what are you doing?")
     assert user["chip"] == "seen"
     assert user["seen_step"] == 2
-    pickups = [item for item in stored["messages"] if item.get("kind") == "pickup"]
-    assert len(pickups) == 1
-    assert pickups[0]["content"] == "Picked up your message"
-    assert pickups[0]["about"] == user["id"]
+    assert working and "what are you doing?" in working[-1]["content"]
     assert [item for item in stored["messages"] if item.get("role") == "user" and item.get("content") == "what are you doing?"]
     from easyagent.plan import mark_answered
 

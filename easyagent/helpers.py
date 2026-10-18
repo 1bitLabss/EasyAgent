@@ -152,6 +152,13 @@ def _clamp(value: str, default: int, low: int, high: int) -> int:
     return max(low, min(high, number))
 
 
+def _names_for(kinds: frozenset[str]) -> tuple[str, ...]:
+    """Registered names for a helper that named kinds rather than tool names."""
+    from easyagent.delegate import _KIND
+
+    return tuple(name for name, kind in _KIND.items() if kind in kinds)
+
+
 def _system(name: str, tools: frozenset[str], listed: tuple[str, ...] = ()) -> str:
     shown = ", ".join(listed) if listed else (", ".join(sorted(tools)) or "none")
     return (
@@ -222,6 +229,7 @@ async def _run_one(store: Store, bot: dict, endpoint: dict, spec: HelperSpec, *,
     deadline = time.monotonic() + spec.seconds
     steps = 0
     tokens = _begin(spec.tools)
+    tool_token = llm.only_tools(spec.listed if spec.listed else _names_for(spec.tools))
     status = "done"
     result = ""
     try:
@@ -278,6 +286,7 @@ async def _run_one(store: Store, bot: dict, endpoint: dict, spec: HelperSpec, *,
         status = "error"
         result = " ".join(str(exc).split())[:300] or "The connection failed."
     finally:
+        llm.reset_only_tools(tool_token)
         _end(tokens)
     if len(result) > 2000:
         result = result[:1980].rstrip() + "\n[shortened]"

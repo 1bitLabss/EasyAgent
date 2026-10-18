@@ -11,7 +11,7 @@ import sys
 import threading
 import time
 from collections.abc import AsyncIterator, Callable
-from contextvars import ContextVar
+from contextvars import ContextVar, Token
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -882,14 +882,30 @@ _TERMINAL_WINDOWS = (
 )
 
 
+_ONLY_TOOLS: ContextVar[frozenset[str] | None] = ContextVar("easyagent_only_tools", default=None)
+
+
+def only_tools(names) -> Token:
+    """Limit native_tools() to these names until reset. The parent list is unchanged outside this."""
+    return _ONLY_TOOLS.set(frozenset(str(name) for name in names))
+
+
+def reset_only_tools(token: Token) -> None:
+    _ONLY_TOOLS.reset(token)
+
+
 def native_tools() -> list[dict]:
     """Tool list for this computer. On Windows the shell tool is PowerShell.
 
-    A disabled tool is absent here and its call is refused.
+    A disabled tool is absent here and its call is refused. A child request
+    lists only the tools it was allowed.
     """
     from easyagent.registry import visible_tools
 
     listed = visible_tools(NATIVE_TOOLS)
+    only = _ONLY_TOOLS.get()
+    if only is not None:
+        listed = [tool for tool in listed if str((tool.get("function") or {}).get("name") or "") in only]
     if sys.platform != "win32":
         return listed
     tools = []

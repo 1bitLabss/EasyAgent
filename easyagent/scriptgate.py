@@ -2303,9 +2303,10 @@ def _fed_script_reads(
     Shells and the interpreters that take a program on stdin (``python -``,
     ``node -``, ``ruby``, and the same for perl, php, deno, and bun) are
     included. The script may be a here-string, a ``< <(...)`` process
-    substitution, or the previous stage of a pipe. ``python - <<< 'print(1)'``
-    does not card. A producer that is not a literal echo or printf does,
-    because the script is unknown.
+    substitution, the previous stage of a pipe, or a file redirected with
+    ``< file``. ``python - <<< 'print(1)'`` and ``python3 < ok.py`` do not
+    card. A producer that is not a literal echo or printf does, and so does
+    a redirected file that cannot be read, because the script is unknown.
     """
     seen, _seen_args = _peeled_program(program, args)
     if not _reads_program_stdin(program, args):
@@ -2314,6 +2315,9 @@ def _fed_script_reads(
     more, bad = _stdin_process_sources(stage)
     bodies.extend(more)
     unreadable = unreadable or bad
+    file_bodies, file_bad = _redirected_program(stage, cwd)
+    bodies.extend(file_bodies)
+    unreadable = unreadable or file_bad
     if piped:
         script = _produced_script(previous)
         if script is None:
@@ -2326,6 +2330,33 @@ def _fed_script_reads(
         return True
     base = root or cwd
     return any(_stdin_body_reads(seen, body, cwd, depth, base) for body in bodies)
+
+
+def _redirected_program(stage: str, cwd: Path) -> tuple[list[str], bool]:
+    """Program text from ``< file``, and whether one file could not be proved.
+
+    ``<<``, ``<<<``, and ``< <(...)`` are not files. ``<&0`` copies a
+    descriptor. A name that does not resolve, or a file that cannot be read,
+    is unproved and the caller cards it.
+    """
+    _words, redirects = _tokenize(stage)
+    bodies: list[str] = []
+    for raw in redirects:
+        token = (raw or "").strip()
+        if len(token) >= 2 and token[0] == token[-1] and token[0] in {"'", '"'}:
+            token = token[1:-1]
+        if not token or token.startswith("&"):
+            continue
+        if token == "-" or _token_unresolved(token) or _glob(token):
+            return bodies, True
+        path = _try_resolve(token, cwd)
+        if path is None or not path.is_file() or _path_secret(path):
+            return bodies, True
+        try:
+            bodies.append(path.read_text(encoding="utf-8", errors="replace")[:20000])
+        except OSError:
+            return bodies, True
+    return bodies, False
 
 
 def _here_strings(text: str) -> tuple[list[str], bool]:

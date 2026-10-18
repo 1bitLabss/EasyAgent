@@ -1607,6 +1607,112 @@ def test_interpreter_stdin_stays_a_card_under_yolo(tmp_path):
         turn_mod._slot.set(None)
 
 
+def test_redirected_interpreter_file_cards(tmp_path):
+    """``python3 < script.py`` is the same program as a here-string. A harmless file runs."""
+    folder = tmp_path / "tree"
+    folder.mkdir()
+    _plant(folder)
+    (folder / "leak.py").write_text('print(open(".env").read())\n', encoding="utf-8")
+    (folder / "ok.py").write_text("print(1)\n", encoding="utf-8")
+    (folder / "leak.js").write_text('console.log(require("fs").readFileSync(".env","utf8"))\n', encoding="utf-8")
+    (folder / "ok.js").write_text("console.log(1)\n", encoding="utf-8")
+    (folder / "leak.rb").write_text('puts File.read(".env")\n', encoding="utf-8")
+    (folder / "ok.rb").write_text("puts 1\n", encoding="utf-8")
+    (folder / "leak.pl").write_text('open F, ".env"; print <F>\n', encoding="utf-8")
+    (folder / "ok.pl").write_text("print 1\n", encoding="utf-8")
+    (folder / "leak.php").write_text('<?php echo file_get_contents(".env");\n', encoding="utf-8")
+    (folder / "ok.php").write_text("<?php echo 1;\n", encoding="utf-8")
+    (folder / "leak.sh").write_text("cat .env\n", encoding="utf-8")
+    (folder / "ok.sh").write_text("echo hi\n", encoding="utf-8")
+    (folder / "win.py").write_text('print(open(".\\\\.env").read())\n', encoding="utf-8")
+    secret = (
+        "python3 < leak.py",
+        "python < leak.py",
+        "python - < leak.py",
+        "node < leak.js",
+        "ruby < leak.rb",
+        "perl < leak.pl",
+        "php < leak.php",
+        "sh < leak.sh",
+        "bash < leak.sh",
+        "bash -s < leak.sh",
+        "python.exe < leak.py",
+        "py -3 < leak.py",
+        "node.exe < leak.js",
+        "ruby.exe < leak.rb",
+        "python3 < win.py",
+        "python3 < missing.py",
+        "sh < missing.sh",
+        "python3 < \"$leak\"",
+    )
+    for command in secret:
+        assert command_reads_secrets(command, folder), command
+    harmless = (
+        "python3 < ok.py",
+        "python - < ok.py",
+        "node < ok.js",
+        "ruby < ok.rb",
+        "perl < ok.pl",
+        "php < ok.php",
+        "sh < ok.sh",
+        "bash < ok.sh",
+        "python.exe < ok.py",
+        "py -3 < ok.py",
+        "node.exe < ok.js",
+        "grep x < notes.txt",
+        "python ok.py < leak.py",
+    )
+    for command in harmless:
+        assert command_reads_secrets(command, folder) is False, command
+
+
+def test_redirected_interpreter_file_stays_a_card_under_yolo(tmp_path):
+    """``/yolo`` does not approve ``python3 < script.py`` when that file reads a secret."""
+    from easyagent import turn as turn_mod
+    from easyagent.safety import classify, set_mode
+    from easyagent.store import Store
+    from easyagent.workspace import bot_workspace
+    from easyagent.yolo import _enable, covers
+
+    store = Store(tmp_path / "data")
+    store.ensure()
+    endpoint = store.add_endpoint(name="local", base_url="http://127.0.0.1:9/v1", api_key="")
+    bot = store.add_bot(name="Ada", endpoint_id=endpoint["id"], model=None)
+    folder = bot_workspace(store, bot["id"], create=True)
+    _plant(folder)
+    (folder / "leak.py").write_text('print(open(".env").read())\n', encoding="utf-8")
+    (folder / "ok.py").write_text("print(1)\n", encoding="utf-8")
+    (folder / "leak.sh").write_text("cat .env\n", encoding="utf-8")
+    chat = store.create_chat(bot["id"])
+    _enable(store, bot["id"], chat["id"], seconds=3600, idle_seconds=3600)
+    slot = turn_mod.bind(store, chat["id"], bot["id"])
+    slot.cwd = str(folder)
+    slot.store = store
+    secret = (
+        "python3 < leak.py",
+        "python.exe < leak.py",
+        "node < leak.py",
+        "sh < leak.sh",
+        "bash < leak.sh",
+    )
+    try:
+        for mode in ("careful", "strict"):
+            set_mode(store, bot["id"], mode)
+            for command in secret:
+                request = ToolRequest(kind="shell", command=command)
+                assert command_reads_secrets(command, folder), (mode, command)
+                verdict = classify(store, request, bot["id"])
+                assert verdict.tier == "ask", (mode, command, verdict.tier, verdict.rule)
+                assert covers(store, bot["id"], request, verdict) is False, (mode, command)
+            request = ToolRequest(kind="shell", command="python3 < ok.py")
+            assert command_reads_secrets("python3 < ok.py", folder) is False
+            if mode == "careful":
+                verdict = classify(store, request, bot["id"])
+                assert verdict.tier == "allow", (mode, verdict.tier, verdict.rule)
+    finally:
+        turn_mod._slot.set(None)
+
+
 def test_shell_clusters_ampersand_env_split_and_globs_card(tmp_path):
     folder = tmp_path / "tree"
     folder.mkdir()

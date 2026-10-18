@@ -2332,12 +2332,22 @@ def _fed_script_reads(
     return any(_stdin_body_reads(seen, body, cwd, depth, base) for body in bodies)
 
 
+def _descriptor_copy(token: str) -> bool:
+    """``&1`` and ``&-`` copy or close a descriptor. ``&p2.py`` is a file name."""
+    if not token.startswith("&"):
+        return False
+    rest = token[1:]
+    return rest == "-" or rest.isdigit()
+
+
 def _redirected_program(stage: str, cwd: Path) -> tuple[list[str], bool]:
     """Program text from ``< file``, and whether one file could not be proved.
 
     ``<<``, ``<<<``, and ``< <(...)`` are not files. ``<&0`` copies a
-    descriptor. A name that does not resolve, or a file that cannot be read,
-    is unproved and the caller cards it.
+    descriptor. A leading ``&`` on any other name is still that file
+    (``<&p2.py``); skipping every such token hid the script. A name that
+    does not resolve, or a file that cannot be read, is unproved and the
+    caller cards it.
     """
     _words, redirects = _tokenize(stage)
     bodies: list[str] = []
@@ -2345,7 +2355,13 @@ def _redirected_program(stage: str, cwd: Path) -> tuple[list[str], bool]:
         token = (raw or "").strip()
         if len(token) >= 2 and token[0] == token[-1] and token[0] in {"'", '"'}:
             token = token[1:-1]
-        if not token or token.startswith("&"):
+        if not token:
+            continue
+        if _descriptor_copy(token):
+            continue
+        if token.startswith("&"):
+            token = token[1:]
+        if not token:
             continue
         if token == "-" or _token_unresolved(token) or _glob(token):
             return bodies, True

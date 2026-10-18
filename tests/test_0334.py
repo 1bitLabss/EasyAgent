@@ -1790,6 +1790,62 @@ def test_redirected_file_still_cards_beside_other_redirections(tmp_path):
         turn_mod._slot.set(None)
 
 
+def test_fd_copy_does_not_hide_redirected_p2(tmp_path):
+    """``2>&1``, ``1>&2``, ``3>&1``, and ``1>&1`` do not hide ``< p2.py``.
+
+    A leading ``&`` on the file name is still that file. ``<&1`` copies a
+    descriptor and is not a script.
+    """
+    from easyagent import turn as turn_mod
+    from easyagent.safety import classify, set_mode
+    from easyagent.store import Store
+    from easyagent.workspace import bot_workspace
+    from easyagent.yolo import _enable, covers
+
+    store = Store(tmp_path / "data")
+    store.ensure()
+    endpoint = store.add_endpoint(name="local", base_url="http://127.0.0.1:9/v1", api_key="")
+    bot = store.add_bot(name="Ada", endpoint_id=endpoint["id"], model=None)
+    folder = bot_workspace(store, bot["id"], create=True)
+    _plant(folder)
+    (folder / "p2.py").write_text('print(open(".env").read())\n', encoding="utf-8")
+    (folder / "ok.py").write_text("print(1)\n", encoding="utf-8")
+    redirections = ("2>&1", "1>&2", "3>&1", "1>&1")
+    programs = ("python3", "node", "sh", "bash", "perl")
+    secret = [f"{program} < p2.py {redir}" for program in programs for redir in redirections]
+    secret.extend(f"{program} <&p2.py" for program in programs)
+    for command in secret:
+        assert command_reads_secrets(command, folder), command
+    for redir in redirections:
+        command = f"python3 < ok.py {redir}"
+        assert command_reads_secrets(command, folder) is False, command
+    assert command_reads_secrets("python3 <&ok.py", folder) is False
+    assert command_reads_secrets("python3 <&1", folder) is False
+    assert command_reads_secrets("python3 <&0", folder) is False
+    assert command_reads_secrets("sh <&-", folder) is False
+    assert command_reads_secrets("grep x < notes.txt 2>&1", folder) is False
+    chat = store.create_chat(bot["id"])
+    _enable(store, bot["id"], chat["id"], seconds=3600, idle_seconds=3600)
+    slot = turn_mod.bind(store, chat["id"], bot["id"])
+    slot.cwd = str(folder)
+    slot.store = store
+    try:
+        for mode in ("careful", "strict"):
+            set_mode(store, bot["id"], mode)
+            for command in secret:
+                request = ToolRequest(kind="shell", command=command)
+                verdict = classify(store, request, bot["id"])
+                assert verdict.tier == "ask", (mode, command, verdict.tier, verdict.rule)
+                assert covers(store, bot["id"], request, verdict) is False, (mode, command)
+            if mode == "careful":
+                for redir in redirections:
+                    request = ToolRequest(kind="shell", command=f"python3 < ok.py {redir}")
+                    verdict = classify(store, request, bot["id"])
+                    assert verdict.tier == "allow", (mode, redir, verdict.tier, verdict.rule)
+    finally:
+        turn_mod._slot.set(None)
+
+
 def test_shell_clusters_ampersand_env_split_and_globs_card(tmp_path):
     folder = tmp_path / "tree"
     folder.mkdir()

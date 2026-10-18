@@ -792,13 +792,26 @@ def test_live_native_read_offset_timeout_and_workdir(tmp_path, monkeypatch):
     (folder / "sub" / "here.txt").write_text("in-sub\n", encoding="utf-8")
     (folder / "slow.sh").write_text("#!/bin/sh\nsleep 5\necho late\n", encoding="utf-8")
     (folder / "bye.sh").write_text("#!/bin/sh\necho bye\nexit 3\n", encoding="utf-8")
+    # sh and pwd are not Windows commands. sleep and echo run in PowerShell,
+    # and the workdir is reported on the cwd line of a command that prints.
+    if os.name == "nt":
+        shell_scripts = [
+            _tool_sse("terminal", {"command": "sleep 5", "timeout": 2}, "call_to"),
+            _tool_sse("terminal", {"command": "echo bye; exit 3"}, "call_ex"),
+            _tool_sse("terminal", {"command": "echo ok"}, "call_ok"),
+            _tool_sse("terminal", {"command": "echo ok", "workdir": "sub"}, "call_wd"),
+        ]
+    else:
+        shell_scripts = [
+            _tool_sse("terminal", {"command": "sh slow.sh", "timeout": 2}, "call_to"),
+            _tool_sse("terminal", {"command": "sh bye.sh"}, "call_script"),
+            _tool_sse("terminal", {"command": "sh -c 'echo bye; exit 3'"}, "call_ex"),
+            _tool_sse("terminal", {"command": "echo ok"}, "call_ok"),
+            _tool_sse("terminal", {"command": "pwd", "workdir": "sub"}, "call_wd"),
+        ]
     Handler.scripts = [
         _tool_sse("read_file", {"path": "long.txt", "offset": 1500, "limit": 50}, "call_read"),
-        _tool_sse("terminal", {"command": "sh slow.sh", "timeout": 2}, "call_to"),
-        _tool_sse("terminal", {"command": "sh bye.sh"}, "call_script"),
-        _tool_sse("terminal", {"command": "sh -c 'echo bye; exit 3'"}, "call_ex"),
-        _tool_sse("terminal", {"command": "echo ok"}, "call_ok"),
-        _tool_sse("terminal", {"command": "pwd", "workdir": "sub"}, "call_wd"),
+        *shell_scripts,
         [
             'data: {"choices":[{"delta":{"content":"The distinctive summary sentence is kept with the file."}}]}',
             "data: [DONE]",
@@ -818,7 +831,7 @@ def test_live_native_read_offset_timeout_and_workdir(tmp_path, monkeypatch):
         assert "1500|row 1500" in heard or "row 1500" in heard
         assert "row 1549" in heard
         assert "next_offset" in heard
-        assert str(folder / "sub") in heard or heard.endswith("sub") or "/sub" in heard
+        assert _path_shown(heard, folder / "sub"), heard
         assert "timed out after 2 s" in heard
         assert heard.count("exit code 3") >= 1 and "bye" in heard
         assert "exit code 0" in heard

@@ -1,5 +1,8 @@
 # Changelog
 
+## 0.3.39
+- An interpreter that reads its program from stdin waits when that program reads a secret, or when the text cannot be proved. python, python3, node, ruby, perl, php, deno, and bun are included. The text can be a here-string (`python - <<< 'print(open(".env").read())'`, `node - <<< ...`, `ruby <<< 'puts File.read(".env")'`), a heredoc, a process substitution (`python - < <(echo '...')`, including while /yolo is on), or a pipe (`echo '...' | python -`). `python.exe`, `py -3 -`, `node.exe`, `ruby.exe`, and `open(".\.env")` wait the same way. `python - <<< 'print(1)'`, `node - <<< 'console.log(1)'`, `ruby <<< 'puts 1'`, and a proved `open("notes.txt")` still run. A syntax error, an import, an unknown call, and a path that is not a literal wait.
+
 ## 0.3.38
 - A shell that reads its script from stdin waits when that script reads a secret. The text can be a here-string (`sh <<< 'cat .env'`, `bash -s <<< 'cat .env'`, and adjacent quotes `sh -s <<< "cat ."'env'`), a heredoc, a process substitution (`bash -s < <(echo 'cat .env')`, including while /yolo is on), or a pipe (`echo 'cat .env' | sh`). sh, bash, dash, and zsh are included. `grep x <<< foo` and `echo 'echo hi' | sh` do not.
 - A missing PWD is this command's folder. `echo $PWD` and `cat $PWD/src/app.py` stay allowed. `cat $PWD/.env` still waits.

@@ -94,6 +94,7 @@ export type ChatMessage = {
   routine_name?: string;
   speaker?: string;
   kind?: string;
+  harness?: boolean;
   git_repo?: string;
   created_at?: string;
   chip?: "queued" | "seen" | "answered" | "held" | "refused" | "unsent" | string;

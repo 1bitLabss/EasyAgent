@@ -8,6 +8,7 @@ import signal
 import subprocess
 import sys
 import threading
+import time
 import uuid
 from contextvars import ContextVar
 from pathlib import Path
@@ -43,6 +44,7 @@ class Slot:
         self.drain_chains = 0
         self.deliver_queue = False
         self.sealed = False
+        self.claimed_at = 0.0
         self.child_tasks: list = []
         self.child_procs: list = []
 
@@ -176,7 +178,7 @@ def bind(store, chat_id: str, bot_id: str = "", *, resume: bool = False) -> Slot
     A resume drops a leftover Stop. That flag belongs to the turn that already ended.
     """
     slot = slot_for(store, chat_id)
-    stopped = False if resume else slot.user_stop
+    # A leftover Stop belongs to the turn that already ended. It must not cancel this one.
     slot.user_stop = False
     slot.redirect = False
     slot.sealed = False
@@ -205,9 +207,7 @@ def bind(store, chat_id: str, bot_id: str = "", *, resume: bool = False) -> Slot
         slot.worker = asyncio.current_task()
     except RuntimeError:
         slot.worker = None
-    if stopped:
-        slot.reason = "you pressed Stop"
-        slot.cancel.set()
+    slot.claimed_at = 0.0
     _cancel.set(slot.cancel)
     _slot.set(slot)
     return slot
@@ -223,13 +223,26 @@ def current_worker(store, chat_id: str) -> asyncio.Task | None:
 
 
 def _forget_finished(slot: Slot) -> asyncio.Task | None:
-    """A finished owner is not still working. Busy with no task yet is the claim window."""
+    """A finished owner is not still working. A claim with no task is reaped once it is stale."""
     worker = slot.worker
     if worker is not None and worker.done():
         slot.worker = None
         slot.busy = False
         return None
+    if slot.busy and worker is None and not _slot_in_flight(slot):
+        claimed = float(getattr(slot, "claimed_at", 0.0) or 0.0)
+        if claimed and time.monotonic() - claimed > 15:
+            slot.busy = False
+            slot.claimed_at = 0.0
+            return None
     return worker
+
+
+def _slot_in_flight(slot: Slot) -> bool:
+    if slot.client is not None:
+        return True
+    proc = slot.proc
+    return proc is not None and proc.poll() is None
 
 
 def request_in_flight(store, chat_id: str) -> bool:
@@ -257,6 +270,7 @@ def try_begin(store, chat_id: str) -> bool:
         if slot.busy or worker is not None:
             return False
         slot.busy = True
+        slot.claimed_at = time.monotonic()
         return True
 
 

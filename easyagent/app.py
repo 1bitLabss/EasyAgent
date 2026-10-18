@@ -1715,7 +1715,7 @@ def create_app(data_dir: str | Path | None = None) -> FastAPI:
         if worker is not None and not worker.done():
             with suppress(asyncio.TimeoutError):
                 await asyncio.wait_for(asyncio.shield(worker), timeout=8)
-        from easyagent.plan import hold_for_send, release_uncovered
+        from easyagent.plan import queued_items, release_hold_for_send, release_uncovered
 
         chat = store.get_chat(bot_id, chat_id)
         for message in chat.get("messages") or []:
@@ -1724,11 +1724,19 @@ def create_app(data_dir: str | Path | None = None) -> FastAPI:
         if release_uncovered(chat):
             chat["updated_at"] = now_iso()
             store.save_chat(chat)
-        hold_for_send(store, bot_id, chat_id)
+        release_hold_for_send(store, bot_id, chat_id)
         _force_clear_running(store, bot_id, chat_id, "you pressed Stop")
+        slot = turn_mod.slot_for(store, chat_id)
+        slot.user_stop = False
         if worker is None or worker.done():
             turn_mod.clear_busy(store, chat_id)
-            turn_mod.slot_for(store, chat_id).user_stop = False
+            if queued_items(store, bot_id, chat_id) and turn_mod.try_begin(store, chat_id):
+                try:
+                    async with chat_lock(store, chat_id):
+                        turn_mod.bind(store, chat_id, bot_id=bot_id, resume=True)
+                        await _drain_queued_json(store, bot_id, chat_id)
+                finally:
+                    await _finish_turn(store, bot_id, chat_id)
         return _public_chat(store, store.get_chat(bot_id, chat_id))
 
     @app.post("/api/bots/{bot_id}/chats/{chat_id}/messages/{message_id}/send-now")
@@ -4469,10 +4477,14 @@ DRAIN_CHAIN_CAP = 8
 
 
 def _queue_waiting(store: Store, bot_id: str, chat_id: str) -> bool:
+    """Items in the file are waiting. Stop does not hide them.
+
+    The chain cap is only a brake on a reply that keeps queueing another line.
+    """
     from easyagent.plan import queued_items
 
     slot = turn_mod.slot_for(store, chat_id)
-    if slot.user_stop or slot.drain_chains >= DRAIN_CHAIN_CAP:
+    if slot.drain_chains >= DRAIN_CHAIN_CAP:
         return False
     return bool(queued_items(store, bot_id, chat_id))
 
@@ -4503,14 +4515,11 @@ async def _finish_turn(store: Store, bot_id: str, chat_id: str) -> None:
     async with turn_mod.boundary(store, chat_id):
         slot = turn_mod.slot_for(store, chat_id)
         if slot.user_stop:
-            from easyagent.plan import hold_for_send
+            from easyagent.plan import release_hold_for_send
 
-            slot.deliver_queue = False
-            hold_for_send(store, bot_id, chat_id)
-            turn_mod.clear_busy(store, chat_id)
             slot.user_stop = False
+            release_hold_for_send(store, bot_id, chat_id)
             _force_clear_running(store, bot_id, chat_id, "you pressed Stop")
-            return
         if _run_paused(store, bot_id, chat_id) and not slot.deliver_queue:
             turn_mod.clear_busy(store, chat_id)
             return
@@ -4704,8 +4713,6 @@ async def _drain_queued_json(store: Store, bot_id: str, chat_id: str) -> dict | 
         if not _take_follow(store, chat_id):
             break
         last = await _reply_json(store, bot_id, chat_id, continue_run=True)
-        if _run_failed(store, bot_id, chat_id):
-            break
     return last
 
 
@@ -4730,7 +4737,7 @@ async def _deliver_queued_first(store: Store, bot_id: str, chat_id: str) -> None
         turn_mod.slot_for(store, chat_id).follow_chain = 0
         await _drain_queued_json(store, bot_id, chat_id)
         after = len(queued_items(store, bot_id, chat_id))
-        if after >= before or _run_failed(store, bot_id, chat_id):
+        if after >= before:
             return
         delivered += before - after
 

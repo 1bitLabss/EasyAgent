@@ -143,3 +143,63 @@ def test_silence_is_not_the_old_runaway_sentence(tmp_path, monkeypatch):
     assert next(item for item in saved["messages"] if item.get("content") == "uh oh what happened")["chip"] == "held"
     assert next(item for item in saved["messages"] if item.get("id") == "a-old")["content"] == RUNAWAY_TEXT
     client.close()
+
+
+def test_an_error_still_drains_the_next_queued_line(tmp_path, monkeypatch):
+    monkeypatch.setenv("EASYAGENT_MODEL_RETRY_SECONDS", "0")
+
+    async def pause(_seconds):
+        return None
+
+    monkeypatch.setattr("easyagent.retry.pause", pause)
+    calls = {"n": 0}
+
+    async def complete(**_kwargs):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            from easyagent.plan import enqueue
+
+            enqueue(store, bot["id"], chat["id"], "second line")
+            raise ProviderError("All connection attempts failed calling http://127.0.0.1:9/v1")
+        return "answered the second line"
+
+    monkeypatch.setattr("easyagent.llm.complete", complete)
+    app, client, bot, chat = _client(tmp_path)
+    client.patch(f"/api/bots/{bot['id']}", json={"check_enabled": False, "busy_input": "follow"})
+    store = app.state.store
+    sent = client.post(
+        f"/api/bots/{bot['id']}/chats/{chat['id']}/messages",
+        json={"content": "first line"},
+    )
+    assert sent.status_code == 200, sent.text
+    saved = store.get_chat(bot["id"], chat["id"])
+    second = next(item for item in saved["messages"] if item.get("content") == "second line")
+    assert second.get("chip") == "answered"
+    assert any(item.get("content") == "answered the second line" for item in saved["messages"])
+    first = next(item for item in saved["messages"] if item.get("content") == "first line")
+    assert first.get("chip") == "held"
+    client.close()
+
+
+def test_a_stale_stop_does_not_cancel_the_next_run(tmp_path, monkeypatch):
+    from easyagent import turn as turn_mod
+
+    seen = {"cancelled": None}
+
+    async def complete(**_kwargs):
+        seen["cancelled"] = turn_mod.cancelled()
+        return "still here"
+
+    monkeypatch.setattr("easyagent.llm.complete", complete)
+    app, client, bot, chat = _client(tmp_path)
+    client.patch(f"/api/bots/{bot['id']}", json={"check_enabled": False})
+    slot = turn_mod.slot_for(app.state.store, chat["id"])
+    slot.user_stop = True
+    sent = client.post(
+        f"/api/bots/{bot['id']}/chats/{chat['id']}/messages",
+        json={"content": "are you there"},
+    )
+    assert sent.status_code == 200, sent.text
+    assert seen["cancelled"] is False
+    assert any(item.get("content") == "still here" for item in sent.json().get("messages") or sent.json().get("chat", {}).get("messages") or [])
+    client.close()

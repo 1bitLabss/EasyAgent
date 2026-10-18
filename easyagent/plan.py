@@ -16,7 +16,9 @@ from pathlib import Path
 from easyagent.store import Store, atomic_write_json, new_id, now_iso, read_json
 
 QUEUE_CAP = 32
-FOLLOW_CAP = 3
+# One drain stops here so a reply that queues another line cannot loop forever.
+# Whatever is still queued is the next turn, not a dropped line.
+FOLLOW_CAP = 32
 # Queued lines plus visibly held lines. Past this the request is refused and nothing is written.
 WAITING_CAP = 512
 STUCK_SECONDS = 90

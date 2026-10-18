@@ -111,5 +111,7 @@ def test_steered_followups_stop_at_the_cap(tmp_path, monkeypatch):
     enqueue(store, bot["id"], chat["id"], "first steer")
     asyncio.run(_drain_queued_json(store, bot["id"], chat["id"]))
     assert calls["n"] == FOLLOW_CAP
-    assert calls["n"] < 10
+    from easyagent.plan import queued_items
+
+    assert queued_items(store, bot["id"], chat["id"])
     client.close()

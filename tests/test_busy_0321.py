@@ -114,6 +114,10 @@ def test_send_now_queues_a_refused_message(tmp_path):
 
 
 def test_stop_marks_queued_lines_not_sent_and_send_now_sends_one(tmp_path, monkeypatch):
+    async def complete(**_kwargs):
+        return "Sent it."
+
+    monkeypatch.setattr("easyagent.llm.complete", complete)
     app, client, bot, chat = _client(tmp_path)
     store = app.state.store
     _running(store, bot["id"], chat["id"])
@@ -121,21 +125,18 @@ def test_stop_marks_queued_lines_not_sent_and_send_now_sends_one(tmp_path, monke
     assert client.post(url, json={"content": "first note"}).status_code == 200
     assert client.post(url, json={"content": "second note"}).status_code == 200
     stopped = client.post(f"/api/bots/{bot['id']}/chats/{chat['id']}/stop")
-    assert stopped.status_code == 200
+    assert stopped.status_code == 200, stopped.text
     users = [item for item in stopped.json()["messages"] if item.get("role") == "user"]
     assert [item["content"] for item in users] == ["first note", "second note"]
-    assert [item["chip"] for item in users] == ["queued", "queued"]
+    assert [item["chip"] for item in users] == ["answered", "answered"]
     assert all(not item.get("refuse_reason") for item in users)
     from easyagent.plan import queued_items
 
-    assert [item["content"] for item in queued_items(store, bot["id"], chat["id"])] == ["first note", "second note"]
+    assert queued_items(store, bot["id"], chat["id"]) == []
     again = client.get(f"/api/bots/{bot['id']}/chats/{chat['id']}").json()
-    assert [item["chip"] for item in again["messages"] if item.get("role") == "user"] == ["queued", "queued"]
+    assert [item["chip"] for item in again["messages"] if item.get("role") == "user"] == ["answered", "answered"]
+    assert any(item.get("content") == "Sent it." for item in again["messages"])
 
-    async def complete(**_kwargs):
-        return "Sent it."
-
-    monkeypatch.setattr("easyagent.llm.complete", complete)
     sent = client.post(f"/api/bots/{bot['id']}/chats/{chat['id']}/messages/{users[0]['id']}/send-now")
     assert sent.status_code == 200, sent.text
     body = sent.json()

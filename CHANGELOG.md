@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.3.42
+- A script file redirected into an interpreter still waits when another redirection sits beside it. `python3 < script.py 2>&1`, `2>/dev/null`, and `>out` are the same program as `python3 < script.py`. python, node, ruby, perl, php, sh, bash, and dash are included, including while /yolo is on. A harmless script still runs.
+- `python3 < p2.py 2>&1`, and the same command with `1>&2`, `3>&1`, and `1>&1`, wait for python3, node, sh, bash, and perl, including while /yolo is on. `<&1` copies a descriptor. A leading `&` on any other redirected name (`<&p2.py`) is still that file. A harmless script still runs.
+
 ## 0.3.41
 - A Windows command with a workdir starts in that folder. The same words run again in another folder still run. PowerShell is moved with Set-Location, so the process working directory is that folder, not only the reported cwd line. A secret folder is still refused.
 - A script file redirected into an interpreter waits when that file reads a secret, or when the file cannot be read. python3, python, node, ruby, perl, php, sh, and bash are included (`python3 < script.py`, and the same `< file` form for the others, including while /yolo is on). `python.exe`, `py -3`, `node.exe`, and `ruby.exe` wait the same way. A harmless script (`print(1)`, `console.log(1)`, `puts 1`, `echo hi`) still runs. `grep x < notes.txt` does not wait.

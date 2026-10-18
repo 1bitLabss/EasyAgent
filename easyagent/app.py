@@ -1673,7 +1673,7 @@ def create_app(data_dir: str | Path | None = None) -> FastAPI:
         _require_endpoint(store, bot_id)
         chat = store.get_chat(bot_id, chat_id)
         if not _can_retry(chat.get("messages") or []):
-            raise HTTPException(400, "Nothing to retry. The last stored turn is not waiting on a reply.")
+            return _public_chat(store, chat)
         if turn_mod.is_busy(store, chat_id):
             raise HTTPException(409, "This job is still running. Stop is what cancels it.")
         turn_mod.interrupt(store, chat_id, "the reply is being tried again")
@@ -2878,17 +2878,28 @@ def _sse(payload: dict) -> str:
 
 
 def _can_retry(messages: list) -> bool:
-    if not messages:
+    """True when some user line still has no real reply. A finished answer hides Retry.
+
+    Status rows do not count. Nothing to retry returns the chat as it is.
+    """
+    rows = [item for item in messages or [] if isinstance(item, dict)]
+    for message in reversed(rows):
+        kind = str(message.get("kind") or "")
+        if kind in {"status", "pickup", "activity"}:
+            continue
+        if message.get("role") == "user" and not message.get("harness"):
+            return True
+        if message.get("role") != "assistant":
+            continue
+        if message.get("error"):
+            return True
+        text = (message.get("content") or "").strip()
+        if text == "Stopped." or text.startswith("Stopped:"):
+            return True
+        if kind in {"resume-offer", "connection"}:
+            return True
         return False
-    last = messages[-1]
-    if last.get("role") == "user":
-        return True
-    if last.get("role") != "assistant":
-        return False
-    if last.get("error"):
-        return True
-    text = (last.get("content") or "").strip()
-    return text == "Stopped." or text.startswith("Stopped:")
+    return False
 
 
 def _public_yolo(chat: dict) -> dict:
@@ -4552,6 +4563,12 @@ async def _finish_turn(store: Store, bot_id: str, chat_id: str) -> None:
         from easyagent.hermes_busy import handoff_leftover_steer
 
         handoff_leftover_steer(store, bot_id, chat_id)
+        from easyagent.plan import HELD_FOLLOW_REASON, park_queued_visible, queued_items
+
+        if slot.drain_chains >= DRAIN_CHAIN_CAP and queued_items(store, bot_id, chat_id):
+            park_queued_visible(store, bot_id, chat_id, HELD_FOLLOW_REASON)
+            turn_mod.clear_busy(store, chat_id)
+            return
         if _run_paused(store, bot_id, chat_id) and not slot.deliver_queue:
             turn_mod.clear_busy(store, chat_id)
             return
@@ -6169,7 +6186,7 @@ async def _stream_retry(store: Store, bot_id: str, chat_id: str):
     async def produce():
         chat = store.get_chat(bot_id, chat_id)
         if not _can_retry(chat.get("messages") or []):
-            yield _sse({"type": "error", "detail": "Nothing to retry. The last stored turn is not waiting on a reply."})
+            yield _sse({"type": "done", "chat": _public_chat(store, chat)})
             return
         async for chunk in _stream_reply(store, bot_id, chat_id):
             yield chunk

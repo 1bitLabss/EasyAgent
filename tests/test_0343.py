@@ -312,3 +312,117 @@ def test_a_stale_stop_does_not_cancel_the_next_run(tmp_path, monkeypatch):
     assert seen["cancelled"] is False
     assert any(item.get("content") == "still here" for item in sent.json().get("messages") or sent.json().get("chat", {}).get("messages") or [])
     client.close()
+
+
+def test_retry_stays_quiet_until_a_turn_is_unanswered(tmp_path, monkeypatch):
+    """A finished reply hides Retry. An unanswered user line, even behind a status row, is resent."""
+    calls = {"n": 0}
+
+    async def complete(**_kwargs):
+        calls["n"] += 1
+        return "the answer"
+
+    monkeypatch.setattr("easyagent.llm.complete", complete)
+    app, client, bot, chat = _client(tmp_path)
+    client.patch(f"/api/bots/{bot['id']}", json={"check_enabled": False})
+    store = app.state.store
+    base = f"/api/bots/{bot['id']}/chats/{chat['id']}"
+    sent = client.post(f"{base}/messages", json={"content": "hello"})
+    assert sent.status_code == 200, sent.text
+    done = calls["n"]
+    quiet = client.post(f"{base}/retry")
+    assert quiet.status_code == 200, quiet.text
+    assert calls["n"] == done
+    assert "Nothing to retry" not in quiet.text
+    saved = store.get_chat(bot["id"], chat["id"])
+    assert not any("Nothing to retry" in str(item.get("content") or "") for item in saved["messages"])
+    streamed = client.post(f"{base}/retry", headers={"Accept": "text/event-stream"})
+    assert streamed.status_code == 200, streamed.text
+    assert "Nothing to retry" not in streamed.text
+    assert calls["n"] == done
+
+    saved = store.get_chat(bot["id"], chat["id"])
+    saved["messages"].append({
+        "id": "u-wait",
+        "role": "user",
+        "content": "please answer this",
+        "created_at": now_iso(),
+    })
+    saved["messages"].append({
+        "id": "s-wait",
+        "role": "assistant",
+        "kind": "status",
+        "about": "queue",
+        "content": "Working 1s. waiting on model.",
+        "created_at": now_iso(),
+    })
+    saved["run"] = {"id": "idle", "status": "idle", "current_step": "", "reason": ""}
+    store.save_chat(saved)
+    again = client.post(f"{base}/retry")
+    assert again.status_code == 200, again.text
+    assert calls["n"] == done + 1
+    final = store.get_chat(bot["id"], chat["id"])
+    assert final["messages"][-1]["content"] == "the answer"
+    assert "Nothing to retry" not in again.text
+    client.close()
+
+
+def test_past_the_drain_cap_the_queue_is_shown_held(tmp_path, monkeypatch):
+    """A chain that will not keep draining shows the leftover line. It does not sit queued on an idle chat."""
+    monkeypatch.setattr("easyagent.plan.FOLLOW_CAP", 0)
+    monkeypatch.setattr("easyagent.app.DRAIN_CHAIN_CAP", 0)
+
+    async def complete(**_kwargs):
+        from easyagent.plan import enqueue
+
+        enqueue(store, bot["id"], chat["id"], "left behind")
+        return "answered the first"
+
+    monkeypatch.setattr("easyagent.llm.complete", complete)
+    app, client, bot, chat = _client(tmp_path)
+    client.patch(f"/api/bots/{bot['id']}", json={"check_enabled": False, "busy_input": "follow"})
+    store = app.state.store
+    sent = client.post(
+        f"/api/bots/{bot['id']}/chats/{chat['id']}/messages",
+        json={"content": "first line"},
+    )
+    assert sent.status_code == 200, sent.text
+    saved = store.get_chat(bot["id"], chat["id"])
+    left = next(item for item in saved["messages"] if item.get("content") == "left behind")
+    assert left.get("chip") == "held"
+    assert "too many follow-ups" in (left.get("refuse_reason") or "")
+    notes = [item for item in saved["messages"] if item.get("kind") == "status" and item.get("about") == "queue"]
+    assert len(notes) == 1
+    assert "too many follow-ups" in notes[0]["content"]
+    from easyagent.plan import queued_items
+
+    assert queued_items(store, bot["id"], chat["id"]) == []
+    assert saved["run"]["status"] != "running"
+    client.close()
+
+
+def test_a_stale_ownerless_busy_flag_and_stop_are_reaped(tmp_path):
+    import time
+
+    from easyagent import turn as turn_mod
+
+    app, client, bot, chat = _client(tmp_path)
+    store = app.state.store
+    slot = turn_mod.slot_for(store, chat["id"])
+    slot.busy = True
+    slot.worker = None
+    slot.user_stop = True
+    slot.claimed_at = 0.0
+    assert turn_mod.is_busy(store, chat["id"]) is True
+    assert slot.user_stop is True
+    slot.claimed_at = 42.0
+    turn_mod.bind(store, chat["id"], bot_id=bot["id"])
+    assert slot.claimed_at == 42.0
+    slot.busy = True
+    slot.worker = None
+    slot.user_stop = True
+    slot.claimed_at = time.monotonic() - 30
+    assert turn_mod.is_busy(store, chat["id"]) is False
+    assert slot.busy is False
+    assert slot.user_stop is False
+    client.close()

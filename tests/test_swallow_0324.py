@@ -311,7 +311,7 @@ def test_queue_mode_does_not_abort_the_model_call(tmp_path, monkeypatch):
             await asyncio.wait_for(started.wait(), timeout=5)
             second = await client.post(url, json={"content": "later"})
             assert second.status_code == 200
-            assert "Still on this job" in second.json()["reply"]
+            assert "Working" in second.json()["reply"]
             slot = turn_mod.slot_for(app.state.store, chat["id"])
             assert slot.cancel.is_set() is False
             assert calls["n"] == 1
@@ -570,5 +570,9 @@ def test_past_the_waiting_cap_returns_429_and_writes_nothing(tmp_path):
     after = store.get_chat(bot["id"], chat["id"])["messages"]
     assert [item.get("id") for item in after] == before
     assert all(item.get("content") != "not-stored" for item in after)
+    assert any(
+        item.get("kind") == "status" and item.get("content") == "The waiting list is full. That message was not added."
+        for item in after
+    )
     assert len(queued_items(store, bot["id"], chat["id"])) == QUEUE_CAP
     client.close()

@@ -454,8 +454,12 @@ function markNotSent(botId: string, chatId: string, clientId: string) {
 }
 
 export async function sendMessage(botId: string, chatId: string, text: string, file?: File | null, clientId?: string) {
+  const cached = queryClient.getQueryData<Chat>(["chat", botId, chatId]);
+  const serverBusy = cached?.run?.status === "running";
   const existing = flightFor(botId, chatId);
-  if (existing?.sending && !existing.replaced) {
+  if (serverBusy) {
+    const flight = existing && !existing.replaced ? existing : null;
+    const control = flight?.control || new AbortController();
     const id = optimisticUser(botId, chatId, text, "queued", clientId);
     try {
       let attachmentId: string | null = null;
@@ -468,7 +472,7 @@ export async function sendMessage(botId: string, chatId: string, text: string, f
       const response = await streamPost(
         `/api/bots/${botId}/chats/${chatId}/messages`,
         { content: text, attachment_id: attachmentId, client_id: id },
-        existing.control.signal,
+        control.signal,
       );
       const type = response.headers.get("content-type") || "";
       if (type.includes("application/json")) {
@@ -477,16 +481,18 @@ export async function sendMessage(botId: string, chatId: string, text: string, f
           const prev = queryClient.getQueryData<Chat>(["chat", botId, chatId]);
           queryClient.setQueryData(["chat", botId, chatId], mergeChat(prev, data.chat));
         }
-        if (existing.live) {
-          remember(existing, carry(existing.live, { aside: String(data.reply || ""), run: data.chat?.run || existing.live.run }));
+        if (flight?.live) {
+          remember(flight, carry(flight.live, { aside: String(data.reply || ""), run: data.chat?.run || flight.live.run }));
         }
         return;
       }
-      await readEvents(response, existing);
+      if (flight) await readEvents(response, flight);
+      else await response.text();
     } catch (error) {
-      if (existing.replaced) return;
-      if (error instanceof DOMException && error.name === "AbortError" && existing.control.signal.aborted) return;
+      if (flight?.replaced) return;
+      if (error instanceof DOMException && error.name === "AbortError" && control.signal.aborted) return;
       markNotSent(botId, chatId, id);
+      throw error instanceof Error ? error : new Error("The reply failed.");
     }
     return;
   }
@@ -674,20 +680,28 @@ export async function retryUnsent(botId: string, chatId: string, clientId: strin
   await sendMessage(botId, chatId, row.content || "", null, clientId);
 }
 
+function unansweredTurn(chat: Chat | undefined): boolean {
+  const rows = chat?.messages || [];
+  for (let index = rows.length - 1; index >= 0; index -= 1) {
+    const message = rows[index];
+    if (!message) continue;
+    const kind = message.kind || "";
+    if (kind === "status" || kind === "pickup" || kind === "activity") continue;
+    if (message.role === "user" && !message.harness) return true;
+    if (message.role !== "assistant") continue;
+    const text = (message.content || "").trim();
+    if (message.error || text === "Stopped." || text.startsWith("Stopped:")) return true;
+    if (kind === "resume-offer" || kind === "connection") return true;
+    return false;
+  }
+  return false;
+}
+
 export function canResume(chat: Chat | undefined, flight: Flight | null) {
   const serverBusy = chat?.run?.status === "running";
-  if (serverBusy && flight?.sending && flight.live && flight.live.phase !== "stopped" && flight.live.phase !== "error") {
-    return { retry: false, cont: false };
-  }
-  const run = chat?.run;
-  const last = chat?.messages?.slice(-1)[0];
-  const text = (last?.content || "").trim();
-  const stoppedMsg = Boolean(last && last.role === "assistant" && (last.error || text === "Stopped." || text.startsWith("Stopped:")));
-  const waitingUser = Boolean(last && last.role === "user" && !flight?.live);
-  const runBad = run?.status === "stopped" || run?.status === "error";
+  if (serverBusy) return { retry: false, cont: false };
+  const waiting = unansweredTurn(chat);
   const liveStopped = flight?.live?.phase === "stopped" || flight?.live?.phase === "error";
-  return {
-    retry: Boolean(liveStopped || stoppedMsg || waitingUser || runBad),
-    cont: Boolean(liveStopped || stoppedMsg || runBad),
-  };
+  const show = Boolean(waiting || (liveStopped && waiting));
+  return { retry: show, cont: show };
 }

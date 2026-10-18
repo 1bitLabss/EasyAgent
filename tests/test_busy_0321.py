@@ -18,7 +18,7 @@ def test_two_busy_messages_stay_after_a_refresh(tmp_path):
     for text in ("what are you doing?", "and the second?"):
         response = client.post(url, json={"content": text})
         assert response.status_code == 200
-        assert response.json()["reply"].startswith("Still on this job.")
+        assert response.json()["reply"].startswith("Working")
     first = client.get(f"/api/bots/{bot['id']}/chats/{chat['id']}").json()
     again = client.get(f"/api/bots/{bot['id']}/chats/{chat['id']}").json()
     for public in (first, again):
@@ -26,10 +26,10 @@ def test_two_busy_messages_stay_after_a_refresh(tmp_path):
         notes = [item for item in public["messages"] if item.get("kind") == "status"]
         assert [item["content"] for item in users] == ["what are you doing?", "and the second?"]
         assert [item["chip"] for item in users] == ["queued", "queued"]
-        assert len(notes) == 2
-        assert all(item["content"].startswith("Still on this job.") for item in notes)
-        assert notes[0]["about"] == users[0]["id"]
-        assert notes[1]["about"] == users[1]["id"]
+        assert len(notes) == 1
+        assert notes[0]["content"].startswith("Working")
+        assert notes[0]["about"] == "queue"
+        assert "2 waiting." in notes[0]["content"]
     client.close()
 
 

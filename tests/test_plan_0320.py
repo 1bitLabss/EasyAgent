@@ -118,7 +118,7 @@ def test_mid_run_question_does_not_restart(tmp_path):
     )
     assert response.status_code == 200
     body = response.json()
-    assert body["reply"].startswith("Still on this job.")
+    assert body["reply"].startswith("Working")
     assert "Step 2 of 3: Write the summary." in body["reply"]
     again = store.get_chat(bot["id"], chat["id"])
     assert again["run"]["id"] == "run-keep"
@@ -139,11 +139,11 @@ def test_queue_cap_refuses_the_eleventh_message(tmp_path):
     for number in range(QUEUE_CAP):
         response = client.post(url, json={"content": f"note {number}"})
         assert response.status_code == 200
-        assert response.json()["reply"].startswith("Still on this job.")
+        assert response.json()["reply"].startswith("Working")
     extra = client.post(url, json={"content": "past the cap"})
     assert extra.status_code == 200
     assert "queue is full" in extra.json()["reply"]
-    assert "not restarted" in extra.json()["reply"]
+    assert "held" in extra.json()["reply"]
     stored = store.get_chat(bot["id"], chat["id"])
     assert stored["run"]["id"] == "run-keep"
     refused = [item for item in stored["messages"] if item.get("content") == "past the cap"]

@@ -1704,7 +1704,7 @@ def test_a_second_send_does_not_cancel_the_model_request(tmp_path, monkeypatch):
             ) as response:
                 assert response.status_code == 200
                 body = (await response.aread()).decode()
-            assert "Still on this job" in body
+            assert "Working" in body
             assert calls["n"] == 1
             assert turn_mod.slot_for(app.state.store, chat["id"]).run_id == run_id
             assert not turn_mod.slot_for(app.state.store, chat["id"]).cancel.is_set()

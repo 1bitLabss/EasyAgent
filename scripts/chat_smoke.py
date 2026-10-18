@@ -201,18 +201,18 @@ def main() -> int:
     during_messages = during_doc.get("messages") or []
     notes = [
         item for item in during_messages
-        if item.get("kind") == "status" and "Still on this job" in str(item.get("content") or "")
+        if item.get("kind") == "status" and str(item.get("content") or "").startswith("Working")
     ]
     both_present = all(any(item.get("content") == text for item in during_messages) for text, _code, _body in sent)
-    both_ok = all(code == 200 and "Still on this job" in body for _text, code, body in sent)
-    if not both_ok or during_run.get("id") != run_id or not both_present or len(notes) < 2:
+    both_ok = all(code == 200 and "Working" in body for _text, code, body in sent)
+    if not both_ok or during_run.get("id") != run_id or not both_present or len(notes) != 1:
         HOLD.set()
         worker.join(timeout=20)
         print(f"FAIL: status during the turn: {sent!r}")
         print("run during question:", during_run.get("id"), "expected", run_id)
         print("messages:", [item.get("content") for item in during_messages])
         return 1
-    print("status during turn: two messages kept, both with a status note, same run", flush=True)
+    print("status during turn: two messages kept, one status line, same run", flush=True)
     HOLD.set()
     worker.join(timeout=60)
     if "result" not in box:

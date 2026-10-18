@@ -100,6 +100,16 @@ describe("retainLocalTail", () => {
     expect(echoed.filter((item) => item.client_id === "c-1" || item.content === "do not lose this")).toHaveLength(1);
   });
 
+  it("does not duplicate an id-less row when polls share no id", () => {
+    const local = { role: "user" as const, content: "queued while busy", chip: "queued" as const };
+    let merged = retainLocalTail([local], [message("other", "unrelated")]);
+    for (let n = 0; n < 20; n += 1) {
+      merged = retainLocalTail(merged, [message("other", "unrelated")]);
+    }
+    expect(merged.filter((item) => item.content === "queued while busy")).toHaveLength(1);
+    expect(merged.filter((item) => item.id === "other")).toHaveLength(1);
+  });
+
   it("replaces a row when its chip changes", () => {
     const first = [{ id: "u", role: "user", content: "hi", chip: "queued" }];
     const seen = [{ id: "u", role: "user", content: "hi", chip: "seen", seen_step: 2 }];

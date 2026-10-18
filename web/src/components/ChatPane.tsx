@@ -551,6 +551,7 @@ export function ChatPane() {
       if (typeof Notification !== "undefined" && Notification.permission === "default") void Notification.requestPermission();
       await sendMessage(botId, chatId, text, file);
     } catch (reason) {
+      setDraft((current) => current || text);
       setError(reason instanceof Error ? reason.message : "The reply failed.");
     }
   }
@@ -790,7 +791,12 @@ export function ChatPane() {
                   setDraft("");
                   setFileName("");
                   if (fileRef.current) fileRef.current.value = "";
-                  void stopMessage(botId, chatId).then(() => sendMessage(botId, chatId, text, file));
+                  void stopMessage(botId, chatId)
+                    .then(() => sendMessage(botId, chatId, text, file))
+                    .catch((reason: Error) => {
+                      setDraft((current) => current || text);
+                      setError(reason?.message || "The reply failed.");
+                    });
                 }}
               >
                 Stop and send

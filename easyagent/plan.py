@@ -107,6 +107,40 @@ def queued_items(store: Store, bot_id: str, chat_id: str) -> list[dict]:
     return list(_read_queue(store, bot_id, chat_id)["items"])
 
 
+def park_queued_visible(store: Store, bot_id: str, chat_id: str, reason: str) -> int:
+    """Take a queue the drain will not run and show each line as held.
+
+    A queued chip on an idle chat is a strand. Held is on screen, with Retry.
+    """
+    payload = _read_queue(store, bot_id, chat_id)
+    items = payload["items"]
+    if not items:
+        return 0
+    ids = {str(item.get("id") or "") for item in items if item.get("id")}
+    try:
+        chat = store.get_chat(bot_id, chat_id)
+    except Exception:
+        return 0
+    messages = list(chat.get("messages") or [])
+    shown = reason or HELD_FOLLOW_REASON
+    for message in messages:
+        if not isinstance(message, dict) or message.get("role") != "user":
+            continue
+        if str(message.get("id") or "") not in ids:
+            continue
+        message["chip"] = "held"
+        message["refuse_reason"] = shown
+        message.pop("queued", None)
+    _upsert_queue_status(messages, shown)
+    chat["messages"] = messages
+    chat["updated_at"] = now_iso()
+    store.save_chat(chat)
+    payload["items"] = []
+    payload["last_status"] = shown
+    _write_queue(store, bot_id, chat_id, payload)
+    return len(ids)
+
+
 def last_status(store: Store, bot_id: str, chat_id: str) -> str:
     return _read_queue(store, bot_id, chat_id)["last_status"]
 
@@ -185,27 +219,22 @@ def is_stuck(run: dict, now: datetime | None = None) -> bool:
 
 
 def status_text(chat: dict, plan: dict | None, queued: int, *, full: bool = False, now: datetime | None = None) -> str:
-    """The instant reply. The first words stay stable so a check can look for them."""
+    """One quiet line. Callers rewrite the same status row instead of stacking another."""
     run = chat.get("run") if isinstance(chat.get("run"), dict) else {}
-    activity = " ".join(str(run.get("current_step") or "Working").split()) or "Working"
+    activity = " ".join(str(run.get("current_step") or "waiting on model").split()) or "waiting on model"
     elapsed = format_elapsed(elapsed_seconds(run, now))
     index, total, label = progress(plan)
     if total and index:
-        head = f"Still on this job. Step {index} of {total}: {label}."
-        tail = f" Last activity: {activity}. Elapsed {elapsed}. Queued: {queued}."
-    elif total:
-        head = f"Still on this job. {activity}."
-        tail = f" Last activity: {activity}. Elapsed {elapsed}. Queued: {queued}."
+        line = f"Working {elapsed}. Step {index} of {total}: {label}."
     else:
-        head = f"Still on this job. {activity}."
-        tail = f" Last activity: {activity}. Elapsed {elapsed}. No checklist yet."
-        if queued:
-            tail += f" Queued: {queued}."
+        line = f"Working {elapsed}. {activity}."
+    if queued:
+        line += f" {queued} waiting."
     if is_stuck(run, now):
-        tail += " No activity for a while."
+        line += " No activity for a while."
     if full:
-        tail += " The queue is full, so that message was not added. The job was not restarted."
-    return head + tail
+        line += " The queue is full, so that message is held."
+    return line
 
 
 def run_fields(store: Store, chat: dict, now: datetime | None = None) -> dict:
@@ -524,6 +553,24 @@ def _user_row(
     return row
 
 
+def _upsert_queue_status(messages: list, text: str) -> dict:
+    """Rewrite the one queue status row and keep it next to the latest user line."""
+    existing = None
+    for message in messages:
+        if isinstance(message, dict) and message.get("kind") == "status" and message.get("about") == "queue":
+            existing = message
+            break
+    if existing is not None:
+        existing["content"] = text
+        existing["created_at"] = now_iso()
+        messages.remove(existing)
+        _splice_before_live(messages, [existing])
+        return existing
+    row = _status_row("queue", text)
+    _splice_before_live(messages, [row])
+    return row
+
+
 def _status_row(about: str, text: str) -> dict:
     return {
         "id": new_id(),
@@ -548,6 +595,8 @@ def _pickup_row(about: str) -> dict:
 
 REFUSE_REASON = "The queue is full, so that message was not added. The job was not restarted."
 HELD_REASON = "The reply failed, so this message is held. Retry to send it again."
+HELD_FOLLOW_REASON = "Held: too many follow-ups in a row. Retry to send what is left."
+WAITING_FULL_TEXT = "The waiting list is full. That message was not added."
 HELD_FULL_REASON = "The queue is full, so this message is held. The job was not restarted. Retry to send it again."
 REFUSE_NOTHING = "The queue cannot take another message. Nothing was saved."
 UNSENT_REASON = "Not sent (job stopped)"
@@ -765,10 +814,14 @@ def _enqueue(
         if isinstance(row, dict) and row.get("role") == "user" and row.get("chip") == "held"
     )
     if full and len(items) + held_count >= WAITING_CAP:
+        note = _upsert_queue_status(messages, WAITING_FULL_TEXT)
+        chat["messages"] = messages
+        chat["updated_at"] = now_iso()
+        store.save_chat(chat)
         return {
-            "text": REFUSE_NOTHING,
+            "text": WAITING_FULL_TEXT,
             "message": None,
-            "note": None,
+            "note": note,
             "full": True,
             "queued": len(items),
             "refused": True,
@@ -789,12 +842,12 @@ def _enqueue(
         "refuse_reason": reason,
         "client_id": client_id,
     }
-    note = _status_row(message_id, text)
     if not full:
         items.append(message)
     row = _user_row(message_id, content, attachment, at, message["chip"], reason, client_id)
     _stamp_before(row, _live_open(messages))
-    _splice_before_live(messages, [row, note])
+    _splice_before_live(messages, [row])
+    note = _upsert_queue_status(messages, text)
     chat["messages"] = messages
     chat["updated_at"] = now_iso()
     store.save_chat(chat)
@@ -851,11 +904,7 @@ def _steer(store: Store, bot_id: str, chat_id: str, working: list | None) -> int
             }
             if item.get("attachment"):
                 user["attachment"] = item["attachment"]
-            fresh = [
-                user,
-                _status_row(user_id, item.get("status") or payload.get("last_status") or ""),
-            ]
-            _splice_before_live(messages, fresh)
+            _splice_before_live(messages, [user])
         else:
             existing["chip"] = "seen"
             existing["seen_step"] = index
@@ -1051,13 +1100,7 @@ def _force_enqueue(store: Store, bot_id: str, chat_id: str, message_id: str) -> 
     target["chip"] = "queued"
     target["queued"] = True
     target.pop("refuse_reason", None)
-    noted = False
-    for message in messages:
-        if isinstance(message, dict) and message.get("kind") == "status" and message.get("about") == message_id:
-            message["content"] = text
-            noted = True
-    if not noted:
-        _splice_before_live(messages, [_status_row(message_id, text)])
+    _upsert_queue_status(messages, text)
     for item in items:
         if item.get("id") == message_id:
             item["status"] = text

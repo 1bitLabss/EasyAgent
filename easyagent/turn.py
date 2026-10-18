@@ -219,7 +219,6 @@ def bind(store, chat_id: str, bot_id: str = "", *, resume: bool = False) -> Slot
         slot.worker = asyncio.current_task()
     except RuntimeError:
         slot.worker = None
-    slot.claimed_at = 0.0
     _cancel.set(slot.cancel)
     _slot.set(slot)
     return slot
@@ -240,11 +239,13 @@ def _forget_finished(slot: Slot) -> asyncio.Task | None:
     if worker is not None and worker.done():
         slot.worker = None
         slot.busy = False
+        slot.user_stop = False
         return None
     if slot.busy and worker is None and not _slot_in_flight(slot):
         claimed = float(getattr(slot, "claimed_at", 0.0) or 0.0)
         if claimed and time.monotonic() - claimed > 15:
             slot.busy = False
+            slot.user_stop = False
             slot.claimed_at = 0.0
             return None
     return worker

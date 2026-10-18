@@ -1374,21 +1374,25 @@ function renderStopped(messages) {
 
 function resumeState() {
   const none = { retry: false, cont: false };
-  if (state.sending && !(state.live && (state.live.phase === "stopped" || state.live.phase === "error"))) return none;
-  if (state.live && state.live.phase !== "stopped" && state.live.phase !== "error") return none;
   const run = (state.chat && state.chat.run) || {};
-  const last = ((state.chat && state.chat.messages) || []).slice(-1)[0];
-  const liveStopped = Boolean(state.live && (state.live.phase === "stopped" || state.live.phase === "error"));
-  const text = last ? String(last.content || "").trim() : "";
-  const stoppedMsg = Boolean(last && last.role === "assistant" && (
-    last.error || text === "Stopped." || text.startsWith("Stopped:")
-  ));
-  const waitingUser = Boolean(last && last.role === "user" && !state.live);
-  const runBad = run.status === "stopped" || run.status === "error";
-  return {
-    retry: Boolean(liveStopped || stoppedMsg || waitingUser || runBad),
-    cont: Boolean(liveStopped || stoppedMsg || runBad),
-  };
+  if (run.status === "running") return none;
+  const rows = (state.chat && state.chat.messages) || [];
+  let waiting = false;
+  for (let index = rows.length - 1; index >= 0; index -= 1) {
+    const message = rows[index];
+    if (!message) continue;
+    const kind = message.kind || "";
+    if (kind === "status" || kind === "pickup" || kind === "activity") continue;
+    if (message.role === "user") {
+      waiting = true;
+      break;
+    }
+    if (message.role !== "assistant") continue;
+    const text = String(message.content || "").trim();
+    waiting = Boolean(message.error || text === "Stopped." || text.startsWith("Stopped:") || kind === "resume-offer" || kind === "connection");
+    break;
+  }
+  return { retry: waiting, cont: waiting };
 }
 
 const REACTIONS = ["👍", "👎", "❤️", "👀"];
@@ -2333,23 +2337,46 @@ async function sendDraft(event) {
       }
     }
     const already = streams.get(streamKey(botId, chatId));
-    if (already && already.sending && !already.replaced && chatId) {
-      showOutgoing(text, already);
-      const payload = { content: text };
-      if (file) {
-        const body = new FormData();
-        body.append("file", file);
-        const headers = {};
-        const token = sharedToken();
-        if (token) headers["X-EasyAgent-Token"] = token;
-        const response = await fetch(`/api/bots/${botId}/chats/${chatId}/files`, { method: "POST", headers, body });
-        const uploaded = await response.json().catch(() => ({}));
-        if (!response.ok) throw new Error(uploaded.detail || "That file was not kept.");
-        payload.attachment_id = uploaded.id;
-        fileInput.value = "";
+    const serverBusy = Boolean(state.chat && state.chat.run && state.chat.run.status === "running");
+    if (chatId && (serverBusy || (already && already.sending && !already.replaced))) {
+      const owned = !(already && already.sending && !already.replaced);
+      const flight = owned ? beginFlight(botId, chatId) : already;
+      try {
+        showOutgoing(text, flight);
+        const payload = { content: text };
+        if (file) {
+          const body = new FormData();
+          body.append("file", file);
+          const headers = {};
+          const token = sharedToken();
+          if (token) headers["X-EasyAgent-Token"] = token;
+          const response = await fetch(`/api/bots/${botId}/chats/${chatId}/files`, { method: "POST", headers, body });
+          const uploaded = await response.json().catch(() => ({}));
+          if (!response.ok) throw new Error(uploaded.detail || "That file was not kept.");
+          payload.attachment_id = uploaded.id;
+          fileInput.value = "";
+        }
+        await streamPost(`/api/bots/${botId}/chats/${chatId}/messages`, payload, flight);
+        if (isVisible(flight)) renderThread();
+      } catch (error) {
+        if (flight.replaced || error.name === "AbortError") return;
+        if (!$("draft").value.trim()) $("draft").value = text;
+        state.drafts[chatId] = $("draft").value;
+        const detail = error.message || "The reply failed.";
+        formError("thread-error", detail);
+        const rows = (state.chat && state.chat.messages) || [];
+        const pending = rows.find((item) => item && !item.id && item.role === "user" && item.content === text);
+        if (pending) {
+          pending.chip = "unsent";
+          pending.refuse_reason = detail;
+        }
+        if (owned) {
+          flight.sending = false;
+          if (isVisible(flight)) state.sending = false;
+          syncStop();
+        }
+        if (isVisible(flight)) renderThread();
       }
-      await streamPost(`/api/bots/${botId}/chats/${chatId}/messages`, payload, already);
-      if (isVisible(already)) renderThread();
       return;
     }
     stream = beginFlight(botId, chatId);

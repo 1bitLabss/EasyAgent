@@ -112,14 +112,28 @@ export function retainLocalTail(prev: ChatMessage[] | undefined, incoming: ChatM
   if (!prev?.length) return dedupeMessages(incoming);
   const incomingIds = new Set(incoming.filter((message) => message.id).map((message) => message.id as string));
   const incomingClients = new Set(incoming.filter((message) => message.client_id).map((message) => message.client_id as string));
+  const keepLocal = (message: ChatMessage | undefined) => {
+    if (!message || message.role !== "user" || message.id) return false;
+    if (message.client_id && incomingClients.has(message.client_id)) return false;
+    const echoed = incoming.some(
+      (item) => item.role === "user" && item.content === message.content && Boolean(item.id || item.client_id),
+    );
+    return !echoed;
+  };
   let split = prev.length;
+  let shared = false;
   for (let index = prev.length - 1; index >= 0; index -= 1) {
     const id = prev[index]?.id;
     if (id && incomingIds.has(id)) {
       split = index + 1;
+      shared = true;
       break;
     }
-    if (index === 0) split = 0;
+  }
+  if (!shared) {
+    const local = prev.filter((message) => keepLocal(message));
+    if (!local.length) return dedupeMessages(incoming);
+    return dedupeMessages([...incoming, ...local]);
   }
   const tail = prev.slice(split).filter((message) => {
     if (!message) return false;

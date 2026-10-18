@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.3.40
+- A traced search that checks openat runs only on Linux or macOS, and only when strace and rg are both installed. Windows skips that trace. The search still finds an ordinary line and does not open a named secret.
+- A command with a workdir names that folder even when it prints nothing. PowerShell output that arrives as UTF-16 is read as text, so `echo bye` still shows bye. A secret folder is still refused.
+
 ## 0.3.39
 - An interpreter that reads its program from stdin waits when that program reads a secret, or when the text cannot be proved. python, python3, node, ruby, perl, php, deno, and bun are included. The text can be a here-string (`python - <<< 'print(open(".env").read())'`, `node - <<< ...`, `ruby <<< 'puts File.read(".env")'`), a heredoc, a process substitution (`python - < <(echo '...')`, including while /yolo is on), or a pipe (`echo '...' | python -`). `python.exe`, `py -3 -`, `node.exe`, `ruby.exe`, and `open(".\.env")` wait the same way. `python - <<< 'print(1)'`, `node - <<< 'console.log(1)'`, `ruby <<< 'puts 1'`, and a proved `open("notes.txt")` still run. A syntax error, an import, an unknown call, and a path that is not a literal wait.
 

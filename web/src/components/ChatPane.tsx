@@ -1,6 +1,7 @@
 import { useQuery } from "@tanstack/react-query";
 import { MessageSquare, Terminal } from "lucide-react";
 import { memo, useCallback, useEffect, useLayoutEffect, useRef, useState, type ReactNode } from "react";
+import { useStickToBottom } from "use-stick-to-bottom";
 import { api, queryClient } from "@/api";
 import { ApprovalCard } from "@/components/ApprovalCard";
 import { Composer, type ComposerHandle } from "@/components/Composer";
@@ -355,7 +356,7 @@ export function ChatPane() {
   const [error, setError] = useState("");
   const [askId, setAskId] = useState("");
   const [menu, setMenu] = useState(false);
-  const scroller = useRef<HTMLDivElement>(null);
+  const { scrollRef, contentRef, isAtBottom, scrollToBottom } = useStickToBottom({ initial: "instant", resize: "instant" });
   const sectionRef = useRef<HTMLElement>(null);
   const dockRef = useRef<HTMLDivElement>(null);
   const composerRef = useRef<ComposerHandle>(null);
@@ -414,16 +415,13 @@ export function ChatPane() {
     return () => window.clearTimeout(timer);
   }, [botId, chat.data?.id, chat.data?.message_count]);
 
-  const stick = useRef(true);
   const anchor = useRef<{ height: number; top: number } | null>(null);
   const loadingOlder = useRef(false);
-  const pinning = useRef(false);
   const messageCount = chat.data?.messages.length || 0;
 
   function onScroll() {
-    const el = scroller.current;
-    if (!el || pinning.current) return;
-    stick.current = el.scrollHeight - el.scrollTop - el.clientHeight < 80;
+    const el = scrollRef.current;
+    if (!el) return;
     if (el.scrollTop < 64) void loadOlder();
   }
 
@@ -432,11 +430,10 @@ export function ChatPane() {
     const start = chat.data?.window_start ?? 0;
     if (start <= 0) return;
     loadingOlder.current = true;
-    stick.current = false;
     try {
       const page = await api<MessagePage>(`/api/bots/${botId}/chats/${chatId}/messages?before=${start}&limit=80`);
       if (!page.messages.length || page.start >= start) return;
-      const el = scroller.current;
+      const el = scrollRef.current;
       if (el) anchor.current = { height: el.scrollHeight, top: el.scrollTop };
       queryClient.setQueryData<Chat>(["chat", botId, chatId], (current) => {
         if (!current) return current;
@@ -455,24 +452,14 @@ export function ChatPane() {
   }
 
   useLayoutEffect(() => {
-    const el = scroller.current;
-    if (!el) return;
-    const pin = (top: number) => {
-      pinning.current = true;
-      el.scrollTop = top;
-      pinning.current = false;
-    };
-    if (anchor.current) {
-      pin(anchor.current.top + (el.scrollHeight - anchor.current.height));
-      anchor.current = null;
-      return;
-    }
-    if (!stick.current) return;
-    pin(el.scrollHeight);
-  }, [messageCount, live?.text, live?.reasoning, live?.label]);
+    const el = scrollRef.current;
+    if (!el || !anchor.current) return;
+    el.scrollTop = anchor.current.top + (el.scrollHeight - anchor.current.height);
+    anchor.current = null;
+  }, [messageCount, scrollRef]);
 
   useEffect(() => {
-    const el = scroller.current;
+    const el = scrollRef.current;
     if (!el || !chat.data) return;
     if ((chat.data.window_start ?? 0) > 0 && el.scrollHeight <= el.clientHeight + 8) void loadOlder();
   }, [chat.data?.window_start, messageCount]);
@@ -589,6 +576,7 @@ export function ChatPane() {
     if (!botId || !chatId) return;
     if (!text && !file) return;
     setError("");
+    void scrollToBottom("instant");
     if (typeof Notification !== "undefined" && Notification.permission === "default") void Notification.requestPermission();
     await sendMessage(botId, chatId, text, file);
   }
@@ -678,8 +666,8 @@ export function ChatPane() {
         </div>
       ) : null}
 
-      <div ref={scroller} onScroll={onScroll} className="chat-scroll min-h-0 flex-1 overflow-y-auto px-4 pt-2" style={{ overflowAnchor: "none" }}>
-        <div className="mx-auto flex w-full max-w-[760px] flex-col gap-4">
+      <div ref={scrollRef} onScroll={onScroll} className="chat-scroll min-h-0 flex-1 overflow-y-auto px-4 pt-2" style={{ overflowAnchor: "none" }}>
+        <div ref={contentRef} className="mx-auto flex w-full max-w-[760px] flex-col gap-4">
           {!chatId || !open ? (
             <div className="flex flex-1 flex-col items-center justify-center px-6 py-24 text-center">
               <img src="/static/mascot.svg" alt="" width={120} height={120} />
@@ -749,6 +737,11 @@ export function ChatPane() {
         </div>
       </div>
 
+      {open && !isAtBottom ? (
+        <button type="button" className="jump-latest" data-testid="jump-latest" onClick={() => void scrollToBottom("instant")}>
+          Jump to latest
+        </button>
+      ) : null}
       <div ref={dockRef} className="composer-dock">
         <div className="px-4">
           {botId && bot ? <ApprovalCard botId={botId} botName={bot.name} active={running} /> : null}

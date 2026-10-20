@@ -100,7 +100,8 @@ describe("busy chips", () => {
       </QueryClientProvider>,
     );
     expect(screen.getByTestId("chip-queued").textContent).toBe("Queued");
-    expect(screen.getByTestId("chip-seen").textContent).toBe("Seen by bot (folded in at step 2)");
+    expect(screen.getByTestId("chip-seen").textContent).toBe("Seen · step 2");
+    expect(screen.getByTestId("chip-seen").getAttribute("title")).toBe("Seen by bot (folded in at step 2)");
     expect(screen.getByTestId("chip-answered").textContent).toBe("Answered");
     expect(screen.getByTestId("chip-refused").textContent).toContain("queue is full");
     expect(screen.getByTestId("chip-held").textContent).toContain("Retry");

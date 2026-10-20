@@ -4,7 +4,7 @@ export function chipText(message: Pick<ChatMessage, "chip" | "seen_step" | "refu
   if (message.chip === "queued") return "Queued";
   if (message.chip === "seen") {
     const step = message.seen_step || 0;
-    return step > 0 ? `Seen by bot (folded in at step ${step})` : "Seen by bot";
+    return step > 0 ? `Seen · step ${step}` : "Seen by bot";
   }
   if (message.chip === "answered") return "Answered";
   if (message.chip === "held") {
@@ -15,4 +15,11 @@ export function chipText(message: Pick<ChatMessage, "chip" | "seen_step" | "refu
     return message.refuse_reason || "The queue is full, so that message was not added. The job was not restarted.";
   }
   return "";
+}
+
+export function chipTitle(message: Pick<ChatMessage, "chip" | "seen_step" | "refuse_reason">): string {
+  if (message.chip === "seen" && (message.seen_step || 0) > 0) {
+    return `Seen by bot (folded in at step ${message.seen_step})`;
+  }
+  return chipText(message);
 }

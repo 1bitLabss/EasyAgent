@@ -4,7 +4,7 @@ import { chipText } from "./chips";
 describe("chipText", () => {
   it("names queued, seen, answered, and a refused message", () => {
     expect(chipText({ chip: "queued" })).toBe("Queued");
-    expect(chipText({ chip: "seen", seen_step: 2 })).toBe("Seen by bot (folded in at step 2)");
+    expect(chipText({ chip: "seen", seen_step: 2 })).toBe("Seen · step 2");
     expect(chipText({ chip: "answered" })).toBe("Answered");
     expect(chipText({ chip: "held", refuse_reason: "The reply failed, so this message is held. Retry to send it again." })).toBe(
       "The reply failed, so this message is held. Retry to send it again.",

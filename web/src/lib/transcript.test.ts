@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { FACE_PALETTE, STATE_COLORS } from "@/components/Face";
-import { hideWhileSending, messageHasBubble, reactionWho } from "@/lib/transcript";
+import { arrangeBusy, hideWhileSending, messageHasBubble, reactionWho } from "@/lib/transcript";
 
 describe("chat transcript", () => {
   it("does not draw an empty bubble for a reaction-only turn", () => {
@@ -24,5 +24,22 @@ describe("chat transcript", () => {
     expect(state.has(STATE_COLORS.waiting)).toBe(true);
     expect(STATE_COLORS.waiting).not.toBe(STATE_COLORS.reconnecting);
     for (const color of FACE_PALETTE) expect(state.has(color)).toBe(false);
+  });
+
+  it("keeps a busy message under the reply", () => {
+    const pinned = new Set<string>();
+    const rows = [
+      { id: "u0", role: "user", content: "start" },
+      { id: "u1", role: "user", content: "also check the tests", chip: "queued" },
+      { id: "a", role: "assistant", content: "done" },
+    ];
+    const placed = arrangeBusy(rows, pinned);
+    expect(placed.head.map((row) => row.id)).toEqual(["u0", "a"]);
+    expect(placed.tail.map((row) => row.id)).toEqual(["u1"]);
+    const again = arrangeBusy(
+      rows.map((row) => (row.id === "u1" ? { ...row, chip: "answered" } : row)),
+      pinned,
+    );
+    expect(again.tail.map((row) => row.id)).toEqual(["u1"]);
   });
 });

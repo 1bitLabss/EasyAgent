@@ -9,11 +9,11 @@ import { Markdown } from "@/components/Markdown";
 import { ThinkingBox } from "@/components/ThinkingBox";
 import { WindowControls } from "@/components/WindowControls";
 import { moodForReaction, pokeFace } from "@/lib/mood";
-import { chipText } from "@/lib/chips";
+import { chipText, chipTitle } from "@/lib/chips";
 import { yoloClock, yoloRemaining } from "@/lib/yolo";
 import { activityLabel, askedLine, type ActivityStep } from "@/lib/activity";
 import { activityLine, describeRun, faceStateFor, runPresence, runTone, workingLine } from "@/lib/run";
-import { answerIndex, hideWhileSending, messageHasBubble, reactionWho, rowKey } from "@/lib/transcript";
+import { answerIndex, arrangeBusy, hideWhileSending, messageHasBubble, reactionWho, rowKey } from "@/lib/transcript";
 import { cn } from "@/lib/utils";
 import { keepLoadedHistory, mergeChat, sameMessage, shareChat, type MessagePage } from "@/lib/window";
 import { useApp } from "@/store";
@@ -150,7 +150,7 @@ const MessageRow = memo(function MessageRow({
         <div className={mine ? "whitespace-pre-wrap" : ""}>
           {mine ? (message.content || "") : <Markdown text={message.content || ""} streaming={streaming} />}
         </div>
-        {chip ? <p className="mt-2 text-xs" data-testid={`chip-${message.chip}`}>{chip}</p> : null}
+        {chip ? <p className="mt-2 block truncate text-xs" data-testid={`chip-${message.chip}`} title={chipTitle(message)}>{chip}</p> : null}
         {message.chip === "held" && message.id && botId && chatId ? (
           <div className="mt-2">
             <button type="button" className="rounded-full bg-white px-3 py-1 text-sm text-foreground" data-testid="retry-held" onClick={() => void sendNow(botId, chatId, message.id || "")}>Retry</button>
@@ -361,6 +361,7 @@ export function ChatPane() {
   const composerRef = useRef<ComposerHandle>(null);
   const heldSteps = useRef<ActivityStep[]>([]);
   const seenRun = useRef("");
+  const pinnedBusy = useRef(new Set<string>());
   const bot = (bots.data || []).find((item) => item.id === botId) || null;
   const yoloLeft = yoloRemaining(chat.data?.yolo, chat.dataUpdatedAt || now, now);
   const yoloOn = yoloLeft > 0;
@@ -538,15 +539,16 @@ export function ChatPane() {
   const liveTurn = Boolean(live && live.phase !== "error" && live.phase !== "stopped");
   const stamp = runId ? `live-${runId}` : "";
   const streamingReply = Boolean(liveTurn && ((live?.text || "").trim() || (live?.reasoning || "").trim()));
-  let shown = rows;
-  const settledAnswer = answerIndex(rows);
+  const placed = arrangeBusy(rows, pinnedBusy.current);
+  let head = placed.head;
+  const settledAnswer = answerIndex(head);
   if (streamingReply && live && stamp) {
     if (settledAnswer < 0) {
-      shown = [...rows, { role: "assistant", content: live.text, thinking: live.reasoning, thought_seconds: live.thoughtSeconds, client_id: stamp }];
+      head = [...head, { role: "assistant", content: live.text, thinking: live.reasoning, thought_seconds: live.thoughtSeconds, client_id: stamp }];
     } else {
-      const answer = rows[settledAnswer];
-      shown = rows.slice();
-      shown[settledAnswer] = {
+      const answer = head[settledAnswer];
+      head = head.slice();
+      head[settledAnswer] = {
         ...answer,
         content: live.text || answer.content,
         thinking: live.reasoning || answer.thinking,
@@ -554,10 +556,11 @@ export function ChatPane() {
         client_id: answer.client_id || stamp,
       };
     }
-  } else if (stamp && settledAnswer >= 0 && !rows[settledAnswer].client_id) {
-    shown = rows.slice();
-    shown[settledAnswer] = { ...rows[settledAnswer], client_id: stamp };
+  } else if (stamp && settledAnswer >= 0 && !head[settledAnswer].client_id) {
+    head = head.slice();
+    head[settledAnswer] = { ...head[settledAnswer], client_id: stamp };
   }
+  const shown = placed.tail.length ? [...head, ...placed.tail] : head;
   const asked = askedLine(bot.endpoint_name || "", rows);
   const pill = workingLine(live?.run || open?.run, now);
   const activity = activityLine({

@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { FACE_PALETTE, STATE_COLORS } from "@/components/Face";
-import { arrangeBusy, hideWhileSending, messageHasBubble, reactionWho } from "@/lib/transcript";
+import { arrangeBusy, hideWhileSending, messageHasBubble, placeLiveReply, reactionWho } from "@/lib/transcript";
 
 describe("chat transcript", () => {
   it("does not draw an empty bubble for a reaction-only turn", () => {
@@ -26,20 +26,55 @@ describe("chat transcript", () => {
     for (const color of FACE_PALETTE) expect(state.has(color)).toBe(false);
   });
 
-  it("keeps a busy message under the reply", () => {
+  it("keeps a busy message where it was saved", () => {
     const pinned = new Set<string>();
     const rows = [
       { id: "u0", role: "user", content: "start" },
+      { id: "a0", role: "assistant", content: "the partial" },
       { id: "u1", role: "user", content: "also check the tests", chip: "queued" },
       { id: "a", role: "assistant", content: "done" },
     ];
     const placed = arrangeBusy(rows, pinned);
-    expect(placed.head.map((row) => row.id)).toEqual(["u0", "a"]);
-    expect(placed.tail.map((row) => row.id)).toEqual(["u1"]);
-    const again = arrangeBusy(
-      rows.map((row) => (row.id === "u1" ? { ...row, chip: "answered" } : row)),
-      pinned,
+    expect(placed.head.map((row) => row.id)).toEqual(["u0", "a0", "u1", "a"]);
+    expect(placed.tail).toEqual([]);
+  });
+
+  it("keeps a live reply above messages that arrived during it", () => {
+    const live = { role: "assistant", content: "the partial", client_id: "live-r1" };
+    const during = placeLiveReply(
+      [
+        { id: "u0", role: "user", content: "start" },
+        { id: "u1", role: "user", content: "also this", chip: "queued" },
+        { id: "u2", role: "user", content: "and this", chip: "queued" },
+      ],
+      live,
+      "live-r1",
+      "r1",
     );
-    expect(again.tail.map((row) => row.id)).toEqual(["u1"]);
+    expect(during.map((row) => row.content)).toEqual(["start", "the partial", "also this", "and this"]);
+
+    const saved = placeLiveReply(
+      [
+        { id: "u0", role: "user", content: "start" },
+        { id: "a0", role: "assistant", content: "old partial", client_id: "live-r1" },
+        { id: "u1", role: "user", content: "also this", chip: "queued" },
+      ],
+      { role: "assistant", content: "the partial grew", client_id: "live-r1" },
+      "live-r1",
+      "r1",
+    );
+    expect(saved.map((row) => row.content)).toEqual(["start", "the partial grew", "also this"]);
+
+    const next = placeLiveReply(
+      [
+        { id: "u0", role: "user", content: "start" },
+        { id: "a0", role: "assistant", content: "old partial" },
+        { id: "u1", role: "user", content: "also this", chip: "seen", before_id: "a0" },
+      ],
+      { role: "assistant", content: "Noted also this.", client_id: "live-r2" },
+      "live-r2",
+      "r2",
+    );
+    expect(next.map((row) => row.content)).toEqual(["start", "old partial", "also this", "Noted also this."]);
   });
 });

@@ -21,19 +21,53 @@ export function rowKey(message: Pick<ChatMessage, "client_id" | "id">, index: nu
   return message.client_id || message.id || `idx-${index}`;
 }
 
-/** Busy lines stay under the in-progress reply instead of jumping above it. */
-export function arrangeBusy(rows: ChatMessage[], pinned: Set<string>): { head: ChatMessage[]; tail: ChatMessage[] } {
-  const head: ChatMessage[] = [];
-  const tail: ChatMessage[] = [];
-  const answerAt = answerIndex(rows);
-  rows.forEach((row, index) => {
-    const key = row.client_id || row.id || "";
-    if (key && row.role === "user" && (row.chip === "queued" || row.chip === "seen")) pinned.add(key);
-    const busy = row.role === "user" && (row.chip === "queued" || row.chip === "seen" || Boolean(key && pinned.has(key)));
-    if (busy && (answerAt < 0 || index < answerAt)) tail.push(row);
-    else head.push(row);
+/** Screen order is the saved order. A message does not move when a reply starts or ends. */
+export function arrangeBusy(rows: ChatMessage[], _pinned: Set<string>): { head: ChatMessage[]; tail: ChatMessage[] } {
+  return { head: rows, tail: [] };
+}
+
+function skippableRow(row: ChatMessage): boolean {
+  return row.kind === "status" || row.kind === "pickup" || row.kind === "activity" || row.about === "activity" || row.about === "queue";
+}
+
+function queuedDuringReply(row: ChatMessage): boolean {
+  if (row.role !== "user" || row.before_id) return false;
+  return row.chip === "queued" || row.chip === "seen" || row.chip === "held";
+}
+
+/** The open reply stays where it started. Later user lines stay below it. A new reply goes last. */
+export function placeLiveReply(rows: ChatMessage[], live: ChatMessage, stamp: string, replyId: string): ChatMessage[] {
+  const index = rows.findIndex((row) => {
+    if (row.role !== "assistant" || skippableRow(row)) return false;
+    if (stamp && row.client_id === stamp) return true;
+    if (replyId && row.id === replyId) return true;
+    return false;
   });
-  return { head, tail };
+  if (index >= 0) {
+    const next = rows.slice();
+    const answer = rows[index];
+    next[index] = {
+      ...answer,
+      content: live.content || answer.content,
+      thinking: live.thinking || answer.thinking,
+      thought_seconds: live.thought_seconds ?? answer.thought_seconds,
+      client_id: answer.client_id || stamp,
+      live: undefined,
+    };
+    return next;
+  }
+  const painted: ChatMessage = { ...live, role: "assistant", client_id: live.client_id || stamp, live: undefined };
+  let at = rows.length;
+  while (at > 0) {
+    const row = rows[at - 1];
+    if (!row) break;
+    if (skippableRow(row) || queuedDuringReply(row)) {
+      at -= 1;
+      continue;
+    }
+    break;
+  }
+  return [...rows.slice(0, at), painted, ...rows.slice(at)];
 }
 
 export function answerIndex(rows: ChatMessage[]): number {

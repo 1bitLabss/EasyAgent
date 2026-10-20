@@ -34,6 +34,7 @@ export type Live = {
   aside?: string;
   chars?: number;
   waitAt?: number;
+  replyId?: string;
 };
 
 export type Flight = {
@@ -294,6 +295,7 @@ function carry(live: Live, patch: Partial<Live>): Live {
     aside: patch.aside === undefined ? live.aside : patch.aside,
     chars: patch.chars === undefined ? live.chars : patch.chars,
     waitAt: patch.waitAt === undefined ? live.waitAt : patch.waitAt,
+    replyId: patch.replyId === undefined ? live.replyId : patch.replyId,
   };
 }
 
@@ -349,7 +351,53 @@ function apply(event: Record<string, unknown>, flight: Flight) {
   if (event.type === "run" && event.run) {
     const run = event.run as Run;
     const statusChanged = (live.run?.status || "") !== (run.status || "");
-    remember(flight, carry(live, { label: run.current_step || live.label, run }), statusChanged);
+    const replyId = run.reply_id || live.replyId || "";
+    const switched = Boolean(live.replyId && replyId && live.replyId !== replyId);
+    remember(flight, carry(live, {
+      label: run.current_step || live.label,
+      run,
+      replyId,
+      text: switched ? "" : live.text,
+      reasoning: switched ? "" : live.reasoning,
+      chars: switched ? 0 : live.chars,
+    }), statusChanged || switched);
+    return;
+  }
+  if (event.type === "sync" && event.chat && typeof event.chat === "object") {
+    const chat = event.chat as Chat;
+    const prev = queryClient.getQueryData<Chat>(["chat", flight.botId, flight.chatId]);
+    queryClient.setQueryData(["chat", flight.botId, flight.chatId], mergeChat(prev, chat));
+    const saved = [...(chat.messages || [])].reverse().find((item) => item.role === "assistant" && item.live);
+    const replyId = chat.run?.reply_id || saved?.id || "";
+    remember(flight, carry(live, {
+      phase: (saved?.content || "").trim() ? "reply" : "thinking",
+      label: chat.run?.current_step || live.label || "Writing",
+      text: saved?.content || "",
+      reasoning: saved?.thinking || "",
+      run: chat.run || live.run,
+      replyId,
+      chars: (saved?.content || "").length,
+    }), true);
+    return;
+  }
+  if (event.type === "pause") {
+    if (event.chat && typeof event.chat === "object") {
+      const chat = event.chat as Chat;
+      const prev = queryClient.getQueryData<Chat>(["chat", flight.botId, flight.chatId]);
+      queryClient.setQueryData(["chat", flight.botId, flight.chatId], mergeChat(prev, chat));
+    }
+    const run = (event.run as Run | undefined) || live.run;
+    remember(flight, carry(live, {
+      phase: "thinking",
+      label: String(event.text || "Paused, reading your message"),
+      text: "",
+      reasoning: "",
+      reasoningLive: false,
+      run,
+      replyId: "",
+      chars: 0,
+      steps: settleActivity(live.steps),
+    }), true);
     return;
   }
   if (event.type === "stopped") {
@@ -438,7 +486,7 @@ function apply(event: Record<string, unknown>, flight: Flight) {
     const chars = (live.chars || 0) + chunk.length;
     const waitAt = live.waitAt || Date.now();
     const label = activityLine({
-      step: "Waiting on model",
+      step: "Writing",
       activityStartedAt: new Date(waitAt).toISOString(),
       now: Date.now(),
       tokens: Math.floor(chars / 4),
@@ -672,6 +720,21 @@ export async function sendMessage(botId: string, chatId: string, text: string, f
       run: flight.live?.run || null,
       heardAt: Date.now(),
     }, true);
+  }
+}
+
+export async function attachLive(botId: string, chatId: string) {
+  const existing = flightFor(botId, chatId);
+  if (existing && !existing.replaced && existing.sending && !existing.settled) return;
+  const flight = begin(botId, chatId);
+  try {
+    const response = await streamPost(`/api/bots/${botId}/chats/${chatId}/live`, {}, flight.control.signal);
+    const ended = await readEvents(response, flight);
+    await afterStream(flight, botId, chatId, ended);
+  } catch (error) {
+    if (flight.replaced || (error instanceof DOMException && error.name === "AbortError")) return;
+    flight.sending = false;
+    if (flight.live) remember(flight, carry(flight.live, { phase: "thinking" }), true);
   }
 }
 

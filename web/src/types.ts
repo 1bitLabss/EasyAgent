@@ -57,6 +57,7 @@ export type Run = {
   last_activity?: string;
   elapsed_seconds?: number;
   activity_started_at?: string | null;
+  reply_id?: string;
 };
 
 export type Attachment = {
@@ -101,6 +102,7 @@ export type ChatMessage = {
   seen_step?: number;
   refuse_reason?: string;
   client_id?: string;
+  before_id?: string;
   queued?: boolean;
   about?: string;
 };

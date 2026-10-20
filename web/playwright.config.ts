@@ -17,6 +17,7 @@ export default defineConfig({
     },
     { name: "swallow", testMatch: /swallow.spec.ts/, use: { ...chrome, baseURL: "http://127.0.0.1:44745" } },
     { name: "composer", testMatch: /composer.spec.ts/, use: { ...chrome, baseURL: "http://127.0.0.1:44746" } },
+    { name: "busy", testMatch: /busy-send.spec.ts/, use: { ...chrome, baseURL: "http://127.0.0.1:44747" } },
   ],
   webServer: [
     {
@@ -52,6 +53,12 @@ export default defineConfig({
     {
       command: "/usr/bin/python3 e2e/serve.py /tmp/easyagent-e2e-composer 44746",
       url: "http://127.0.0.1:44746/api/health",
+      reuseExistingServer: false,
+      timeout: 30_000,
+    },
+    {
+      command: "/usr/bin/python3 e2e/serve.py /tmp/easyagent-e2e-busy 44747",
+      url: "http://127.0.0.1:44747/api/health",
       reuseExistingServer: false,
       timeout: 30_000,
     },

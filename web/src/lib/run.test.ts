@@ -50,6 +50,18 @@ describe("run tone", () => {
       startedAt: "2026-10-08T12:00:00Z",
       now: start + 12_000,
     })).toEqual({ kind: "working", text: "Working, 12s · Reading index.html" });
+    expect(runPresence({
+      active: true,
+      step: "Writing, 4s",
+      startedAt: "2026-10-08T12:00:00Z",
+      now: start + 4_000,
+    })).toEqual({ kind: "working", text: "Writing, 4s" });
+    expect(runPresence({
+      active: true,
+      step: "Paused, reading your message",
+      startedAt: "2026-10-08T12:00:00Z",
+      now: start + 1_000,
+    })).toEqual({ kind: "waiting", text: "Paused, reading your message" });
   });
 
   it("names a live wait and a running command", () => {
@@ -60,7 +72,7 @@ describe("run tone", () => {
       activityStartedAt: "2026-10-08T12:00:00Z",
       now,
       tokens: 1200,
-    })).toBe("Waiting on model, 3m 10s, 1.2k tokens so far");
+    })).toBe("Writing, 3m 10s");
     expect(activityLine({
       step: "Running npm install",
       activityStartedAt: "2026-10-08T12:00:00Z",
@@ -68,7 +80,7 @@ describe("run tone", () => {
     })).toBe("Running npm install, 42s");
     expect(activityLine({ step: "Writing index.html", activityStartedAt: "2026-10-08T12:00:00Z", now: start })).toBe("Writing index.html, 0s");
     expect(runTone("Writing index.html", "running")).toBe("tool");
-    expect(runTone("Waiting on model, 3m 10s, 1.2k tokens so far", "running")).toBe("waiting");
+    expect(runTone("Writing, 3m 10s", "running")).toBe("thinking");
   });
 
   it("names the step, the elapsed time, and a queued message", () => {

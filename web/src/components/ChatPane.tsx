@@ -16,11 +16,11 @@ import { yoloClock, yoloRemaining } from "@/lib/yolo";
 import { activityLabel, askedLine, type ActivityStep } from "@/lib/activity";
 import { deriveUserHistory } from "@/lib/composer-history";
 import { activityLine, describeRun, faceStateFor, runPresence, runTone, workingLine } from "@/lib/run";
-import { answerIndex, arrangeBusy, hideWhileSending, messageHasBubble, reactionWho, rowKey } from "@/lib/transcript";
+import { arrangeBusy, hideWhileSending, messageHasBubble, placeLiveReply, reactionWho, rowKey } from "@/lib/transcript";
 import { cn } from "@/lib/utils";
 import { keepLoadedHistory, mergeChat, sameMessage, shareChat, type MessagePage } from "@/lib/window";
 import { useApp } from "@/store";
-import { RETRY_REASON, canResume, chatStillPolling, flightFor, retryMessage, retryUnsent, sendMessage, sendNow, settleIncoming, stopAndSendStored, stopMessage, useLive } from "@/stream";
+import { RETRY_REASON, attachLive, canResume, chatStillPolling, flightFor, retryMessage, retryUnsent, sendMessage, sendNow, settleIncoming, stopAndSendStored, stopMessage, useLive } from "@/stream";
 import type { Bot, Chat, ChatMessage } from "@/types";
 
 const REACTIONS = ["👍", "👎", "❤️", "👀"];
@@ -114,7 +114,7 @@ const MessageRow = memo(function MessageRow({
   const chatId = useApp((state) => state.chatId);
   const setScreen = useApp((state) => state.setScreen);
   if (hideWhileSending(message, sending)) return null;
-  if (message.about === "activity") return null;
+  if (message.about === "activity" || message.about === "queue") return null;
   if (message.kind === "resume-note" && (message.content || "").includes("Picked up where it stopped")) {
     return (
       <li className="message-row" data-kind="resume-note">
@@ -144,7 +144,12 @@ const MessageRow = memo(function MessageRow({
     if (!removing) pokeFace(botId, moodForReaction(emoji));
   }
   return (
-    <li tabIndex={message.id ? -1 : undefined} className={cn("message-row flex flex-col", mine ? "items-end" : "items-start")}>
+    <li
+      tabIndex={message.id ? -1 : undefined}
+      className={cn("message-row flex flex-col", mine ? "items-end" : "items-start")}
+      data-role={message.role}
+      data-message-id={message.id || message.client_id || ""}
+    >
       {message.role === "assistant" && !failed && (message.thinking || "").trim() ? <ThinkingBox text={message.thinking} streaming={streaming} seconds={message.thought_seconds} /> : null}
       {showBubble ? (
       <div className={cn(mine ? "bubble-user" : "bubble-bot", failed && "bg-danger/10 text-danger")}>
@@ -317,7 +322,7 @@ const Transcript = memo(function Transcript({
   onChoose: (choice: string) => void;
 }) {
   return (
-    <ol className="flex flex-col gap-4">
+    <ol className="flex flex-col gap-4" data-testid="transcript">
       {rows.map((message, index) => (
         <MessageRow
           key={rowKey(message, index)}
@@ -386,6 +391,14 @@ export function ChatPane() {
   }
   const flight = botId && chatId ? flightFor(botId, chatId) : null;
   const live = useLive(botId, chatId);
+  const serverRun = chat.data?.run?.status;
+  const serverRunId = chat.data?.run?.id || "";
+  useEffect(() => {
+    if (!botId || !chatId || serverRun !== "running") return;
+    const current = flightFor(botId, chatId);
+    if (current && !current.replaced && current.sending && !current.settled) return;
+    void attachLive(botId, chatId);
+  }, [botId, chatId, serverRun, serverRunId]);
   const readSent = useRef("");
   const chooseRef = useRef<(choice: string) => void>(() => undefined);
   const onChoose = useCallback((choice: string) => chooseRef.current(choice), []);
@@ -529,28 +542,18 @@ export function ChatPane() {
   if (live?.steps?.length) heldSteps.current = live.steps;
   const steps = live?.steps || [];
   const liveTurn = Boolean(live && live.phase !== "error" && live.phase !== "stopped");
-  const stamp = runId ? `live-${runId}` : "";
+  const replyId = live?.replyId || live?.run?.reply_id || "";
+  const stamp = replyId ? `live-${replyId}` : runId ? `live-${runId}` : "";
   const streamingReply = Boolean(liveTurn && ((live?.text || "").trim() || (live?.reasoning || "").trim()));
   const placed = arrangeBusy(rows, pinnedBusy.current);
   let head = placed.head;
-  const settledAnswer = answerIndex(head);
   if (streamingReply && live && stamp) {
-    if (settledAnswer < 0) {
-      head = [...head, { role: "assistant", content: live.text, thinking: live.reasoning, thought_seconds: live.thoughtSeconds, client_id: stamp }];
-    } else {
-      const answer = head[settledAnswer];
-      head = head.slice();
-      head[settledAnswer] = {
-        ...answer,
-        content: live.text || answer.content,
-        thinking: live.reasoning || answer.thinking,
-        thought_seconds: live.thoughtSeconds ?? answer.thought_seconds,
-        client_id: answer.client_id || stamp,
-      };
-    }
-  } else if (stamp && settledAnswer >= 0 && !head[settledAnswer].client_id) {
-    head = head.slice();
-    head[settledAnswer] = { ...head[settledAnswer], client_id: stamp };
+    head = placeLiveReply(
+      head,
+      { role: "assistant", content: live.text, thinking: live.reasoning, thought_seconds: live.thoughtSeconds, client_id: stamp },
+      stamp,
+      replyId,
+    );
   }
   const shown = placed.tail.length ? [...head, ...placed.tail] : head;
   const asked = askedLine(bot.endpoint_name || "", rows);
@@ -558,7 +561,7 @@ export function ChatPane() {
   const checklist = (open?.plan?.steps || []).filter((step) => step && step.text);
   const active = Boolean(open && (running || (flight?.sending && live && live.phase !== "error" && live.phase !== "stopped")));
   const presenceStep = live?.label || open?.run?.current_step || "";
-  const presenceWaiting = !presenceStep || /^(Thinking|Waiting|Revising)\b/.test(presenceStep) || presenceStep.startsWith("Waiting on model") || presenceStep.startsWith("Model not answering");
+  const presenceWaiting = !presenceStep || /^(Thinking|Waiting|Revising)\b/.test(presenceStep) || presenceStep.startsWith("Waiting on model") || presenceStep.startsWith("Model not answering") || presenceStep.startsWith("Paused");
   const presenceStarted = presenceWaiting
     ? (live?.waitAt ? new Date(live.waitAt).toISOString() : (open?.run?.activity_started_at || open?.run?.started_at || live?.run?.started_at))
     : (open?.run?.activity_started_at || live?.run?.activity_started_at || open?.run?.started_at || live?.run?.started_at);

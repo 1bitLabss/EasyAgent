@@ -145,6 +145,8 @@ export function retainLocalTail(prev: ChatMessage[] | undefined, incoming: ChatM
       );
       return !echoed;
     }
+    if (message.about === "activity" || message.about === "queue" || message.id === "activity" || message.id === "live-status") return false;
+    if (message.kind === "status" && message.about === "queue") return false;
     if (message.id) return true;
     return false;
   });

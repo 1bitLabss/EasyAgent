@@ -83,12 +83,6 @@ function activityBase(step: string): string {
     .replace(/, \d+s(?:, .* tokens so far)?$/, "");
 }
 
-function formatTokens(tokens: number): string {
-  if (tokens >= 1000) return `${(tokens / 1000).toFixed(1)}k tokens`;
-  if (tokens === 1) return "1 token";
-  return `${tokens} tokens`;
-}
-
 export type RunPresence = "idle" | "working" | "waiting";
 
 /** Idle, a tool step, or the model. Active states include the elapsed time. */
@@ -102,6 +96,8 @@ export function runPresence(input: {
   const step = activityBase((input.step || "").trim());
   const started = Date.parse(input.startedAt || "");
   const elapsed = formatElapsed((input.now - (Number.isNaN(started) ? input.now : started)) / 1000);
+  if (step.startsWith("Paused")) return { kind: "waiting", text: step };
+  if (step === "Writing" || step.startsWith("Writing,")) return { kind: "working", text: step.startsWith("Writing,") ? step : `Writing, ${elapsed}` };
   const waiting = !step
     || step === "Thinking"
     || step === "Waiting"
@@ -130,9 +126,9 @@ export function activityLine(input: {
   const elapsed = formatElapsed((input.now - (Number.isNaN(started) ? input.now : started)) / 1000);
   if (model) {
     const tokens = input.tokens || 0;
-    if (!tokens && step.startsWith("Waiting on model,")) return step;
-    const tokenBit = tokens > 0 ? `, ${formatTokens(tokens)} so far` : "";
-    return `Waiting on model, ${elapsed}${tokenBit}`;
+    if (tokens > 0 || key === "Writing" || step.startsWith("Writing")) return `Writing, ${elapsed}`;
+    if (step.startsWith("Waiting on model,")) return step;
+    return `Waiting on model, ${elapsed}`;
   }
   return `${key}, ${elapsed}`;
 }

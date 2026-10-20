@@ -20,6 +20,10 @@ class TurnCancelled(Exception):
     """This chat's turn was stopped. Another chat's turn is left alone."""
 
 
+class UserPause(Exception):
+    """A message arrived. This reply stops so the next one can answer it."""
+
+
 class Slot:
     """Mutable state for one chat. A second chat has a different slot."""
 
@@ -380,10 +384,11 @@ def request_user_pause(store, chat_id: str) -> None:
     slot.pause_for_user = True
     if _tool_in_progress(slot):
         return
-    slot.cancel.set()
+    # No model socket yet: the step finishes, and the next model call sees the pause.
     client = slot.client
     if client is None:
         return
+    slot.cancel.set()
     try:
         asyncio.get_running_loop().create_task(_close_client(client))
     except RuntimeError:

@@ -9266,6 +9266,8 @@ async def complete_with_tools(
         if kind == "loop":
             final = text or LOOP_TEXT
             return Settled(final, (), "", thought.strip(), False, "", "", (), False)
+        if kind == "pause":
+            raise turn_mod.UserPause()
         if kind == "final":
             final = text
         elif kind == "made":

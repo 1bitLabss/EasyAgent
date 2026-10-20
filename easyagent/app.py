@@ -4214,6 +4214,29 @@ async def _coalesce_user_messages(store: Store, bot_id: str, chat_id: str) -> No
             quiet = 0.0
 
 
+async def _json_after_pause(store: Store, bot_id: str, chat_id: str) -> dict:
+    """The waiting POST gets the new reply, not an empty one from the reply that paused."""
+    _close_partial_for_pause(store, bot_id, chat_id)
+    from easyagent.plan import queued_items, steer_into
+
+    taken = 0
+    for _ in range(8):
+        await _coalesce_user_messages(store, bot_id, chat_id)
+        taken += steer_into(store, bot_id, chat_id, None)
+        turn_mod.take_user_pause()
+        if queued_items(store, bot_id, chat_id) or turn_mod.pause_requested():
+            continue
+        break
+    if taken == 0:
+        try:
+            chat = store.get_chat(bot_id, chat_id)
+        except StoreError:
+            return {"reply": "", "chat": None}
+        public = _public_chat(store, chat)
+        return {"reply": "", "chat": public, "context": public.get("context")}
+    return await _reply_json(store, bot_id, chat_id, continue_run=True)
+
+
 async def _answer_after_pause(store: Store, bot_id: str, chat_id: str, *, emit_done: bool):
     """The old reply stays. One new reply answers every message waiting right now."""
     _close_partial_for_pause(store, bot_id, chat_id)
@@ -5943,6 +5966,8 @@ async def _reply_json(store: Store, bot_id: str, chat_id: str, *, continue_run: 
         ):
             return _append_error(store, bot_id, chat_id, _silence_text(store, bot_id))
         return _pause_for_runaway(store, bot_id, chat_id)
+    except turn_mod.UserPause:
+        return await _json_after_pause(store, bot_id, chat_id)
     return await _finish_and_maybe_ask(
         store,
         bot_id,

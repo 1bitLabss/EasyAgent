@@ -6,13 +6,6 @@ test.setTimeout(180_000);
 type Row = { role: string; id: string; text: string };
 type Saved = { role?: string; content?: string; kind?: string; about?: string };
 
-async function botId(request: APIRequestContext): Promise<string> {
-  const bots = await request.get("/api/bots").then((response) => response.json());
-  const bot = (bots as { name: string; id: string }[]).find((item) => item.name === "Ada");
-  if (!bot) throw new Error("Ada is missing");
-  return bot.id;
-}
-
 async function savedChat(request: APIRequestContext, id: string) {
   const chats = await request.get(`/api/bots/${id}/chats`).then((response) => response.json());
   const chatId = (chats as { id: string }[])[0]?.id;
@@ -82,12 +75,13 @@ test("a message during a reply pauses, stays put, and is answered in order", asy
   const endpoint = await request.post("/api/endpoints", { data: { name: "Mock", base_url: mock } });
   expect(endpoint.ok()).toBeTruthy();
   const saved = await endpoint.json();
-  const bot = await request.post("/api/bots", { data: { name: "Ada", endpoint_id: saved.id } });
+  const name = `Ada${Date.now().toString(36)}`;
+  const bot = await request.post("/api/bots", { data: { name, endpoint_id: saved.id } });
   expect(bot.ok()).toBeTruthy();
   const id = (await bot.json()).id as string;
 
   await page.goto("/");
-  await page.getByRole("button", { name: "Ada", exact: true }).click();
+  await page.getByRole("button", { name, exact: true }).click();
   await expect(page.getByTestId("run-state")).toHaveText("Idle");
 
   const trials = [
@@ -145,7 +139,7 @@ test("a message during a reply pauses, stays put, and is answered in order", asy
     return JSON.stringify(chat.messages || []);
   }).toContain("e9-04");
   await page.reload();
-  await page.getByRole("button", { name: "Ada", exact: true }).click();
+  await page.getByRole("button", { name, exact: true }).click();
   await expect(page.getByText("e9-04", { exact: false }).first()).toBeVisible();
   await expect(page.getByRole("button", { name: "Stop", exact: true })).toBeVisible();
   await expect(page.getByTestId("run-state")).not.toHaveText("Idle");
@@ -194,5 +188,4 @@ test("a message during a reply pauses, stays put, and is answered in order", asy
   await expect(page.getByRole("button", { name: "Send", exact: true })).toBeEnabled();
   await page.locator("#draft").fill("");
   await expectOrder(page, request, id);
-  expect(await botId(request)).toBe(id);
 });

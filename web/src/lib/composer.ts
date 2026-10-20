@@ -35,3 +35,28 @@ export function resetComposer(box: HTMLTextAreaElement) {
   box.style.height = "";
   box.style.overflowY = "hidden";
 }
+
+export function composerUsesFieldSizing(): boolean {
+  return typeof CSS !== "undefined" && typeof CSS.supports === "function" && CSS.supports("field-sizing", "content");
+}
+
+/** Re-measure only when the line count or the width-bucket changes, or on paste and clear. */
+export function noteComposerInput(box: HTMLTextAreaElement, force = false) {
+  if (composerUsesFieldSizing()) {
+    box.style.height = "";
+    box.style.overflowY = "";
+    return;
+  }
+  const value = box.value;
+  const newlines = value.split("\n").length;
+  const cols = Math.max(8, Math.floor((box.clientWidth || 320) / 8));
+  const buckets = Math.floor(value.length / cols);
+  const stamp = `${newlines}:${buckets}`;
+  if (!force && box.dataset.fit === stamp) return;
+  box.dataset.fit = stamp;
+  window.requestAnimationFrame(() => {
+    if (!box.isConnected) return;
+    if (!box.value) resetComposer(box);
+    else fitComposer(box);
+  });
+}

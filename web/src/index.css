@@ -265,6 +265,12 @@ body {
   background: #1c1c1c;
 }
 
+@supports (field-sizing: content) {
+  .composer textarea {
+    field-sizing: content;
+  }
+}
+
 .composer textarea {
   min-width: 0;
   width: 100%;

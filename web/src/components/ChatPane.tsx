@@ -1,8 +1,9 @@
 import { useQuery } from "@tanstack/react-query";
-import { ArrowUp, MessageSquare, Mic, Plus, Square, Terminal } from "lucide-react";
+import { MessageSquare, Terminal } from "lucide-react";
 import { memo, useCallback, useEffect, useLayoutEffect, useRef, useState, type ReactNode } from "react";
 import { api, queryClient } from "@/api";
 import { ApprovalCard } from "@/components/ApprovalCard";
+import { Composer, type ComposerHandle } from "@/components/Composer";
 import { Face } from "@/components/Face";
 import { Markdown } from "@/components/Markdown";
 import { ThinkingBox } from "@/components/ThinkingBox";
@@ -11,7 +12,6 @@ import { moodForReaction, pokeFace } from "@/lib/mood";
 import { chipText } from "@/lib/chips";
 import { yoloClock, yoloRemaining } from "@/lib/yolo";
 import { activityLabel, askedLine } from "@/lib/activity";
-import { fitComposer, resetComposer } from "@/lib/composer";
 import { activityLine, describeRun, faceStateFor, runPresence, runTone, workingLine } from "@/lib/run";
 import { hideWhileSending, messageHasBubble, reactionWho } from "@/lib/transcript";
 import { cn } from "@/lib/utils";
@@ -344,15 +344,11 @@ export function ChatPane() {
     },
   });
   const [now, setNow] = useState(() => Date.now());
-  const [draft, setDraft] = useState("");
   const [error, setError] = useState("");
   const [askId, setAskId] = useState("");
   const [menu, setMenu] = useState(false);
-  const [listening, setListening] = useState(false);
-  const [fileName, setFileName] = useState("");
-  const fileRef = useRef<HTMLInputElement>(null);
   const scroller = useRef<HTMLDivElement>(null);
-  const box = useRef<HTMLTextAreaElement>(null);
+  const composerRef = useRef<ComposerHandle>(null);
   const bot = (bots.data || []).find((item) => item.id === botId) || null;
   const yoloLeft = yoloRemaining(chat.data?.yolo, chat.dataUpdatedAt || now, now);
   const yoloOn = yoloLeft > 0;
@@ -469,17 +465,6 @@ export function ChatPane() {
   }, [chat.data?.window_start, messageCount]);
 
   useEffect(() => {
-    box.current?.focus();
-  }, [botId, chatId]);
-
-  useLayoutEffect(() => {
-    const el = box.current;
-    if (!el) return;
-    if (!draft) resetComposer(el);
-    else fitComposer(el);
-  }, [draft]);
-
-  useEffect(() => {
     setMenu(false);
   }, [botId]);
 
@@ -534,39 +519,17 @@ export function ChatPane() {
   const presence = runPresence({ active, step: presenceStep, startedAt: presenceStarted, now });
 
   chooseRef.current = (choice) => {
-    void submit(choice);
+    void submit(choice).catch((reason: unknown) => {
+      setError(reason instanceof Error ? reason.message : "The reply failed.");
+    });
   };
 
-  async function submit(text: string) {
+  async function submit(text: string, file: File | null = null) {
     if (!botId || !chatId) return;
-    const file = fileRef.current?.files?.[0] || null;
     if (!text && !file) return;
     setError("");
-    setDraft("");
-    setFileName("");
-    if (fileRef.current) fileRef.current.value = "";
-    try {
-      if (typeof Notification !== "undefined" && Notification.permission === "default") void Notification.requestPermission();
-      await sendMessage(botId, chatId, text, file);
-    } catch (reason) {
-      setDraft((current) => current || text);
-      setError(reason instanceof Error ? reason.message : "The reply failed.");
-    }
-  }
-
-  function listen() {
-    const Speech = (window as Window & { SpeechRecognition?: new () => { lang: string; onresult: ((event: { results: { 0: { 0: { transcript: string } } } }) => void) | null; onend: (() => void) | null; start: () => void }; webkitSpeechRecognition?: new () => { lang: string; onresult: ((event: { results: { 0: { 0: { transcript: string } } } }) => void) | null; onend: (() => void) | null; start: () => void } }).SpeechRecognition
-      || (window as Window & { webkitSpeechRecognition?: new () => { lang: string; onresult: ((event: { results: { 0: { 0: { transcript: string } } } }) => void) | null; onend: (() => void) | null; start: () => void } }).webkitSpeechRecognition;
-    if (!Speech) {
-      setError("This browser cannot use the microphone.");
-      return;
-    }
-    const ear = new Speech();
-    ear.lang = "en-US";
-    ear.onresult = (event) => setDraft(event.results[0][0].transcript);
-    ear.onend = () => setListening(false);
-    setListening(true);
-    ear.start();
+    if (typeof Notification !== "undefined" && Notification.permission === "default") void Notification.requestPermission();
+    await sendMessage(botId, chatId, text, file);
   }
 
   return (
@@ -601,9 +564,9 @@ export function ChatPane() {
                 type="button"
                 className="block w-full rounded-xl px-3 py-2 text-left text-sm hover:bg-black/5 dark:hover:bg-white/10"
                 onClick={() => {
-                  if (!askId || !draft.trim() || !botId || !chatId) return;
-                  const task = draft.trim();
-                  setDraft("");
+                  const task = composerRef.current?.text().trim() || "";
+                  if (!askId || !task || !botId || !chatId) return;
+                  composerRef.current?.clear();
                   setMenu(false);
                   void api(`/api/bots/${botId}/chats/${chatId}/ask`, { method: "POST", json: { bot_id: askId, task } })
                     .then((next) => {
@@ -731,81 +694,31 @@ export function ChatPane() {
       <div className="shrink-0 px-4">
         {botId && bot ? <ApprovalCard botId={botId} botName={bot.name} active={running} /> : null}
       </div>
-      <form
-        className="composer-dock shrink-0 px-4 pb-5 pt-1"
-        onSubmit={(event) => {
-          event.preventDefault();
-          void submit(draft.trim());
+      <Composer
+        ref={composerRef}
+        focusKey={`${botId || ""}:${chatId || ""}`}
+        running={running}
+        asking={Boolean(asking && asking.length > 1)}
+        error={error || (live?.phase === "error" ? live.text : "")}
+        presence={presence.text}
+        presenceKind={presence.kind}
+        resumeRetry={resume.retry}
+        resumeCont={resume.cont}
+        onSend={submit}
+        onStop={() => {
+          if (botId && chatId) void stopMessage(botId, chatId);
         }}
-      >
-        <div className="mx-auto w-full max-w-[760px]">
-          {error || (live?.phase === "error" ? live.text : "") ? <p className="mb-2 text-center text-sm text-danger" role="alert">{error || live?.text}</p> : null}
-          {fileName ? <p className="mb-1 text-center text-xs text-muted">{fileName}</p> : null}
-          <div className="mb-2 flex justify-center gap-3 text-xs text-muted">
-            {resume.retry ? <button type="button" onClick={() => botId && chatId && void retryMessage(botId, chatId)}>Retry</button> : null}
-            {resume.cont ? <button type="button" onClick={() => void submit("Continue")}>Continue</button> : null}
-            {running ? (
-              <button type="button" className="inline-flex items-center gap-1" onClick={() => botId && chatId && void stopMessage(botId, chatId)}>
-                <Square className="h-3 w-3" /> Stop
-              </button>
-            ) : null}
-          </div>
-          {running ? <p className="mb-1 text-center text-xs text-muted">Add to the current job</p> : null}
-          <p className="mb-1 text-center text-xs text-muted" role="status" data-testid="run-state" data-state={presence.kind}>{presence.text}</p>
-          <div className="composer">
-            <button type="button" className="mb-1 flex h-8 w-8 items-center justify-center rounded-full text-foreground" aria-label="Attach" onClick={() => fileRef.current?.click()}>
-              <Plus className="h-5 w-5" />
-            </button>
-            <input ref={fileRef} className="hidden" type="file" onChange={(event) => setFileName(event.target.files?.[0]?.name || "")} />
-            <label className="sr-only" htmlFor="draft">{running ? "Add to the current job" : "Message"}</label>
-            <textarea
-              id="draft"
-              ref={box}
-              rows={1}
-              value={draft}
-              placeholder={listening ? "Listening" : running ? "Add to the current job" : asking && asking.length > 1 ? "Or type an answer" : "Message"}
-              onChange={(event) => setDraft(event.target.value)}
-              onKeyDown={(event) => {
-                if (event.key === "Enter" && !event.shiftKey) {
-                  event.preventDefault();
-                  void submit(draft.trim());
-                }
-              }}
-            />
-            <button type="button" className={cn("mb-1 flex h-8 w-8 items-center justify-center rounded-full text-muted", listening && "text-foreground")} aria-label="Microphone" onClick={listen}>
-              <Mic className="h-4 w-4" />
-            </button>
-            {running ? (
-              <button
-                type="button"
-                className="mb-1 rounded-full px-3 text-sm"
-                data-testid="stop-and-send"
-                disabled={!draft.trim() && !fileName}
-                onClick={() => {
-                  if (!botId || !chatId) return;
-                  const text = draft.trim();
-                  const file = fileRef.current?.files?.[0] || null;
-                  if (!text && !file) return;
-                  setDraft("");
-                  setFileName("");
-                  if (fileRef.current) fileRef.current.value = "";
-                  void stopMessage(botId, chatId)
-                    .then(() => sendMessage(botId, chatId, text, file))
-                    .catch((reason: Error) => {
-                      setDraft((current) => current || text);
-                      setError(reason?.message || "The reply failed.");
-                    });
-                }}
-              >
-                Stop and send
-              </button>
-            ) : null}
-            <button type="submit" className="send-btn" aria-label="Send" disabled={!draft.trim() && !fileName}>
-              <ArrowUp className="h-4 w-4" />
-            </button>
-          </div>
-        </div>
-      </form>
+        onStopAndSend={async (text, file) => {
+          if (!botId || !chatId) return;
+          await stopMessage(botId, chatId);
+          await sendMessage(botId, chatId, text, file);
+        }}
+        onRetry={() => {
+          if (botId && chatId) void retryMessage(botId, chatId);
+        }}
+        onContinue={() => void submit("Continue")}
+        onError={setError}
+      />
     </section>
   );
 }

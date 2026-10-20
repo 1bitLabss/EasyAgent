@@ -42,7 +42,7 @@ async function screenRows(page: Page): Promise<Row[]> {
 }
 
 async function send(page: Page, text: string) {
-  const box = page.getByLabel("Message");
+  const box = page.locator("#draft");
   await box.fill(text);
   await expect(box).toHaveValue(text);
   await page.getByRole("button", { name: "Send", exact: true }).click();
@@ -122,7 +122,9 @@ test("a message during a reply pauses, stays put, and is answered in order", asy
     expect(await pause).toBe(true);
     await expect(page.getByText(`Noted ${trial.pivot}.`)).toBeVisible();
     await expect(page.getByTestId("run-state")).toHaveText("Idle");
+    await page.locator("#draft").fill("ready");
     await expect(page.getByRole("button", { name: "Send", exact: true })).toBeEnabled();
+    await page.locator("#draft").fill("");
     await expect(page.getByText("nothing was in flight")).toHaveCount(0);
     await expect(page.locator("[data-testid=status-note]")).toHaveCount(0);
     const after = await screenRows(page);
@@ -152,7 +154,9 @@ test("a message during a reply pauses, stays put, and is answered in order", asy
   await page.getByRole("button", { name: "Stop", exact: true }).click();
   await expect(page.getByTestId("run-state")).toHaveText("Idle");
   await expect(page.getByText("e9-04", { exact: false }).first()).toBeVisible();
+  await page.locator("#draft").fill("ready");
   await expect(page.getByRole("button", { name: "Send", exact: true })).toBeEnabled();
+  await page.locator("#draft").fill("");
   const reloaded = await savedChat(request, id);
   expect(JSON.stringify(reloaded.messages || [])).toContain("e9-04");
   expect(JSON.stringify(reloaded.messages || [])).not.toContain("nothing was in flight");
@@ -186,7 +190,9 @@ test("a message during a reply pauses, stays put, and is answered in order", asy
   expect(burst.filter((row) => row.text.includes("together."))).toHaveLength(1);
   await expect(page.getByText("nothing was in flight")).toHaveCount(0);
   await expect(page.locator("[data-testid=status-note]")).toHaveCount(0);
+  await page.locator("#draft").fill("ready");
   await expect(page.getByRole("button", { name: "Send", exact: true })).toBeEnabled();
+  await page.locator("#draft").fill("");
   await expectOrder(page, request, id);
   expect(await botId(request)).toBe(id);
 });

@@ -75,9 +75,12 @@ class Handler(BaseHTTPRequestHandler):
             for part in last.replace("\n", " ").split():
                 if len(part) >= 2 and part[0] == "e" and part[1:].isdigit():
                     tag = part
-            for index in range(1, 21):
-                time.sleep(0.16)
-                self._chunk({"choices": [{"delta": {"content": f"{tag}-{index:02d} "}}]})
+            try:
+                for index in range(1, 21):
+                    time.sleep(0.16)
+                    self._chunk({"choices": [{"delta": {"content": f"{tag}-{index:02d} "}}]})
+            except (BrokenPipeError, ConnectionResetError):
+                return
         elif "pivot-" in last:
             name = "pivot"
             for part in last.replace("\n", " ").split():
@@ -86,7 +89,13 @@ class Handler(BaseHTTPRequestHandler):
             self._chunk({"choices": [{"delta": {"content": f"Noted {name}."}}]})
         elif "burst-" in last:
             have = [name for name in BURST if any(name in item for item in users)]
-            self._chunk({"choices": [{"delta": {"content": "Answered " + ", ".join(have) + " together."}}]})
+            if len(have) <= 1:
+                named = have[0] if have else "the messages"
+            elif len(have) == 2:
+                named = f"{have[0]} and {have[1]}"
+            else:
+                named = ", ".join(have[:-1]) + ", and " + have[-1]
+            self._chunk({"choices": [{"delta": {"content": f"Answered {named} together."}}]})
         else:
             slow = SLOW in raw
             words = (
@@ -98,10 +107,13 @@ class Handler(BaseHTTPRequestHandler):
                 if slow:
                     time.sleep(0.3)
                 self._chunk({"choices": [{"delta": {"content": word + " "}}]})
-        done = b"data: [DONE]\n\n"
-        self.wfile.write(f"{len(done):x}\r\n".encode() + done + b"\r\n")
-        self.wfile.write(b"0\r\n\r\n")
-        self.wfile.flush()
+        try:
+            done = b"data: [DONE]\n\n"
+            self.wfile.write(f"{len(done):x}\r\n".encode() + done + b"\r\n")
+            self.wfile.write(b"0\r\n\r\n")
+            self.wfile.flush()
+        except (BrokenPipeError, ConnectionResetError):
+            return
 
     def _chunk(self, payload: dict) -> None:
         piece = f"data: {json.dumps(payload)}\n\n".encode()

@@ -348,6 +348,8 @@ export function ChatPane() {
   const [askId, setAskId] = useState("");
   const [menu, setMenu] = useState(false);
   const scroller = useRef<HTMLDivElement>(null);
+  const sectionRef = useRef<HTMLElement>(null);
+  const dockRef = useRef<HTMLDivElement>(null);
   const composerRef = useRef<ComposerHandle>(null);
   const bot = (bots.data || []).find((item) => item.id === botId) || null;
   const yoloLeft = yoloRemaining(chat.data?.yolo, chat.dataUpdatedAt || now, now);
@@ -468,6 +470,23 @@ export function ChatPane() {
     setMenu(false);
   }, [botId]);
 
+  useEffect(() => {
+    const dock = dockRef.current;
+    const section = sectionRef.current;
+    if (!dock || !section) return;
+    let last = -1;
+    const write = () => {
+      const bucket = Math.max(8, Math.round(dock.getBoundingClientRect().height / 8) * 8);
+      if (bucket === last) return;
+      last = bucket;
+      section.style.setProperty("--dock-h", `${bucket}px`);
+    };
+    write();
+    const observer = new ResizeObserver(write);
+    observer.observe(dock);
+    return () => observer.disconnect();
+  }, [bot?.id]);
+
   const faceFor = (sending: boolean, phase?: string, label?: string, text?: string, status?: string, step?: string) => faceStateFor({
     sending, phase, label, text, runStatus: status, step,
   });
@@ -533,7 +552,7 @@ export function ChatPane() {
   }
 
   return (
-    <section className="relative flex h-full min-h-0 flex-1 flex-col">
+    <section ref={sectionRef} className="relative flex h-full min-h-0 flex-1 flex-col">
       <div className="title-drag relative z-10 flex h-14 shrink-0 items-center justify-center" data-tauri-drag-region>
       <WindowControls />
       <div className="relative z-20 flex items-center justify-center gap-2" data-testid="bot-pill">
@@ -617,7 +636,7 @@ export function ChatPane() {
         </div>
       ) : null}
 
-      <div ref={scroller} onScroll={onScroll} className="min-h-0 flex-1 overflow-y-auto px-4 pb-4 pt-2" style={{ overflowAnchor: "none" }}>
+      <div ref={scroller} onScroll={onScroll} className="chat-scroll min-h-0 flex-1 overflow-y-auto px-4 pt-2" style={{ overflowAnchor: "none" }}>
         <div className="mx-auto flex w-full max-w-[760px] flex-col gap-4">
           {!chatId || !open ? (
             <div className="flex flex-1 flex-col items-center justify-center px-6 py-24 text-center">
@@ -691,9 +710,10 @@ export function ChatPane() {
         </div>
       </div>
 
-      <div className="shrink-0 px-4">
-        {botId && bot ? <ApprovalCard botId={botId} botName={bot.name} active={running} /> : null}
-      </div>
+      <div ref={dockRef} className="composer-dock">
+        <div className="px-4">
+          {botId && bot ? <ApprovalCard botId={botId} botName={bot.name} active={running} /> : null}
+        </div>
       <Composer
         ref={composerRef}
         focusKey={`${botId || ""}:${chatId || ""}`}
@@ -719,6 +739,7 @@ export function ChatPane() {
         onContinue={() => void submit("Continue")}
         onError={setError}
       />
+      </div>
     </section>
   );
 }

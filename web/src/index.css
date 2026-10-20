@@ -252,6 +252,49 @@ body {
   pointer-events: auto;
 }
 
+.chat-scroll {
+  padding-bottom: calc(var(--dock-h, 9rem) + 16px);
+}
+
+.composer-dock {
+  position: absolute;
+  right: 0;
+  bottom: 0;
+  left: 0;
+  z-index: 20;
+  background: hsl(var(--background));
+}
+
+.composer-status {
+  min-height: 1.25rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  text-align: center;
+}
+
+.stop-square {
+  display: block;
+  width: 10px;
+  height: 10px;
+  border-radius: 2px;
+  background: currentColor;
+}
+
+.stop-send-slot {
+  visibility: hidden;
+  width: 7.5rem;
+  flex: none;
+  margin-bottom: 4px;
+  border-radius: 999px;
+  padding: 0 8px;
+  font-size: 13px;
+}
+
+.stop-send-slot.is-on {
+  visibility: visible;
+}
+
 .composer {
   display: flex;
   align-items: flex-end;
@@ -503,11 +546,7 @@ html[data-desktop="macos"] .rail {
   }
 
   .composer-dock {
-    position: sticky;
-    bottom: 0;
-    z-index: 20;
-    background: hsl(var(--background));
-    padding-bottom: 10px;
+    padding-bottom: calc(10px + env(safe-area-inset-bottom));
   }
 
   .thinking-body {

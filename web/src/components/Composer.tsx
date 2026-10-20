@@ -1,4 +1,4 @@
-import { ArrowUp, Mic, Plus, Square } from "lucide-react";
+import { ArrowUp, Mic, Plus } from "lucide-react";
 import { forwardRef, memo, useEffect, useImperativeHandle, useRef, useState } from "react";
 import { noteComposerInput, resetComposer } from "@/lib/composer";
 import { cn } from "@/lib/utils";
@@ -128,7 +128,7 @@ export const Composer = memo(forwardRef<ComposerHandle, ComposerProps>(function 
 
   return (
     <form
-      className="composer-dock shrink-0 px-4 pb-5 pt-1"
+      className="px-4 pb-5 pt-1"
       onSubmit={(event) => {
         event.preventDefault();
         submit();
@@ -137,17 +137,11 @@ export const Composer = memo(forwardRef<ComposerHandle, ComposerProps>(function 
       <div className="mx-auto w-full max-w-[760px]">
         {error ? <p className="mb-2 text-center text-sm text-danger" role="alert">{error}</p> : null}
         {fileName ? <p className="mb-1 text-center text-xs text-muted">{fileName}</p> : null}
-        <div className="mb-2 flex justify-center gap-3 text-xs text-muted">
-          {resumeRetry ? <button type="button" onClick={onRetry}>Retry</button> : null}
-          {resumeCont ? <button type="button" onClick={onContinue}>Continue</button> : null}
-          {running ? (
-            <button type="button" className="inline-flex items-center gap-1" onClick={onStop}>
-              <Square className="h-3 w-3" /> Stop
-            </button>
-          ) : null}
-        </div>
-        {running ? <p className="mb-1 text-center text-xs text-muted">Add to the current job</p> : null}
-        <p className="mb-1 text-center text-xs text-muted" role="status" data-testid="run-state" data-state={presenceKind}>{presence}</p>
+        <p className="composer-status mb-1 text-xs text-muted" role="status" data-testid="run-state" data-state={presenceKind}>
+          {presence}
+          {resumeRetry ? <button type="button" className="ml-2" onClick={onRetry}>Retry</button> : null}
+          {resumeCont ? <button type="button" className="ml-2" onClick={onContinue}>Continue</button> : null}
+        </p>
         <div className="composer">
           <button type="button" className="mb-1 flex h-8 w-8 items-center justify-center rounded-full text-foreground" aria-label="Attach" onClick={() => fileRef.current?.click()}>
             <Plus className="h-5 w-5" />
@@ -180,24 +174,32 @@ export const Composer = memo(forwardRef<ComposerHandle, ComposerProps>(function 
           <button type="button" className={cn("mb-1 flex h-8 w-8 items-center justify-center rounded-full text-muted", listening && "text-foreground")} aria-label="Microphone" onClick={listen}>
             <Mic className="h-4 w-4" />
           </button>
-          {running ? (
-            <button
-              type="button"
-              className="mb-1 rounded-full px-3 text-sm"
-              data-testid="stop-and-send"
-              disabled={!filled && !fileName}
-              onClick={() => {
-                const text = readText().trim();
-                const file = takeFile();
-                if (!text && !file) return;
-                void send(text, file, onStopAndSend);
-              }}
-            >
-              Stop and send
-            </button>
-          ) : null}
-          <button type="submit" className="send-btn" aria-label="Send" disabled={!filled && !fileName}>
-            <ArrowUp className="h-4 w-4" />
+          <button
+            type="button"
+            className={cn("stop-send-slot", running && (filled || fileName) && "is-on")}
+            data-testid="stop-and-send"
+            tabIndex={running && (filled || fileName) ? 0 : -1}
+            onClick={() => {
+              if (!running) return;
+              const text = readText().trim();
+              const file = takeFile();
+              if (!text && !file) return;
+              void send(text, file, onStopAndSend);
+            }}
+          >
+            Stop and send
+          </button>
+          <button
+            type={running && !filled && !fileName ? "button" : "submit"}
+            className="send-btn"
+            aria-label={running && !filled && !fileName ? "Stop" : "Send"}
+            disabled={!(running && !filled && !fileName) && !filled && !fileName}
+            onMouseDown={(event) => event.preventDefault()}
+            onClick={() => {
+              if (running && !filled && !fileName) onStop();
+            }}
+          >
+            {running && !filled && !fileName ? <span className="stop-square" /> : <ArrowUp className="h-4 w-4" />}
           </button>
         </div>
       </div>

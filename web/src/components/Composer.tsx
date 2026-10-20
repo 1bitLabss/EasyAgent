@@ -1,5 +1,5 @@
 import { ArrowUp, Mic, Plus } from "lucide-react";
-import { forwardRef, memo, useEffect, useImperativeHandle, useRef, useState } from "react";
+import { forwardRef, memo, useEffect, useImperativeHandle, useRef, useState, type ReactNode } from "react";
 import { browseBackward, browseForward, DRAFT_PERSIST_MS, isBrowsing, readDraft, resetBrowse, writeDraft } from "@/lib/composer-history";
 import { noteComposerInput, resetComposer } from "@/lib/composer";
 import { cn } from "@/lib/utils";
@@ -14,8 +14,7 @@ type ComposerProps = {
   running: boolean;
   asking: boolean;
   error: string;
-  presence: string;
-  presenceKind: string;
+  presence: ReactNode;
   resumeRetry: boolean;
   resumeCont: boolean;
   onSend: (text: string, file: File | null) => Promise<void> | void;
@@ -36,7 +35,6 @@ export const Composer = memo(forwardRef<ComposerHandle, ComposerProps>(function 
   asking,
   error,
   presence,
-  presenceKind,
   resumeRetry,
   resumeCont,
   onSend,
@@ -221,7 +219,7 @@ export const Composer = memo(forwardRef<ComposerHandle, ComposerProps>(function 
       <div className="mx-auto w-full max-w-[760px]">
         {error ? <p className="mb-2 text-center text-sm text-danger" role="alert">{error}</p> : null}
         {fileName ? <p className="mb-1 text-center text-xs text-muted">{fileName}</p> : null}
-        <p className="composer-status mb-1 text-xs text-muted" role="status" data-testid="run-state" data-state={presenceKind}>
+        <p className="composer-status mb-1 text-xs text-muted" role="status">
           {presence}
           {resumeRetry ? <button type="button" className="ml-2" onMouseDown={(event) => event.preventDefault()} onClick={() => { onRetry(); focusSoon(); }}>Retry</button> : null}
           {resumeCont ? <button type="button" className="ml-2" onMouseDown={(event) => event.preventDefault()} onClick={() => { onContinue(); focusSoon(); }}>Continue</button> : null}

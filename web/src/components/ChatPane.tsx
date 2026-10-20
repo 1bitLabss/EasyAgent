@@ -5,6 +5,7 @@ import { useStickToBottom } from "use-stick-to-bottom";
 import { api, queryClient } from "@/api";
 import { ApprovalCard } from "@/components/ApprovalCard";
 import { Composer, type ComposerHandle } from "@/components/Composer";
+import { Elapsed } from "@/components/Elapsed";
 import { Face } from "@/components/Face";
 import { Markdown } from "@/components/Markdown";
 import { ThinkingBox } from "@/components/ThinkingBox";
@@ -353,7 +354,6 @@ export function ChatPane() {
       return shareChat(prev, keepLoadedHistory(prev, settleIncoming(botId || "", chatId || "", incoming as Chat)));
     },
   });
-  const [now, setNow] = useState(() => Date.now());
   const [error, setError] = useState("");
   const [askId, setAskId] = useState("");
   const [menu, setMenu] = useState(false);
@@ -367,7 +367,8 @@ export function ChatPane() {
   const historyRef = useRef<ChatMessage[]>([]);
   const getHistory = useCallback(() => deriveUserHistory(historyRef.current), []);
   const bot = (bots.data || []).find((item) => item.id === botId) || null;
-  const yoloLeft = yoloRemaining(chat.data?.yolo, chat.dataUpdatedAt || now, now);
+  const yoloNow = Date.now();
+  const yoloLeft = yoloRemaining(chat.data?.yolo, chat.dataUpdatedAt || yoloNow, yoloNow);
   const yoloOn = yoloLeft > 0;
 
   async function toggleYolo() {
@@ -395,11 +396,6 @@ export function ChatPane() {
     if (chatId === id) return;
     selectChat(id);
   }, [botId, chatId, ongoing.data?.id, selectChat]);
-
-  useEffect(() => {
-    const timer = window.setInterval(() => setNow(Date.now()), 1000);
-    return () => window.clearInterval(timer);
-  }, []);
 
   useEffect(() => {
     if (!botId || !chat.data?.id) return;
@@ -514,6 +510,7 @@ export function ChatPane() {
   const serverSettled = open?.run?.status === "idle" || open?.run?.status === "stopped" || open?.run?.status === "error";
   const running = Boolean(open && (open.run?.status === "running" || (flight?.sending && live && !serverSettled && live.phase !== "error" && live.phase !== "stopped")));
   const step = live?.label || open?.run?.current_step || "Thinking";
+  const now = Date.now();
   const view = open ? describeRun(step, open.run?.status || (flight?.sending ? "running" : "idle"), live?.run?.started_at || open.run?.started_at, live?.run?.last_activity_at || open.run?.last_activity_at, live?.heardAt, now) : null;
   const tone = view ? runTone(view.words, running ? "running" : open?.run?.status || "idle") : "thinking";
   const face = faceFor(Boolean(flight?.sending), live?.phase, view?.words, live?.text, running ? "running" : open?.run?.status, view?.words);
@@ -554,13 +551,6 @@ export function ChatPane() {
   const shown = placed.tail.length ? [...head, ...placed.tail] : head;
   const asked = askedLine(bot.endpoint_name || "", rows);
   const pill = workingLine(live?.run || open?.run, now);
-  const activity = activityLine({
-    step: live?.label || open?.run?.current_step || "",
-    jobStartedAt: live?.run?.started_at || open?.run?.started_at,
-    activityStartedAt: live?.waitAt ? new Date(live.waitAt).toISOString() : (live?.run?.activity_started_at || open?.run?.activity_started_at),
-    now,
-    tokens: Math.floor((live?.chars || 0) / 4),
-  });
   const checklist = (open?.plan?.steps || []).filter((step) => step && step.text);
   const active = Boolean(open && (running || (flight?.sending && live && live.phase !== "error" && live.phase !== "stopped")));
   const presenceStep = live?.label || open?.run?.current_step || "";
@@ -568,7 +558,14 @@ export function ChatPane() {
   const presenceStarted = presenceWaiting
     ? (live?.waitAt ? new Date(live.waitAt).toISOString() : (open?.run?.activity_started_at || open?.run?.started_at || live?.run?.started_at))
     : (open?.run?.activity_started_at || live?.run?.activity_started_at || open?.run?.started_at || live?.run?.started_at);
-  const presence = runPresence({ active, step: presenceStep, startedAt: presenceStarted, now });
+  const status = (
+    <Elapsed>
+      {(clock) => {
+        const line = runPresence({ active, step: presenceStep, startedAt: presenceStarted, now: clock });
+        return <span data-testid="run-state" data-state={line.kind}>{line.text}</span>;
+      }}
+    </Elapsed>
+  );
 
   chooseRef.current = (choice) => {
     void submit(choice).catch((reason: unknown) => {
@@ -647,7 +644,12 @@ export function ChatPane() {
               ? "rounded-full bg-[#b42318] px-2.5 py-1 text-xs font-bold tracking-wide text-white"
               : "rounded-full bg-background px-2.5 py-1 text-xs font-semibold text-[#b42318] shadow-[inset_0_0_0_1px_#b42318]"}
           >
-            {yoloOn ? `YOLO ${yoloClock(yoloLeft)}` : "YOLO"}
+            {yoloOn ? (
+              <Elapsed>{(clock) => {
+                const left = yoloRemaining(chat.data?.yolo, chat.dataUpdatedAt || clock, clock);
+                return <>YOLO {yoloClock(left)}</>;
+              }}</Elapsed>
+            ) : "YOLO"}
           </button>
         ) : null}
       </div>
@@ -659,7 +661,12 @@ export function ChatPane() {
           className="flex shrink-0 items-center justify-between gap-3 bg-[#b42318] px-4 py-2 text-sm font-semibold text-white"
         >
           <span>YOLO ON</span>
-          <span className="font-normal">{yoloClock(yoloLeft)} left in this chat</span>
+          <span className="font-normal">
+            <Elapsed>{(clock) => {
+              const left = yoloRemaining(chat.data?.yolo, chat.dataUpdatedAt || clock, clock);
+              return <>{yoloClock(left)} left in this chat</>;
+            }}</Elapsed>
+          </span>
           <button
             type="button"
             data-testid="yolo-off"
@@ -723,7 +730,19 @@ export function ChatPane() {
                 <div className="sys-line" role="status" data-testid="chat-working-pill">
                   <p>
                     <span className={cn("h-1.5 w-1.5 rounded-full", tone === "halted" ? "bg-danger" : "bg-current")} />
-                    <span data-testid="activity-line">{activity || pill.text || view.words}</span>
+                    <Elapsed>
+                      {(clock) => (
+                        <span data-testid="activity-line">
+                          {activityLine({
+                            step: live?.label || open?.run?.current_step || "",
+                            jobStartedAt: live?.run?.started_at || open?.run?.started_at,
+                            activityStartedAt: live?.waitAt ? new Date(live.waitAt).toISOString() : (live?.run?.activity_started_at || open?.run?.activity_started_at),
+                            now: clock,
+                            tokens: Math.floor((live?.chars || 0) / 4),
+                          }) || workingLine(live?.run || open?.run, clock).text || view?.words}
+                        </span>
+                      )}
+                    </Elapsed>
                     {pill.stuck ? <span>No activity for a while</span> : null}
                     {pill.queued ? <span data-testid="queued-badge">Queued</span> : null}
                   </p>
@@ -757,8 +776,7 @@ export function ChatPane() {
         running={running}
         asking={Boolean(asking && asking.length > 1)}
         error={error || (live?.phase === "error" ? live.text : "")}
-        presence={presence.text}
-        presenceKind={presence.kind}
+        presence={status}
         resumeRetry={resume.retry}
         resumeCont={resume.cont}
         onSend={submit}

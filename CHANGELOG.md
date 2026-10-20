@@ -4,7 +4,10 @@
 - Streamed tokens paint in batches, about thirty times a second, and slow down when a paint is expensive. The rest of the window does not redraw on every token.
 - A reply that is still arriving skips syntax highlighting. Only the open tail is parsed again.
 - The message box is its own component, so typing does not redraw the transcript. Its height changes in small steps, and the dock stays one size. Send becomes Stop in the same button.
-- A message sent during a job stays under the live reply, in the order it was sent. The live reply is the same row as the finished answer.
+- Everything typed during a job shows at once, at the bottom, and stays there. The agent pauses at the next safe point, keeps the words already written, and says "Paused, reading your message". The next answer is a new reply under that message.
+- Several messages sent close together all stay on screen, and one reply answers them together.
+- Reloading the page rejoins a live run and keeps the partial reply. A job that is still running is not paused for being idle.
+- A status line goes away when the run ends. Once tokens are arriving, the status says Writing.
 - The transcript follows the bottom. A jump-to-latest button appears when you scroll up. Escape stops a running job. The up arrow recalls what you sent. Each chat keeps its draft across a reload. The caret comes back after Send, Stop, Retry, and Continue. Clocks tick in place.
 
 ## 0.3.44

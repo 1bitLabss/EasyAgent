@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { moodForBadge, moodForReaction } from "./mood";
-import { activityLine, contextNote, describeRun, faceStateFor, runPresence, runTone, workingLine } from "./run";
+import { activityLine, contextNote, describeRun, faceStateFor, runPresence, runTone, shownStep, workingLine } from "./run";
 
 describe("run tone", () => {
   it("names waiting, reconnecting, tools, and a halt", () => {
@@ -79,6 +79,9 @@ describe("run tone", () => {
       now: start + 42_000,
     })).toBe("Running npm install, 42s");
     expect(activityLine({ step: "Writing index.html", activityStartedAt: "2026-10-08T12:00:00Z", now: start })).toBe("Writing index.html, 0s");
+    expect(shownStep("Waiting on model", "Writing index.html")).toBe("Writing index.html");
+    expect(shownStep("Writing, 4s", "Waiting on model, 4s")).toBe("Writing, 4s");
+    expect(shownStep("Paused, reading your message", "Writing index.html")).toBe("Paused, reading your message");
     expect(runTone("Writing index.html", "running")).toBe("tool");
     expect(runTone("Writing, 3m 10s", "running")).toBe("thinking");
   });

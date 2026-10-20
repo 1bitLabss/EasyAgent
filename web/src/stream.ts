@@ -559,7 +559,7 @@ async function readEvents(response: Response, flight: Flight) {
   return ended;
 }
 
-function begin(botId: string, chatId: string) {
+function begin(botId: string, chatId: string, seed?: { label?: string; run?: Run | null }) {
   const key = flightKey(botId, chatId);
   const previous = flights.get(key);
   if (previous) {
@@ -573,7 +573,15 @@ function begin(botId: string, chatId: string) {
     chatId,
     runId: "",
     control: new AbortController(),
-    live: { phase: "thinking", label: "Waiting on model", text: "", reasoning: "", run: null, heardAt: Date.now(), reasoningLive: false },
+    live: {
+      phase: "thinking",
+      label: (seed?.label || "").trim() || "Waiting on model",
+      text: "",
+      reasoning: "",
+      run: seed?.run || null,
+      heardAt: Date.now(),
+      reasoningLive: false,
+    },
     sending: true,
     replaced: false,
     settled: false,
@@ -726,7 +734,8 @@ export async function sendMessage(botId: string, chatId: string, text: string, f
 export async function attachLive(botId: string, chatId: string) {
   const existing = flightFor(botId, chatId);
   if (existing && !existing.replaced && existing.sending && !existing.settled) return;
-  const flight = begin(botId, chatId);
+  const cached = queryClient.getQueryData<Chat>(["chat", botId, chatId]);
+  const flight = begin(botId, chatId, { label: cached?.run?.current_step, run: cached?.run });
   try {
     const response = await streamPost(`/api/bots/${botId}/chats/${chatId}/live`, {}, flight.control.signal);
     const ended = await readEvents(response, flight);

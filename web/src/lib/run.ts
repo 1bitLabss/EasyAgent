@@ -83,6 +83,18 @@ function activityBase(step: string): string {
     .replace(/, \d+s(?:, .* tokens so far)?$/, "");
 }
 
+function genericWait(step: string): boolean {
+  return !step || step === "Thinking" || step === "Waiting" || step.startsWith("Waiting on model");
+}
+
+/** A placeholder wait must not cover a step the server already named. */
+export function shownStep(label?: string, serverStep?: string): string {
+  const live = (label || "").trim();
+  const server = (serverStep || "").trim();
+  if (genericWait(live) && !genericWait(server)) return server;
+  return live || server;
+}
+
 export type RunPresence = "idle" | "working" | "waiting";
 
 /** Idle, a tool step, or the model. Active states include the elapsed time. */

@@ -15,7 +15,7 @@ import { chipText, chipTitle } from "@/lib/chips";
 import { yoloClock, yoloRemaining } from "@/lib/yolo";
 import { activityLabel, askedLine, type ActivityStep } from "@/lib/activity";
 import { deriveUserHistory } from "@/lib/composer-history";
-import { activityLine, describeRun, faceStateFor, runPresence, runTone, workingLine } from "@/lib/run";
+import { activityLine, describeRun, faceStateFor, runPresence, runTone, shownStep, workingLine } from "@/lib/run";
 import { arrangeBusy, hideWhileSending, messageHasBubble, placeLiveReply, reactionWho, rowKey } from "@/lib/transcript";
 import { cn } from "@/lib/utils";
 import { keepLoadedHistory, mergeChat, sameMessage, shareChat, type MessagePage } from "@/lib/window";
@@ -526,7 +526,8 @@ export function ChatPane() {
   const resume = open ? canResume(open, flight) : { retry: false, cont: false };
   const serverSettled = open?.run?.status === "idle" || open?.run?.status === "stopped" || open?.run?.status === "error";
   const running = Boolean(open && (open.run?.status === "running" || (flight?.sending && live && !serverSettled && live.phase !== "error" && live.phase !== "stopped")));
-  const step = live?.label || open?.run?.current_step || "Thinking";
+  const named = shownStep(live?.label, open?.run?.current_step);
+  const step = named || "Thinking";
   const now = Date.now();
   const view = open ? describeRun(step, open.run?.status || (flight?.sending ? "running" : "idle"), live?.run?.started_at || open.run?.started_at, live?.run?.last_activity_at || open.run?.last_activity_at, live?.heardAt, now) : null;
   const tone = view ? runTone(view.words, running ? "running" : open?.run?.status || "idle") : "thinking";
@@ -560,7 +561,7 @@ export function ChatPane() {
   const pill = workingLine(live?.run || open?.run, now);
   const checklist = (open?.plan?.steps || []).filter((step) => step && step.text);
   const active = Boolean(open && (running || (flight?.sending && live && live.phase !== "error" && live.phase !== "stopped")));
-  const presenceStep = live?.label || open?.run?.current_step || "";
+  const presenceStep = named;
   const presenceWaiting = !presenceStep || /^(Thinking|Waiting|Revising)\b/.test(presenceStep) || presenceStep.startsWith("Waiting on model") || presenceStep.startsWith("Model not answering") || presenceStep.startsWith("Paused");
   const presenceStarted = presenceWaiting
     ? (live?.waitAt ? new Date(live.waitAt).toISOString() : (open?.run?.activity_started_at || open?.run?.started_at || live?.run?.started_at))
@@ -741,7 +742,7 @@ export function ChatPane() {
                       {(clock) => (
                         <span data-testid="activity-line">
                           {activityLine({
-                            step: live?.label || open?.run?.current_step || "",
+                            step: named,
                             jobStartedAt: live?.run?.started_at || open?.run?.started_at,
                             activityStartedAt: live?.waitAt ? new Date(live.waitAt).toISOString() : (live?.run?.activity_started_at || open?.run?.activity_started_at),
                             now: clock,

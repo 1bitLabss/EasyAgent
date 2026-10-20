@@ -16,3 +16,18 @@ export function reactionWho(reactionBy: string | undefined, botName: string): st
 export function hideWhileSending(message: Pick<ChatMessage, "live">, sending: boolean): boolean {
   return Boolean(sending && message.live);
 }
+
+export function rowKey(message: Pick<ChatMessage, "client_id" | "id">, index: number): string {
+  return message.client_id || message.id || `idx-${index}`;
+}
+
+export function answerIndex(rows: ChatMessage[]): number {
+  for (let index = rows.length - 1; index >= 0; index -= 1) {
+    const row = rows[index];
+    if (!row || row.role === "user") break;
+    if (row.role !== "assistant") continue;
+    if (row.kind === "status" || row.kind === "pickup" || row.kind === "activity" || row.about === "activity") continue;
+    if ((row.content || "").trim() || (row.thinking || "").trim() || row.error) return index;
+  }
+  return -1;
+}

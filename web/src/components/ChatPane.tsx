@@ -11,9 +11,9 @@ import { WindowControls } from "@/components/WindowControls";
 import { moodForReaction, pokeFace } from "@/lib/mood";
 import { chipText } from "@/lib/chips";
 import { yoloClock, yoloRemaining } from "@/lib/yolo";
-import { activityLabel, askedLine } from "@/lib/activity";
+import { activityLabel, askedLine, type ActivityStep } from "@/lib/activity";
 import { activityLine, describeRun, faceStateFor, runPresence, runTone, workingLine } from "@/lib/run";
-import { hideWhileSending, messageHasBubble, reactionWho } from "@/lib/transcript";
+import { answerIndex, hideWhileSending, messageHasBubble, reactionWho, rowKey } from "@/lib/transcript";
 import { cn } from "@/lib/utils";
 import { keepLoadedHistory, mergeChat, sameMessage, shareChat, type MessagePage } from "@/lib/window";
 import { useApp } from "@/store";
@@ -97,12 +97,14 @@ const MessageRow = memo(function MessageRow({
   last,
   botName,
   sending,
+  streaming = false,
   onChoose,
 }: {
   message: ChatMessage;
   last: boolean;
   botName: string;
   sending: boolean;
+  streaming?: boolean;
   onChoose: (choice: string) => void;
 }) {
   const botId = useApp((state) => state.botId);
@@ -140,13 +142,13 @@ const MessageRow = memo(function MessageRow({
   }
   return (
     <li tabIndex={message.id ? -1 : undefined} className={cn("message-row flex flex-col", mine ? "items-end" : "items-start")}>
-      {message.role === "assistant" && !failed && (message.thinking || "").trim() ? <ThinkingBox text={message.thinking} seconds={message.thought_seconds} /> : null}
+      {message.role === "assistant" && !failed && (message.thinking || "").trim() ? <ThinkingBox text={message.thinking} streaming={streaming} seconds={message.thought_seconds} /> : null}
       {showBubble ? (
       <div className={cn(mine ? "bubble-user" : "bubble-bot", failed && "bg-danger/10 text-danger")}>
         {message.routine_name ? <p className="mb-1 text-xs opacity-70">Routine · {message.routine_name}</p> : null}
         {message.speaker_name ? <p className="mb-1 text-xs opacity-70">{message.speaker_name}</p> : null}
         <div className={mine ? "whitespace-pre-wrap" : ""}>
-          {mine ? (message.content || "") : <Markdown text={message.content || ""} />}
+          {mine ? (message.content || "") : <Markdown text={message.content || ""} streaming={streaming} />}
         </div>
         {chip ? <p className="mt-2 text-xs" data-testid={`chip-${message.chip}`}>{chip}</p> : null}
         {message.chip === "held" && message.id && botId && chatId ? (
@@ -264,9 +266,9 @@ const MessageRow = memo(function MessageRow({
       {message.check === "checked" ? <Quiet text="Checked" /> : null}
       {message.lesson?.startsWith("Learned:") ? <Quiet text={message.lesson} /> : null}
       {message.role === "assistant" ? <Receipts message={message} /> : null}
-      {message.id ? (
+      {showBubble && (mine || message.role === "assistant") ? (
         <div className="reaction-row">
-          {message.reaction ? (
+          {message.id && message.reaction ? (
             <button
               type="button"
               className="reaction-pill"
@@ -279,11 +281,13 @@ const MessageRow = memo(function MessageRow({
               <span className="reaction-who">{who}</span>
             </button>
           ) : null}
+          {message.id ? (
           <div className="reaction-picker" data-testid="reaction-picker" role="group" aria-label="React to this message">
             {REACTIONS.map((emoji) => (
               <button key={emoji} type="button" className="reaction-pick" aria-label={`React ${emoji}`} onClick={() => void react(emoji)}>{emoji}</button>
             ))}
           </div>
+          ) : null}
         </div>
       ) : null}
     </li>
@@ -291,6 +295,7 @@ const MessageRow = memo(function MessageRow({
 }, (prev, next) =>
   prev.last === next.last &&
   prev.sending === next.sending &&
+  prev.streaming === next.streaming &&
   prev.botName === next.botName &&
   sameMessage(prev.message, next.message)
 );
@@ -299,22 +304,25 @@ const Transcript = memo(function Transcript({
   rows,
   botName,
   sending,
+  liveKey,
   onChoose,
 }: {
   rows: ChatMessage[];
   botName: string;
   sending: boolean;
+  liveKey: string;
   onChoose: (choice: string) => void;
 }) {
   return (
     <ol className="flex flex-col gap-4">
       {rows.map((message, index) => (
         <MessageRow
-          key={message.id || index}
+          key={rowKey(message, index)}
           message={message}
           last={index === rows.length - 1}
           botName={botName}
           sending={sending}
+          streaming={Boolean(liveKey) && message.client_id === liveKey}
           onChoose={onChoose}
         />
       ))}
@@ -351,6 +359,8 @@ export function ChatPane() {
   const sectionRef = useRef<HTMLElement>(null);
   const dockRef = useRef<HTMLDivElement>(null);
   const composerRef = useRef<ComposerHandle>(null);
+  const heldSteps = useRef<ActivityStep[]>([]);
+  const seenRun = useRef("");
   const bot = (bots.data || []).find((item) => item.id === botId) || null;
   const yoloLeft = yoloRemaining(chat.data?.yolo, chat.dataUpdatedAt || now, now);
   const yoloOn = yoloLeft > 0;
@@ -518,7 +528,36 @@ export function ChatPane() {
   const face = faceFor(Boolean(flight?.sending), live?.phase, view?.words, live?.text, running ? "running" : open?.run?.status, view?.words);
   const asking = (open?.messages || []).slice(-1)[0]?.choices;
   const rows = open?.messages || [];
+  const runId = live?.run?.id || flight?.runId || "";
+  if (runId && runId !== seenRun.current) {
+    if (seenRun.current) heldSteps.current = [];
+    seenRun.current = runId;
+  }
+  if (live?.steps?.length) heldSteps.current = live.steps;
   const steps = live?.steps || [];
+  const liveTurn = Boolean(live && live.phase !== "error" && live.phase !== "stopped");
+  const stamp = runId ? `live-${runId}` : "";
+  const streamingReply = Boolean(liveTurn && ((live?.text || "").trim() || (live?.reasoning || "").trim()));
+  let shown = rows;
+  const settledAnswer = answerIndex(rows);
+  if (streamingReply && live && stamp) {
+    if (settledAnswer < 0) {
+      shown = [...rows, { role: "assistant", content: live.text, thinking: live.reasoning, thought_seconds: live.thoughtSeconds, client_id: stamp }];
+    } else {
+      const answer = rows[settledAnswer];
+      shown = rows.slice();
+      shown[settledAnswer] = {
+        ...answer,
+        content: live.text || answer.content,
+        thinking: live.reasoning || answer.thinking,
+        thought_seconds: live.thoughtSeconds ?? answer.thought_seconds,
+        client_id: answer.client_id || stamp,
+      };
+    }
+  } else if (stamp && settledAnswer >= 0 && !rows[settledAnswer].client_id) {
+    shown = rows.slice();
+    shown[settledAnswer] = { ...rows[settledAnswer], client_id: stamp };
+  }
   const asked = askedLine(bot.endpoint_name || "", rows);
   const pill = workingLine(live?.run || open?.run, now);
   const activity = activityLine({
@@ -666,25 +705,22 @@ export function ChatPane() {
                 <button type="button" className="sys-line" onClick={() => void loadOlder()}>Earlier messages</button>
               ) : null}
               <Transcript
-                rows={rows}
+                rows={shown}
                 botName={bot?.name || "the bot"}
                 sending={Boolean(flight?.sending)}
+                liveKey={streamingReply ? stamp : ""}
                 onChoose={onChoose}
               />
-              {steps.map((item) => (
+              {liveTurn && steps.length ? steps.map((item) => (
                 <div key={item.id} data-testid="activity-step" data-state={item.state} data-step-id={item.id}>
                   <Quiet
                     icon={runTone(item.text, "running") === "tool" ? <Terminal className="h-3 w-3" /> : <MessageSquare className="h-3 w-3" />}
                     text={activityLabel(item)}
                   />
                 </div>
-              ))}
-              {live && (live.reasoning || "").trim() && live.phase !== "error" && live.phase !== "stopped" ? (
-                <ThinkingBox text={live.reasoning} streaming={Boolean(live.reasoningLive)} seconds={live.thoughtSeconds} startedAt={live.thoughtAt} now={now} />
-              ) : null}
-              {live && live.phase !== "error" && live.phase !== "stopped" && (live.text || "").trim() ? (
-                <div className="bubble-bot">
-                  <Markdown text={live.text} streaming />
+              )) : heldSteps.current.length ? (
+                <div data-testid="activity-summary">
+                  <Quiet text={`Used ${heldSteps.current.length} steps`} detail={heldSteps.current.map((item) => activityLabel(item)).join("\n")} />
                 </div>
               ) : null}
               {running && view ? (

@@ -704,6 +704,7 @@ export async function retryMessage(botId: string, chatId: string) {
 async function afterStream(flight: Flight, botId: string, chatId: string, ended: string) {
   if (flight.replaced) return;
   if (ended === "done" || ended === "error" || ended === "stopped") {
+    // finish() already stored the chat carried on the terminal event.
     if (flight.settled) return;
     let chat = queryClient.getQueryData<Chat>(["chat", botId, chatId]);
     try {

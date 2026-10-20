@@ -13,6 +13,7 @@ import { moodForReaction, pokeFace } from "@/lib/mood";
 import { chipText, chipTitle } from "@/lib/chips";
 import { yoloClock, yoloRemaining } from "@/lib/yolo";
 import { activityLabel, askedLine, type ActivityStep } from "@/lib/activity";
+import { deriveUserHistory } from "@/lib/composer-history";
 import { activityLine, describeRun, faceStateFor, runPresence, runTone, workingLine } from "@/lib/run";
 import { answerIndex, arrangeBusy, hideWhileSending, messageHasBubble, reactionWho, rowKey } from "@/lib/transcript";
 import { cn } from "@/lib/utils";
@@ -363,6 +364,8 @@ export function ChatPane() {
   const heldSteps = useRef<ActivityStep[]>([]);
   const seenRun = useRef("");
   const pinnedBusy = useRef(new Set<string>());
+  const historyRef = useRef<ChatMessage[]>([]);
+  const getHistory = useCallback(() => deriveUserHistory(historyRef.current), []);
   const bot = (bots.data || []).find((item) => item.id === botId) || null;
   const yoloLeft = yoloRemaining(chat.data?.yolo, chat.dataUpdatedAt || now, now);
   const yoloOn = yoloLeft > 0;
@@ -516,6 +519,7 @@ export function ChatPane() {
   const face = faceFor(Boolean(flight?.sending), live?.phase, view?.words, live?.text, running ? "running" : open?.run?.status, view?.words);
   const asking = (open?.messages || []).slice(-1)[0]?.choices;
   const rows = open?.messages || [];
+  historyRef.current = rows;
   const runId = live?.run?.id || flight?.runId || "";
   if (runId && runId !== seenRun.current) {
     if (seenRun.current) heldSteps.current = [];
@@ -570,6 +574,7 @@ export function ChatPane() {
     void submit(choice).catch((reason: unknown) => {
       setError(reason instanceof Error ? reason.message : "The reply failed.");
     });
+    composerRef.current?.focus();
   };
 
   async function submit(text: string, file: File | null = null) {
@@ -770,6 +775,10 @@ export function ChatPane() {
         }}
         onContinue={() => void submit("Continue")}
         onError={setError}
+        botId={botId || ""}
+        chatId={chatId || ""}
+        menuOpen={menu}
+        getHistory={getHistory}
       />
       </div>
     </section>

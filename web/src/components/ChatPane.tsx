@@ -452,10 +452,14 @@ export function ChatPane() {
 
   useLayoutEffect(() => {
     const el = scrollRef.current;
-    if (!el || !anchor.current) return;
-    el.scrollTop = anchor.current.top + (el.scrollHeight - anchor.current.height);
-    anchor.current = null;
-  }, [messageCount, scrollRef]);
+    if (!el) return;
+    if (anchor.current) {
+      el.scrollTop = anchor.current.top + (el.scrollHeight - anchor.current.height);
+      anchor.current = null;
+      return;
+    }
+    if (isAtBottom) el.scrollTop = el.scrollHeight;
+  }, [messageCount, live?.text, isAtBottom, scrollRef]);
 
   useEffect(() => {
     const el = scrollRef.current;

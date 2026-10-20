@@ -27,14 +27,14 @@ export function ThinkingBox({
   const [opened, setOpened] = useState<boolean | null>(null);
   const stick = useRef(true);
   const scroller = useRef<HTMLDivElement>(null);
-  const [clock, setClock] = useState(() => Date.now());
+  const [tick, setTick] = useState(() => Date.now());
   useEffect(() => {
     if (!streaming) return;
-    const timer = window.setInterval(() => setClock(Date.now()), 1000);
+    const timer = window.setInterval(() => setTick(Date.now()), 1000);
     return () => window.clearInterval(timer);
   }, [streaming]);
   const expanded = opened === null ? streaming : opened;
-  const elapsed = seconds ?? (startedAt ? Math.max(0, Math.round(((now || clock) - startedAt) / 1000)) : undefined);
+  const elapsed = seconds ?? (startedAt ? Math.max(0, Math.round(((now || tick) - startedAt) / 1000)) : undefined);
   const clock = thoughtLabel(elapsed);
   useLayoutEffect(() => {
     const el = scroller.current;

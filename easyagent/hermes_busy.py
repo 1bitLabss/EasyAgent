@@ -297,24 +297,23 @@ def _slot(store, chat_id: str):
 
 
 def _hm_busy_interrupt(store: Store, bot_id: str, chat_id: str, text: str) -> bool:
-    """Interrupt path: redirect when a model request is live, else leave the queue for the drain.
+    """Pause at the next safe point. The same path runs every time.
 
-    A live command is not killed. The text is already in the transcript.
+    A live command finishes. A token chunk already in hand is kept. The old
+    reply does not continue, and the text already streamed is not discarded.
     """
-    agent = SlotAgent(_slot(store, chat_id))
-    if agent.redirect(text):
-        return True
-    proc = getattr(agent._slot, "proc", None)
-    if getattr(agent, "_executing_tools", False) or (proc is not None and proc.poll() is None):
-        return agent.steer(text)
-    return False
+    del text
+    from easyagent import turn as turn_mod
+
+    turn_mod.request_user_pause(store, chat_id)
+    return True
 
 
 def _hm_handle_running_session_message(store: Store, bot_id: str, chat_id: str, text: str) -> None:
     """What to do with a message that arrived while this chat is busy.
 
     Queue and follow wait until the turn ends. Steer injects at the next
-    model call. Interrupt aborts only the in-flight model request.
+    model call. Interrupt pauses at the next safe point, every time.
     """
     from easyagent.plan import busy_mode
     from easyagent.store import StoreError

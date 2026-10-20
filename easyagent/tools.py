@@ -7770,6 +7770,9 @@ async def run_turn(
         return sum(1 for item in narration_hits if _near_line(item, spoken))
 
     while True:
+        if turn_mod.pause_requested():
+            yield "pause", "Paused, reading your message"
+            return
         redirected = turn_mod.take_redirect()
         if not redirected:
             turn_mod.raise_if_cancelled()
@@ -7878,6 +7881,11 @@ async def run_turn(
             _keep_partial_reply(store, bot_id, chat_id, text_bits)
             raise
         except turn_mod.TurnCancelled:
+            if turn_mod.pause_requested():
+                for event in _partial_stream(text_bits):
+                    yield event
+                yield "pause", "Paused, reading your message"
+                return
             if turn_mod.take_redirect():
                 continue
             for event in _partial_stream(text_bits):
@@ -7897,6 +7905,11 @@ async def run_turn(
                 ):
                     for event in close(""):
                         yield event
+                    return
+                if turn_mod.pause_requested():
+                    for event in _partial_stream(text_bits):
+                        yield event
+                    yield "pause", "Paused, reading your message"
                     return
                 if turn_mod.take_redirect():
                     continue

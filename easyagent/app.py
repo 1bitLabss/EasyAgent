@@ -1521,6 +1521,43 @@ def create_app(data_dir: str | Path | None = None) -> FastAPI:
     def get_chat(bot_id: str, chat_id: str, window: int | None = None):
         return _public_chat(store, store.get_chat(bot_id, chat_id), window=window)
 
+    @app.post("/api/bots/{bot_id}/chats/{chat_id}/live")
+    async def attach_live(bot_id: str, chat_id: str):
+        """A reloaded page reads the same run. The worker is not restarted."""
+        store.get_chat(bot_id, chat_id)
+        slot = turn_mod.slot_for(store, chat_id)
+        worker = turn_mod.current_worker(store, chat_id)
+        alive = bool(worker is not None and not worker.done()) or turn_mod.is_busy(store, chat_id)
+
+        async def gen():
+            if not alive:
+                try:
+                    yield _sse({"type": "done", "chat": _public_chat(store, store.get_chat(bot_id, chat_id))})
+                except StoreError:
+                    return
+                return
+            watched: asyncio.Queue = asyncio.Queue()
+            slot.listeners.append(watched)
+            try:
+                try:
+                    yield _sse({"type": "sync", "chat": _public_chat(store, store.get_chat(bot_id, chat_id))})
+                except StoreError:
+                    return
+                while True:
+                    item = await watched.get()
+                    if item is None:
+                        break
+                    yield item
+            finally:
+                if watched in slot.listeners:
+                    slot.listeners.remove(watched)
+
+        return StreamingResponse(
+            gen(),
+            media_type="text/event-stream",
+            headers={"Cache-Control": "no-store", "X-Accel-Buffering": "no"},
+        )
+
     @app.get("/api/bots/{bot_id}/chats/{chat_id}/messages")
     def chat_messages(bot_id: str, chat_id: str, before: int = 0, limit: int = 80):
         """Older messages, read only. `before` is the first index the page already has."""
@@ -3886,6 +3923,12 @@ def public_run(chat: dict, store: Store | None = None) -> dict:
     }
     if raw.get("activity_started_at"):
         payload["activity_started_at"] = raw["activity_started_at"]
+    for message in reversed(chat.get("messages") or []):
+        if _live_reply(message):
+            reply_id = str(message.get("id") or "")
+            if reply_id:
+                payload["reply_id"] = reply_id
+            break
     if store is not None:
         from easyagent.plan import run_fields
 
@@ -4060,19 +4103,56 @@ def _live_slot(chat: dict) -> dict:
     for message in reversed(messages):
         if not isinstance(message, dict):
             continue
-        if message.get("kind") in {"status", "activity", "pickup"} or message.get("about") == "activity":
+        if message.get("kind") in {"status", "activity", "pickup"} or message.get("about") in {"activity", "queue"}:
+            continue
+        if message.get("role") == "user" and (
+            message.get("steer") or message.get("chip") in {"queued", "seen", "held", "refused"}
+        ):
             continue
         if _live_reply(message):
             return message
         break
+    message_id = new_id()
     message = {
-        "id": new_id(),
+        "id": message_id,
         "role": "assistant",
         "content": "",
         "live": True,
+        "client_id": f"live-{message_id}",
         "created_at": now_iso(),
     }
-    messages.append(message)
+    def noise(row: dict) -> bool:
+        return row.get("about") in {"activity", "queue"} or row.get("kind") in {"status", "pickup", "activity"}
+
+    def steer_user(row: dict) -> bool:
+        return (
+            row.get("role") == "user"
+            and not row.get("before_id")
+            and bool(row.get("steer") or row.get("chip") in {"queued", "seen", "held", "refused"})
+        )
+
+    last_plain = -1
+    for position, row in enumerate(messages):
+        if isinstance(row, dict) and row.get("role") == "user" and not noise(row) and not steer_user(row):
+            last_plain = position
+    missing = last_plain >= 0 and not any(
+        isinstance(row, dict) and row.get("role") == "assistant" and not noise(row)
+        for row in messages[last_plain + 1 :]
+    )
+    index = len(messages)
+    if missing:
+        while index > 0:
+            row = messages[index - 1]
+            if not isinstance(row, dict):
+                break
+            if noise(row):
+                index -= 1
+                continue
+            if steer_user(row) and index - 1 > last_plain:
+                index -= 1
+                continue
+            break
+    messages.insert(index, message)
     return message
 
 
@@ -4101,15 +4181,98 @@ def _upsert_activity(chat: dict, step: str) -> None:
 
 
 def _drop_activity(chat: dict) -> None:
-    messages = [
-        item for item in (chat.get("messages") or [])
-        if not (isinstance(item, dict) and item.get("about") == "activity")
-    ]
+    """Remove the running step line. A finished turn does not keep it."""
+    messages = []
+    for item in chat.get("messages") or []:
+        if not isinstance(item, dict):
+            messages.append(item)
+            continue
+        if item.get("about") == "activity":
+            continue
+        if item.get("kind") == "status" and item.get("about") == "queue":
+            continue
+        if item.get("id") in {"activity", "live-status"}:
+            continue
+        messages.append(item)
     chat["messages"] = messages
 
 
 WEDGE_TEXT = "This job was still marked running, but nothing was in flight, so I paused it. Resume it, or dismiss it."
+PAUSE_TEXT = "Paused, reading your message"
 WEDGE_SECONDS = 60
+
+
+def _close_partial_for_pause(store: Store, bot_id: str, chat_id: str) -> None:
+    """Keep the reply that already arrived, and stay on this run."""
+    try:
+        chat = store.get_chat(bot_id, chat_id)
+    except StoreError:
+        return
+    _drop_activity(chat)
+    for message in chat.get("messages") or []:
+        if not isinstance(message, dict) or message.get("role") != "assistant" or not message.get("live"):
+            continue
+        if str(message.get("content") or "").strip() or str(message.get("thinking") or "").strip():
+            message["interrupted"] = True
+        message.pop("live", None)
+        message.pop("error", None)
+    _apply_run(chat, status="running", step=PAUSE_TEXT)
+    chat["updated_at"] = now_iso()
+    try:
+        store.save_chat(chat)
+    except (StoreError, OSError, HTTPException):
+        _log.warning("Could not save the paused reply.")
+
+
+async def _coalesce_user_messages(store: Store, bot_id: str, chat_id: str) -> None:
+    """Quick messages that land together are one answer. A later one pauses again."""
+    from easyagent.plan import queued_items
+
+    seen = len(queued_items(store, bot_id, chat_id))
+    quiet = 0.0
+    spent = 0.0
+    while quiet < 0.3 and spent < 0.8:
+        await asyncio.sleep(0.05)
+        quiet += 0.05
+        spent += 0.05
+        try:
+            count = len(queued_items(store, bot_id, chat_id))
+        except Exception:
+            return
+        if count != seen:
+            seen = count
+            quiet = 0.0
+
+
+async def _answer_after_pause(store: Store, bot_id: str, chat_id: str, *, emit_done: bool):
+    """The old reply stays. One new reply answers every message waiting right now."""
+    _close_partial_for_pause(store, bot_id, chat_id)
+    try:
+        opened = public_run(store.get_chat(bot_id, chat_id), store)
+        snap = _public_chat(store, store.get_chat(bot_id, chat_id))
+    except StoreError:
+        opened = None
+        snap = None
+    yield _sse({"type": "pause", "text": PAUSE_TEXT, "run": opened, "chat": snap})
+    from easyagent.plan import queued_items, steer_into
+
+    taken = 0
+    for _ in range(8):
+        await _coalesce_user_messages(store, bot_id, chat_id)
+        taken += steer_into(store, bot_id, chat_id, None)
+        turn_mod.take_user_pause()
+        if queued_items(store, bot_id, chat_id) or turn_mod.pause_requested():
+            continue
+        break
+    if taken == 0:
+        if emit_done:
+            try:
+                yield _sse({"type": "done", "chat": _public_chat(store, store.get_chat(bot_id, chat_id))})
+            except StoreError:
+                return
+        return
+    async for chunk in _stream_reply(store, bot_id, chat_id, continue_run=True, drain=True, emit_done=emit_done):
+        yield chunk
 
 
 def _run_age_seconds(chat: dict) -> float:
@@ -4171,7 +4334,12 @@ def _pause_wedged(store: Store, bot_id: str, chat_id: str) -> None:
 
 
 def _seal_wedged_run(store: Store, bot_id: str, chat_id: str, *, force: bool) -> None:
-    """Leave a defined state. A live model socket or command is left alone."""
+    """Leave a defined state. A live worker, model socket, or command is left alone."""
+    if turn_mod.is_busy(store, chat_id):
+        return
+    worker = turn_mod.current_worker(store, chat_id)
+    if worker is not None and not worker.done():
+        return
     if turn_mod.request_in_flight(store, chat_id):
         return
     try:
@@ -5846,6 +6014,7 @@ async def _stream_reply(
         choices: list[str] = []
         made = ""
         sent = ""
+        saved_chars = 0
         thought = ""
         reacted = False
         checked = ""
@@ -5887,16 +6056,23 @@ async def _stream_reply(
         ):
             if kind == "stage":
                 freeze_thought()
-                extra = text[len(sent):] if sent and text.startswith(sent) else text
-                sent = text
+                body = text or ""
+                if sent and (body.startswith(sent) or sent.startswith(body) or sent.strip() == body.strip()):
+                    extra = body[len(sent):] if body.startswith(sent) else ""
+                    if len(body) >= len(sent):
+                        sent = body
+                else:
+                    extra = body
+                    sent = body
                 saved_run = _write_live(
                     store,
                     bot_id,
                     chat_id,
-                    reply=text,
+                    reply=sent,
                     step=model_line(extra),
                     force=True,
                 )
+                saved_chars = len(sent)
                 if extra:
                     yield _sse({"type": "delta", "text": extra})
                 if saved_run:
@@ -5967,6 +6143,30 @@ async def _stream_reply(
                 made = text
             elif kind == "reacted":
                 reacted = True
+            elif kind == "delta":
+                extra = text or ""
+                sent += extra
+                if extra:
+                    force = saved_chars == 0 or len(sent) - saved_chars >= 24
+                    saved_run = _write_live(
+                        store,
+                        bot_id,
+                        chat_id,
+                        reply=sent,
+                        step=model_line(extra),
+                        force=force,
+                    )
+                    if saved_run is not None:
+                        saved_chars = len(sent)
+                    yield _sse({"type": "delta", "text": extra})
+                    if saved_run:
+                        yield _sse({"type": "run", "run": saved_run})
+            elif kind == "pause":
+                if sent.strip():
+                    _write_live(store, bot_id, chat_id, reply=sent, step=PAUSE_TEXT, force=True)
+                async for extra in _answer_after_pause(store, bot_id, chat_id, emit_done=emit_done):
+                    yield extra
+                return
             else:
                 yield _sse({"type": kind, "text": text})
         from easyagent.tools import finish_honesty
@@ -6022,6 +6222,12 @@ async def _stream_reply(
         yield _sse({"type": "done", "chat": saved["chat"]})
         return
     except llm.ProviderError as exc:
+        if turn_mod.pause_requested():
+            if sent.strip():
+                _write_live(store, bot_id, chat_id, reply=sent, step=PAUSE_TEXT, force=True)
+            async for extra in _answer_after_pause(store, bot_id, chat_id, emit_done=emit_done):
+                yield extra
+            return
         if turn_mod.cancelled():
             reason = turn_mod.cancel_reason() or "you pressed Stop"
             _settle_interrupted(store, bot_id, chat_id, reason)
@@ -6039,6 +6245,12 @@ async def _stream_reply(
         failed = _append_error(store, bot_id, chat_id, str(exc))
         yield _sse({"type": "error", "detail": failed["reply"], "chat": failed["chat"]})
     except turn_mod.TurnCancelled:
+        if turn_mod.pause_requested():
+            if sent.strip():
+                _write_live(store, bot_id, chat_id, reply=sent, step=PAUSE_TEXT, force=True)
+            async for extra in _answer_after_pause(store, bot_id, chat_id, emit_done=emit_done):
+                yield extra
+            return
         reason = turn_mod.cancel_reason() or "the reply stopped before it finished."
         _settle_interrupted(store, bot_id, chat_id, reason)
         yield _sse_stopped(store, bot_id, chat_id, _stopped_text(reason))
@@ -6063,24 +6275,28 @@ async def _stream_reply(
     finally:
         reset_limits(length)
         gate.reset_connection(conn)
-        if turn_mod.cancelled():
-            _settle_interrupted(store, bot_id, chat_id, turn_mod.cancel_reason() or "you pressed Stop")
+        reason = turn_mod.cancel_reason()
+        if turn_mod.cancelled() and reason and not turn_mod.pause_requested():
+            _settle_interrupted(store, bot_id, chat_id, reason)
 
 
 async def _emit_run(store: Store, bot_id: str, chat_id: str, producer, *, resume: bool = False):
     """Run the turn on its own task. Closing this response does not cancel that task.
 
     The page can leave the chat. The run keeps writing the chat file. Stop is
-    what cancels it. A new message in this chat steers the same job.
+    what cancels it. A new message in this chat pauses the same job. A later
+    view can join ``slot.listeners`` and read the same events.
     """
-    subscribers: list[asyncio.Queue] = []
+    slot = turn_mod.slot_for(store, chat_id)
+    listeners = slot.listeners
     guard = asyncio.Lock()
 
     async def publish(item) -> None:
         async with guard:
-            targets = list(subscribers)
+            targets = list(listeners)
         for queue in targets:
-            queue.put_nowait(item)
+            with suppress(Exception):
+                queue.put_nowait(item)
 
     async def worker() -> None:
         try:
@@ -6094,8 +6310,8 @@ async def _emit_run(store: Store, bot_id: str, chat_id: str, producer, *, resume
                     async for chunk in producer():
                         await publish(chunk)
                 finally:
-                    if turn_mod.cancelled():
-                        reason = turn_mod.cancel_reason() or "you pressed Stop"
+                    reason = turn_mod.cancel_reason()
+                    if turn_mod.cancelled() and reason and not turn_mod.pause_requested():
                         _settle_interrupted(store, bot_id, chat_id, reason)
         except asyncio.CancelledError:
             reason = turn_mod.cancel_reason() or "the server restarted"
@@ -6118,7 +6334,7 @@ async def _emit_run(store: Store, bot_id: str, chat_id: str, producer, *, resume
 
     queue: asyncio.Queue = asyncio.Queue()
     async with guard:
-        subscribers.append(queue)
+        listeners.append(queue)
     task = asyncio.create_task(worker())
     turn_mod.track_worker(task)
     try:
@@ -6128,14 +6344,15 @@ async def _emit_run(store: Store, bot_id: str, chat_id: str, producer, *, resume
                 break
             yield item
     except asyncio.CancelledError:
-        async with guard:
-            if queue in subscribers:
-                subscribers.remove(queue)
         print(
             "heuristic stream-detach: the viewer left and this chat's run kept going",
             flush=True,
         )
         return
+    finally:
+        async with guard:
+            if queue in listeners:
+                listeners.remove(queue)
 
 
 async def _stream_resume(store: Store, bot_id: str, chat_id: str, content: str):

@@ -197,7 +197,7 @@ def waiting_activity(elapsed: float, chars: int) -> str:
     tokens = max(0, int(chars) // 4)
     if tokens <= 0:
         return f"Waiting on model, {clock}"
-    return f"Waiting on model, {clock}, {_token_phrase(tokens)} so far"
+    return f"Writing, {clock}"
 
 
 def elapsed_seconds(run: dict, now: datetime | None = None) -> int:
@@ -682,7 +682,7 @@ def release_uncovered(chat: dict) -> int:
 
 
 def note_new_generation(store: Store, bot_id: str, chat_id: str) -> None:
-    """A redirected model call is a new reply. The previous partial does not cover the queue."""
+    """A new model call is a new reply. The partial already written stays on the page."""
     try:
         chat = store.get_chat(bot_id, chat_id)
     except Exception:
@@ -692,9 +692,9 @@ def note_new_generation(store: Store, bot_id: str, chat_id: str) -> None:
         if not isinstance(message, dict):
             continue
         if message.get("role") == "assistant" and message.get("live"):
-            message["gen"] = int(message.get("gen") or 0) + 1
-            message["content"] = ""
-            message.pop("interrupted", None)
+            if str(message.get("content") or "").strip():
+                message["interrupted"] = True
+            message.pop("live", None)
             chat["updated_at"] = now_iso()
             store.save_chat(chat)
             return
@@ -846,7 +846,7 @@ def _enqueue(
         items.append(message)
     row = _user_row(message_id, content, attachment, at, message["chip"], reason, client_id)
     _stamp_before(row, _live_open(messages))
-    _splice_before_live(messages, [row])
+    messages.append(row)
     note = _upsert_queue_status(messages, text)
     chat["messages"] = messages
     chat["updated_at"] = now_iso()

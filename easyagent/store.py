@@ -420,8 +420,16 @@ def atomic_write_json(path: Path, data) -> None:
 
 
 def _transient_activity_row(item: dict) -> bool:
-    """The one running-step note. A later step updates it. A finished save removes it."""
-    return isinstance(item, dict) and (item.get("about") == "activity" or item.get("id") == "activity")
+    """The running-step note and the queue line. A finished save removes them.
+
+    They are not a user message. Dropping one must not make a later save look
+    stale, or the chip on a message that was just answered would be put back.
+    """
+    if not isinstance(item, dict):
+        return False
+    if item.get("about") in {"activity", "queue"}:
+        return True
+    return item.get("id") in {"activity", "live-status"}
 
 
 def _busy_transcript_row(item: dict) -> bool:

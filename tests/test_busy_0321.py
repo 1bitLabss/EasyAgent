@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from easyagent import turn as turn_mod
 from easyagent.app import _write_live
 from easyagent.plan import is_stuck, steer_into, waiting_activity
 from easyagent.store import now_iso
@@ -171,7 +172,8 @@ def test_stop_marks_queued_lines_not_sent_and_send_now_sends_one(tmp_path, monke
 
 
 def test_waiting_activity_names_tokens_and_clears_the_stuck_flag(tmp_path):
-    assert waiting_activity(190, 4800) == "Waiting on model, 3m 10s, 1.2k tokens so far"
+    assert waiting_activity(190, 0) == "Waiting on model, 3m 10s"
+    assert waiting_activity(190, 4800) == "Writing, 3m 10s"
     assert status_label(ToolRequest(kind="files", action="write", path="index.html")) == "Writing index.html"
     assert status_label(ToolRequest(kind="shell", command="npm install")).startswith("Running")
     app, client, bot, chat = _client(tmp_path)
@@ -192,5 +194,36 @@ def test_waiting_activity_names_tokens_and_clears_the_stuck_flag(tmp_path):
     assert saved is not None
     public = client.get(f"/api/bots/{bot['id']}/chats/{chat['id']}").json()
     assert public["run"]["stuck"] is False
-    assert public["run"]["current_step"] == "Waiting on model, 4s, 20 tokens so far"
+    assert public["run"]["current_step"] == "Writing, 4s"
+    client.close()
+
+
+def test_a_message_during_a_job_lands_after_the_partial_and_pauses(tmp_path):
+    from easyagent.hermes_busy import _hm_busy_interrupt
+    from easyagent.plan import enqueue
+
+    app, client, bot, chat = _client(tmp_path)
+    store = app.state.store
+    _running(store, bot["id"], chat["id"], step="Writing, 1s")
+    saved = _write_live(
+        store,
+        bot["id"],
+        chat["id"],
+        reply="the partial stays",
+        step="Writing, 1s",
+        force=True,
+    )
+    assert saved is not None
+    outcome = enqueue(store, bot["id"], chat["id"], "pivot now", client_id="c-pivot")
+    assert outcome.get("message", {}).get("id")
+    _hm_busy_interrupt(store, bot["id"], chat["id"], "pivot now")
+    slot = turn_mod.slot_for(store, chat["id"])
+    assert slot.pause_for_user is True
+    assert slot.redirect is False
+    visible = [
+        item.get("content")
+        for item in store.get_chat(bot["id"], chat["id"])["messages"]
+        if item.get("kind") != "status" and item.get("about") not in {"activity", "queue"}
+    ]
+    assert visible == ["the partial stays", "pivot now"]
     client.close()

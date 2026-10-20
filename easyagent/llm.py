@@ -2014,6 +2014,7 @@ async def _stream_attempt(
             body = _iter_completion_body(response, started=started, messages=messages).__aiter__()
             wait = watch.limits.first_token_seconds
             while True:
+                turn_mod.raise_if_cancelled()
                 try:
                     # Stay in this task. Python 3.11's wait_for copies the context
                     # into another task, so tool-call ids set while reading are lost.
@@ -2031,11 +2032,11 @@ async def _stream_attempt(
                 except GenerationLimit:
                     raise
                 watch.observe(piece or "")
-                turn_mod.raise_if_cancelled()
                 if piece:
                     yielded = True
                     wait = watch.limits.stall_seconds
                     yield piece
+                turn_mod.raise_if_cancelled()
         except GenerationLimit:
             raise
         except (httpx.HTTPError, asyncio.TimeoutError) as exc:

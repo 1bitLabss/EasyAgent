@@ -59,6 +59,8 @@ class Slot:
         self._model_request_active = threading.Event()
         self._turn_user_intervened = False
         self._supports_active_turn_redirect = True
+        self.pause_for_user = False
+        self.listeners: list = []
 
 
 _GUARD = threading.Lock()
@@ -210,6 +212,7 @@ def bind(store, chat_id: str, bot_id: str = "", *, resume: bool = False) -> Slot
     # A leftover Stop belongs to the turn that already ended. It must not cancel this one.
     slot.user_stop = False
     slot.redirect = False
+    slot.pause_for_user = False
     slot.sealed = False
     slot.cancel = asyncio.Event()
     slot.client = None
@@ -351,6 +354,47 @@ def take_redirect() -> bool:
     if slot is None or not slot.redirect or slot.user_stop:
         return False
     slot.redirect = False
+    slot.reason = ""
+    slot.cancel = asyncio.Event()
+    _cancel.set(slot.cancel)
+    return True
+
+
+def _tool_in_progress(slot: Slot) -> bool:
+    """A command or a tool batch is still finishing. The model socket is not that."""
+    proc = slot.proc
+    if proc is not None and proc.poll() is None:
+        return True
+    return bool(getattr(slot, "_executing_tools", False))
+
+
+def request_user_pause(store, chat_id: str) -> None:
+    """A message arrived. Finish the current token or tool step, then stop that reply.
+
+    The text already streamed stays. This does not close the socket in the middle
+    of a chunk, and it does not kill a command. Stop is a different flag.
+    """
+    slot = slot_for(store, chat_id)
+    if slot.user_stop:
+        return
+    slot.pause_for_user = True
+    if _tool_in_progress(slot):
+        return
+    slot.cancel.set()
+
+
+def pause_requested() -> bool:
+    """True when a user message is waiting and this turn should stop after the safe point."""
+    slot = _slot.get()
+    return bool(slot is not None and slot.pause_for_user and not slot.user_stop)
+
+
+def take_user_pause() -> bool:
+    """Accept the pause and clear it so the next reply can start."""
+    slot = _slot.get()
+    if slot is None or not slot.pause_for_user or slot.user_stop:
+        return False
+    slot.pause_for_user = False
     slot.reason = ""
     slot.cancel = asyncio.Event()
     _cancel.set(slot.cancel)

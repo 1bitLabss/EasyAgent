@@ -5,7 +5,7 @@ import { Face } from "@/components/Face";
 import { Button } from "@/components/ui/button";
 import { contextNote, describeRun } from "@/lib/run";
 import { useApp } from "@/store";
-import { flightFor } from "@/stream";
+import { flightFor, useFlightPulse } from "@/stream";
 import type { Bot, Chat, Learning } from "@/types";
 
 export function InfoPane() {
@@ -13,7 +13,7 @@ export function InfoPane() {
   const setInfo = useApp((state) => state.setInfo);
   const botId = useApp((state) => state.botId);
   const chatId = useApp((state) => state.chatId);
-  const tick = useApp((state) => state.tick);
+  const pulse = useFlightPulse(botId);
   const setFocus = useApp((state) => state.setFocus);
   const setScreen = useApp((state) => state.setScreen);
   const bots = useQuery({ queryKey: ["bots"], queryFn: () => api<Bot[]>("/api/bots") });
@@ -28,7 +28,7 @@ export function InfoPane() {
     queryFn: () => api<Learning>(`/api/bots/${botId}/learning`),
   });
   const bot = (bots.data || []).find((item) => item.id === botId);
-  void tick;
+  void pulse;
   const flight = botId && chatId ? flightFor(botId, chatId) : null;
   const run = flight?.live?.run || chat.data?.run;
   const described = run ? describeRun(flight?.live?.label || run.current_step || "Thinking", run.status, run.started_at, run.last_activity_at, flight?.live?.heardAt, Date.now()) : null;

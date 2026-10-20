@@ -75,7 +75,7 @@ export function shareMessages(prev: ChatMessage[] | undefined, incoming: ChatMes
   return same ? prev : next;
 }
 
-function sameRun(left: Chat["run"], right: Chat["run"]) {
+export function sameRun(left: Chat["run"], right: Chat["run"]) {
   if (left === right) return true;
   if (!left || !right) return !left && !right;
   return left.id === right.id && left.status === right.status && left.started_at === right.started_at && left.last_activity_at === right.last_activity_at && left.current_step === right.current_step && left.reason === right.reason && left.activity_started_at === right.activity_started_at;

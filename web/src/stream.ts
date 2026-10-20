@@ -1,10 +1,24 @@
+import { useSyncExternalStore } from "react";
 import { api, queryClient, streamPost } from "@/api";
 import { noteActivity, settleActivity, type ActivityStep } from "@/lib/activity";
 import { activityLine } from "@/lib/run";
-import { mergeChat } from "@/lib/window";
+import { mergeChat, sameRun } from "@/lib/window";
 import { moodForBadge, pokeFace } from "@/lib/mood";
 import { useApp } from "@/store";
 import type { Chat, ChatMessage, Run } from "@/types";
+
+// Flush cadence ported from Hermes desktop (MIT, Nous Research):
+// apps/desktop/src/app/session/hooks/use-message-stream/utils.ts
+// and scheduleDeltaFlush in use-message-stream/index.ts.
+// A timer, not rAF: a hidden or occluded Tauri webview pauses animation frames,
+// so a finished reply would sit unpainted until the window is focused again.
+export const STREAM_DELTA_FLUSH_MS = 33;
+export const MAX_STREAM_FLUSH_GAP_MS = 250;
+
+export function streamFlushDelay(sinceLastMs: number, lastCostMs: number): number {
+  const floor = Math.min(Math.max(STREAM_DELTA_FLUSH_MS, lastCostMs * 3), MAX_STREAM_FLUSH_GAP_MS);
+  return Math.max(0, floor - sinceLastMs);
+}
 
 export type Live = {
   phase: "thinking" | "reply" | "stopped" | "error";
@@ -35,6 +49,78 @@ export type Flight = {
 
 const flights = new Map<string, Flight>();
 const settledRuns = new Map<string, { runId: string; at: number }>();
+const flightListeners = new Map<string, Set<() => void>>();
+const botListeners = new Map<string, Set<() => void>>();
+const botEpoch = new Map<string, number>();
+
+type FlushClock = {
+  timer: ReturnType<typeof setTimeout> | null;
+  lastAt: number;
+  cost: number;
+  raf: number | null;
+  startedAt: number;
+};
+
+const clocks = new Map<string, FlushClock>();
+
+function clockFor(key: string): FlushClock {
+  let clock = clocks.get(key);
+  if (!clock) {
+    clock = { timer: null, lastAt: 0, cost: 0, raf: null, startedAt: 0 };
+    clocks.set(key, clock);
+  }
+  return clock;
+}
+
+function notifyFlight(flight: Flight) {
+  const key = flightKey(flight.botId, flight.chatId);
+  botEpoch.set(flight.botId, (botEpoch.get(flight.botId) || 0) + 1);
+  flightListeners.get(key)?.forEach((cb) => cb());
+  botListeners.get(flight.botId)?.forEach((cb) => cb());
+}
+
+export function subscribeFlight(key: string, cb: () => void) {
+  let set = flightListeners.get(key);
+  if (!set) {
+    set = new Set();
+    flightListeners.set(key, set);
+  }
+  set.add(cb);
+  return () => {
+    set?.delete(cb);
+    if (set && set.size === 0) flightListeners.delete(key);
+  };
+}
+
+function subscribeBot(botId: string, cb: () => void) {
+  let set = botListeners.get(botId);
+  if (!set) {
+    set = new Set();
+    botListeners.set(botId, set);
+  }
+  set.add(cb);
+  return () => {
+    set?.delete(cb);
+    if (set && set.size === 0) botListeners.delete(botId);
+  };
+}
+
+export function useLive(botId: string | null, chatId: string | null): Live | null {
+  const key = botId && chatId ? flightKey(botId, chatId) : "";
+  return useSyncExternalStore(
+    (cb) => (key ? subscribeFlight(key, cb) : () => undefined),
+    () => (botId && chatId ? flightFor(botId, chatId)?.live ?? null : null),
+    () => null,
+  );
+}
+
+export function useFlightPulse(botId: string | null): number {
+  return useSyncExternalStore(
+    (cb) => (botId ? subscribeBot(botId, cb) : () => undefined),
+    () => (botId ? botEpoch.get(botId) || 0 : 0),
+    () => 0,
+  );
+}
 
 export function flightKey(botId: string, chatId: string) {
   return `${botId}:${chatId}`;
@@ -46,8 +132,14 @@ export function flightFor(botId: string, chatId: string): Flight | null {
 
 export function resetStreamForTests() {
   for (const flight of flights.values()) flight.control.abort();
+  for (const clock of clocks.values()) {
+    if (clock.timer !== null) clearTimeout(clock.timer);
+    if (clock.raf !== null && typeof cancelAnimationFrame === "function") cancelAnimationFrame(clock.raf);
+  }
   flights.clear();
   settledRuns.clear();
+  clocks.clear();
+  botEpoch.clear();
 }
 
 export function setFlightForTests(botId: string, chatId: string, live: Live | null) {
@@ -56,7 +148,7 @@ export function setFlightForTests(botId: string, chatId: string, live: Live | nu
     flights.delete(key);
     return;
   }
-  flights.set(key, {
+  const flight: Flight = {
     botId,
     chatId,
     runId: live.run?.id || "",
@@ -65,7 +157,9 @@ export function setFlightForTests(botId: string, chatId: string, live: Live | nu
     sending: false,
     replaced: false,
     settled: false,
-  });
+  };
+  flights.set(key, flight);
+  flushNow(flight);
 }
 
 function releaseRun(chat: Chat): Chat {
@@ -93,6 +187,8 @@ export function runIsFinished(botId: string, chatId: string, status?: string | n
 
 export function chatStillPolling(botId: string, chatId: string, status?: string | null, runId?: string | null): number | false {
   if (runIsFinished(botId, chatId, status, runId)) return false;
+  const flight = flightFor(botId, chatId);
+  if (flight && !flight.replaced && flight.sending && flight.live && Date.now() - flight.live.heardAt < 5000) return false;
   return status === "running" ? 2000 : false;
 }
 
@@ -117,11 +213,52 @@ function visible(flight: Flight) {
 }
 
 function paint(flight: Flight) {
-  useApp.getState().bump();
-  if (!visible(flight) || !flight.live) return;
-  queryClient.setQueryData<Chat>(["chat", flight.botId, flight.chatId], (chat) =>
-    chat && flight.live?.run ? { ...chat, run: flight.live.run } : chat,
-  );
+  notifyFlight(flight);
+  const run = flight.live?.run;
+  if (!visible(flight) || !run) return;
+  queryClient.setQueryData<Chat>(["chat", flight.botId, flight.chatId], (chat) => {
+    if (!chat || !run) return chat;
+    if (sameRun(chat.run, run)) return chat;
+    return { ...chat, run };
+  });
+}
+
+function flushNow(flight: Flight) {
+  const key = flightKey(flight.botId, flight.chatId);
+  const clock = clockFor(key);
+  if (clock.timer !== null) {
+    clearTimeout(clock.timer);
+    clock.timer = null;
+  }
+  const startedAt = typeof performance !== "undefined" ? performance.now() : Date.now();
+  clock.lastAt = startedAt;
+  clock.startedAt = startedAt;
+  paint(flight);
+  const writeCost = (typeof performance !== "undefined" ? performance.now() : Date.now()) - startedAt;
+  clock.cost = writeCost;
+  if (typeof window === "undefined" || typeof window.requestAnimationFrame !== "function") return;
+  if (clock.raf !== null) window.cancelAnimationFrame(clock.raf);
+  clock.raf = window.requestAnimationFrame((frameStart) => {
+    clock.raf = null;
+    if (clock.startedAt !== startedAt) return;
+    const now = typeof performance !== "undefined" ? performance.now() : Date.now();
+    clock.cost = writeCost + Math.max(0, now - frameStart);
+  });
+}
+
+function scheduleFlush(flight: Flight) {
+  const key = flightKey(flight.botId, flight.chatId);
+  const clock = clockFor(key);
+  if (clock.timer !== null) return;
+  if (typeof window === "undefined") {
+    flushNow(flight);
+    return;
+  }
+  const now = typeof performance !== "undefined" ? performance.now() : Date.now();
+  clock.timer = window.setTimeout(() => {
+    clock.timer = null;
+    flushNow(flight);
+  }, streamFlushDelay(now - clock.lastAt, clock.cost));
 }
 
 export function eventMatches(event: Record<string, unknown>, flight: Flight) {
@@ -136,9 +273,10 @@ export function eventMatches(event: Record<string, unknown>, flight: Flight) {
   return true;
 }
 
-function remember(flight: Flight, live: Live) {
+function remember(flight: Flight, live: Live, immediate = false) {
   flight.live = live;
-  paint(flight);
+  if (immediate) flushNow(flight);
+  else scheduleFlush(flight);
 }
 
 function carry(live: Live, patch: Partial<Live>): Live {
@@ -183,7 +321,7 @@ function finish(flight: Flight, chat?: Chat) {
     void queryClient.invalidateQueries({ queryKey: ["chats", flight.botId] });
     void queryClient.invalidateQueries({ queryKey: ["unread"] });
   }
-  paint(flight);
+  flushNow(flight);
   notifyFinished(flight, next);
 }
 
@@ -210,7 +348,8 @@ function apply(event: Record<string, unknown>, flight: Flight) {
   const live = flight.live || { phase: "thinking" as const, label: "Waiting on model", text: "", reasoning: "", run: null, heardAt: Date.now() };
   if (event.type === "run" && event.run) {
     const run = event.run as Run;
-    remember(flight, carry(live, { label: run.current_step || live.label, run }));
+    const statusChanged = (live.run?.status || "") !== (run.status || "");
+    remember(flight, carry(live, { label: run.current_step || live.label, run }), statusChanged);
     return;
   }
   if (event.type === "stopped") {
@@ -219,10 +358,12 @@ function apply(event: Record<string, unknown>, flight: Flight) {
   }
   if (event.type === "user" && event.message && typeof event.message === "object") {
     placeMessage(flight, event.message as ChatMessage);
+    flushNow(flight);
     return;
   }
   if (event.type === "note" && event.message && typeof event.message === "object") {
     placeMessage(flight, event.message as ChatMessage, { append: true });
+    flushNow(flight);
     return;
   }
   if (event.type === "aside") {
@@ -330,7 +471,7 @@ function apply(event: Record<string, unknown>, flight: Flight) {
       reasoning: "",
       reasoningLive: false,
       steps: settleActivity(live.steps, "failed"),
-    }));
+    }), true);
     if (event.chat) finish(flight, event.chat as Chat);
     return;
   }
@@ -390,7 +531,7 @@ function begin(botId: string, chatId: string) {
     settled: false,
   };
   flights.set(key, flight);
-  paint(flight);
+  flushNow(flight);
   return flight;
 }
 
@@ -482,7 +623,7 @@ export async function sendMessage(botId: string, chatId: string, text: string, f
           queryClient.setQueryData(["chat", botId, chatId], mergeChat(prev, data.chat));
         }
         if (flight?.live) {
-          remember(flight, carry(flight.live, { aside: String(data.reply || ""), run: data.chat?.run || flight.live.run }));
+          remember(flight, carry(flight.live, { aside: String(data.reply || ""), run: data.chat?.run || flight.live.run }), true);
         }
         return;
       }
@@ -530,7 +671,7 @@ export async function sendMessage(botId: string, chatId: string, text: string, f
       reasoningLive: false,
       run: flight.live?.run || null,
       heardAt: Date.now(),
-    });
+    }, true);
   }
 }
 
@@ -556,7 +697,7 @@ export async function retryMessage(botId: string, chatId: string) {
       reasoningLive: false,
       run: null,
       heardAt: Date.now(),
-    });
+    }, true);
   }
 }
 
@@ -578,7 +719,7 @@ async function afterStream(flight: Flight, botId: string, chatId: string, ended:
     if (chat.run?.status === "running") {
       flight.live = flight.live || { phase: "thinking", label: chat.run.current_step || "Thinking", text: "", reasoning: "", run: chat.run, heardAt: Date.now() };
       flight.live.run = chat.run;
-      paint(flight);
+      flushNow(flight);
     } else {
       finish(flight, chat);
     }
@@ -617,7 +758,7 @@ export async function sendNow(botId: string, chatId: string, messageId: string) 
         reasoningLive: false,
         run: flight.live?.run || null,
         heardAt: Date.now(),
-      });
+      }, true);
     }
     return;
   }
@@ -652,7 +793,7 @@ export async function stopAndSendStored(botId: string, chatId: string, messageId
       reasoningLive: false,
       run: flight.live?.run || null,
       heardAt: Date.now(),
-    });
+    }, true);
   }
 }
 

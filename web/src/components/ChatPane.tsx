@@ -17,7 +17,7 @@ import { hideWhileSending, messageHasBubble, reactionWho } from "@/lib/transcrip
 import { cn } from "@/lib/utils";
 import { keepLoadedHistory, mergeChat, sameMessage, shareChat, type MessagePage } from "@/lib/window";
 import { useApp } from "@/store";
-import { RETRY_REASON, canResume, chatStillPolling, flightFor, retryMessage, retryUnsent, sendMessage, sendNow, settleIncoming, stopAndSendStored, stopMessage } from "@/stream";
+import { RETRY_REASON, canResume, chatStillPolling, flightFor, retryMessage, retryUnsent, sendMessage, sendNow, settleIncoming, stopAndSendStored, stopMessage, useLive } from "@/stream";
 import type { Bot, Chat, ChatMessage } from "@/types";
 
 const REACTIONS = ["👍", "👎", "❤️", "👀"];
@@ -327,7 +327,6 @@ export function ChatPane() {
   const chatId = useApp((state) => state.chatId);
   const selectChat = useApp((state) => state.selectChat);
   const setScreen = useApp((state) => state.setScreen);
-  const tick = useApp((state) => state.tick);
   const bots = useQuery({ queryKey: ["bots"], queryFn: () => api<Bot[]>("/api/bots") });
   const ongoing = useQuery({
     queryKey: ["ongoing", botId],
@@ -357,7 +356,6 @@ export function ChatPane() {
   const bot = (bots.data || []).find((item) => item.id === botId) || null;
   const yoloLeft = yoloRemaining(chat.data?.yolo, chat.dataUpdatedAt || now, now);
   const yoloOn = yoloLeft > 0;
-  void tick;
 
   async function toggleYolo() {
     if (!botId || !chatId) return;
@@ -373,7 +371,7 @@ export function ChatPane() {
     }
   }
   const flight = botId && chatId ? flightFor(botId, chatId) : null;
-  const live = flight?.live || null;
+  const live = useLive(botId, chatId);
   const readSent = useRef("");
   const chooseRef = useRef<(choice: string) => void>(() => undefined);
   const onChoose = useCallback((choice: string) => chooseRef.current(choice), []);

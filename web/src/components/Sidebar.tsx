@@ -10,7 +10,7 @@ import { Input } from "@/components/ui/input";
 import { faceStateFor } from "@/lib/run";
 import { cn } from "@/lib/utils";
 import { useApp } from "@/store";
-import { anySending } from "@/stream";
+import { anySending, useFlightPulse } from "@/stream";
 import type { Bot, Chat, Endpoint, Unread } from "@/types";
 
 const RING: Record<string, string> = {
@@ -25,7 +25,7 @@ const RING: Record<string, string> = {
 function BotTile({ bot }: { bot: Bot }) {
   const selected = useApp((state) => state.botId) === bot.id;
   const chatId = useApp((state) => state.chatId);
-  const tick = useApp((state) => state.tick);
+  const pulse = useFlightPulse(bot.id);
   const selectBot = useApp((state) => state.selectBot);
   const unread = useQuery({
     queryKey: ["unread"],
@@ -39,7 +39,7 @@ function BotTile({ bot }: { bot: Bot }) {
     enabled: selected && Boolean(chatId),
     queryFn: () => api<Chat>(`/api/bots/${bot.id}/chats/${chatId}?window=80`),
   });
-  void tick;
+  void pulse;
   const flight = anySending(bot.id);
   const count = (unread.data?.chats || []).filter((row) => row.bot_id === bot.id).reduce((sum, row) => sum + row.unread, 0);
   const state = faceStateFor({

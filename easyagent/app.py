@@ -4121,38 +4121,8 @@ def _live_slot(chat: dict) -> dict:
         "client_id": f"live-{message_id}",
         "created_at": now_iso(),
     }
-    def noise(row: dict) -> bool:
-        return row.get("about") in {"activity", "queue"} or row.get("kind") in {"status", "pickup", "activity"}
-
-    def steer_user(row: dict) -> bool:
-        return (
-            row.get("role") == "user"
-            and not row.get("before_id")
-            and bool(row.get("steer") or row.get("chip") in {"queued", "seen", "held", "refused"})
-        )
-
-    last_plain = -1
-    for position, row in enumerate(messages):
-        if isinstance(row, dict) and row.get("role") == "user" and not noise(row) and not steer_user(row):
-            last_plain = position
-    missing = last_plain >= 0 and not any(
-        isinstance(row, dict) and row.get("role") == "assistant" and not noise(row)
-        for row in messages[last_plain + 1 :]
-    )
-    index = len(messages)
-    if missing:
-        while index > 0:
-            row = messages[index - 1]
-            if not isinstance(row, dict):
-                break
-            if noise(row):
-                index -= 1
-                continue
-            if steer_user(row) and index - 1 > last_plain:
-                index -= 1
-                continue
-            break
-    messages.insert(index, message)
+    # The new answer goes at the bottom, under every message already on screen.
+    messages.append(message)
     return message
 
 
@@ -4421,11 +4391,15 @@ def _stored_resume_answer(messages: list, visible: str) -> dict | None:
     text = " ".join((visible or "").split())
     if not text or text.startswith("Stopped:"):
         return None
-    for message in messages:
+    for index, message in enumerate(messages):
         if not isinstance(message, dict):
             continue
-        if (message.get("interrupted") or message.get("live")) and _same_stored_answer(message, text):
-            return message
+        if not ((message.get("interrupted") or message.get("live")) and _same_stored_answer(message, text)):
+            continue
+        # A person spoke after this partial. The next reply is a new row, even when the words match.
+        if any(isinstance(row, dict) and row.get("role") == "user" for row in messages[index + 1 :]):
+            continue
+        return message
     note_at = None
     for index, message in enumerate(messages):
         if not isinstance(message, dict):

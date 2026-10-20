@@ -111,6 +111,36 @@ def test_an_ordinary_chat_can_say_the_same_thing_twice(tmp_path):
     client.close()
 
 
+def test_the_same_words_after_a_new_message_are_a_new_answer(tmp_path):
+    """A pause keeps the partial. The next reply is its own row, even when the words match."""
+    app, client, bot, chat = _client(tmp_path)
+    store = app.state.store
+    doc = store.get_chat(bot["id"], chat["id"])
+    doc["messages"] = [
+        {"id": "u1", "role": "user", "content": "are you connected?", "created_at": now_iso()},
+        {"id": "a1", "role": "assistant", "content": ANSWER, "interrupted": True, "created_at": now_iso()},
+        {"id": "u2", "role": "user", "content": "what are you doing?", "chip": "seen", "steer": True, "created_at": now_iso()},
+        {"id": "u3", "role": "user", "content": "and the second question?", "chip": "seen", "steer": True, "created_at": now_iso()},
+        {"id": "a-live", "role": "assistant", "content": ANSWER, "live": True, "created_at": now_iso()},
+    ]
+    store.save_chat(doc)
+    done = _finish_reply(store, bot["id"], chat["id"], ANSWER, [])
+    rows = [
+        (item.get("role"), item.get("content"))
+        for item in done["chat"]["messages"]
+        if item.get("role") in {"user", "assistant"} and item.get("kind") not in {"status", "pickup"}
+    ]
+    assert rows == [
+        ("user", "are you connected?"),
+        ("assistant", ANSWER),
+        ("user", "what are you doing?"),
+        ("user", "and the second question?"),
+        ("assistant", ANSWER),
+    ]
+    assert rows[-1][0] == "assistant"
+    client.close()
+
+
 def test_a_different_answer_after_an_interrupt_is_kept(tmp_path):
     app, client, bot, chat = _client(tmp_path)
     store = app.state.store
@@ -310,7 +340,9 @@ def test_sigterm_restart_does_not_store_the_answer_twice(tmp_path):
             proc.kill()
             proc.wait(timeout=5)
             raise AssertionError("SIGTERM did not stop the server")
-        assert len(_answers(data)) == 1
+        # The partial stays. The new reply is its own row when that chunk arrived. A restart must not add another.
+        kept = _answers(data)
+        assert 1 <= len(kept) <= 2
         proc = subprocess.Popen(
             [sys.executable, "-m", "easyagent"],
             cwd=str(root),
@@ -325,8 +357,7 @@ def test_sigterm_restart_does_not_store_the_answer_twice(tmp_path):
             if (doc.get("run") or {}).get("status") in {"idle", "paused", "stopped"} and len(_answers(data)) >= 1:
                 break
             time.sleep(0.2)
-        assert len(set(_answers(data))) == 1
-        assert len(_answers(data)) == 1
+        assert _answers(data) == kept
         picked = next(item for item in _chat_doc(data)["messages"] if item.get("content") == "MSG-R1")
         # A kept answer may cover the line. It must not go back to queued.
         assert picked.get("chip") in {"seen", "answered"}

@@ -371,8 +371,8 @@ def _tool_in_progress(slot: Slot) -> bool:
 def request_user_pause(store, chat_id: str) -> None:
     """A message arrived. Finish the current token or tool step, then stop that reply.
 
-    The text already streamed stays. This does not close the socket in the middle
-    of a chunk, and it does not kill a command. Stop is a different flag.
+    The text already streamed stays. A read blocked on the next chunk is closed so
+    the pause can happen. A command is left alone. Stop is a different flag.
     """
     slot = slot_for(store, chat_id)
     if slot.user_stop:
@@ -381,6 +381,13 @@ def request_user_pause(store, chat_id: str) -> None:
     if _tool_in_progress(slot):
         return
     slot.cancel.set()
+    client = slot.client
+    if client is None:
+        return
+    try:
+        asyncio.get_running_loop().create_task(_close_client(client))
+    except RuntimeError:
+        return
 
 
 def pause_requested() -> bool:

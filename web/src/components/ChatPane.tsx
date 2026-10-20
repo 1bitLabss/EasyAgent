@@ -702,7 +702,7 @@ export function ChatPane() {
               ) : null}
               {live && live.phase !== "error" && live.phase !== "stopped" && (live.text || "").trim() ? (
                 <div className="bubble-bot">
-                  <Markdown text={live.text} />
+                  <Markdown text={live.text} streaming />
                 </div>
               ) : null}
               {running && view ? (

@@ -3746,6 +3746,13 @@ def _is_exact_log(line: str, known: list[str] | None = None) -> bool:
     return bool(_EXACT_LOG.match(text))
 
 
+def _same_unindented(left: str, right: str) -> bool:
+    """True when the finish pass only removed indentation the stream already showed."""
+    def flat(text: str) -> str:
+        return "\n".join(line.strip() for line in (text or "").splitlines())
+    return bool((left or "").strip()) and flat(left) == flat(right)
+
+
 def _drop_known_logs(text: str, known: list[str] | None = None) -> str:
     """The bubble is the model's words. A tool log is not the chat."""
     blocks: list[str] = []
@@ -8757,6 +8764,10 @@ async def run_turn(
                 prose = _fallback_after_empty(lines, raws, messages)
             final = _show(_with_status(_not_bare(_ensure_shown(prose, lines, steps))))
             final = _drop_known_logs(final, lines)
+            # The log pass strips code indentation. That is not a new answer, and
+            # appending it paints the reply twice for a frame.
+            if sent_answer and final and _same_unindented(sent_answer, final):
+                final = sent_answer
             if not _answer_is_failure(final):
                 payload = _made_payload(lines)
                 if payload:
@@ -8778,13 +8789,13 @@ async def run_turn(
                         yield "delta", piece
             elif not shown:
                 if final:
-                    yield "delta", final
+                    yield "stage", final
             elif final.startswith(shown):
                 extra = final[len(shown):]
                 if extra:
                     yield "delta", extra
             elif final:
-                yield "delta", final
+                yield "stage", final
             for event in _seal(final):
                 yield event
             return

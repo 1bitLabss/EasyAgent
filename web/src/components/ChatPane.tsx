@@ -118,7 +118,7 @@ const MessageRow = memo(function MessageRow({
   const botId = useApp((state) => state.botId);
   const chatId = useApp((state) => state.chatId);
   const setScreen = useApp((state) => state.setScreen);
-  if (hideWhileSending(message, sending)) return null;
+  if (hideWhileSending(message, sending) && !freeze) return null;
   if (message.about === "activity" || message.about === "queue") return null;
   if (message.kind === "resume-note" && (message.content || "").includes("Picked up where it stopped")) {
     return (
@@ -162,7 +162,6 @@ const MessageRow = memo(function MessageRow({
         {message.speaker_name ? <p className="mb-1 text-xs opacity-70">{message.speaker_name}</p> : null}
         <div className={mine ? "whitespace-pre-wrap" : ""}>
           {mine ? (message.content || "") : <Markdown text={message.content || ""} streaming={streaming || lite || freeze} freeze={freeze} />}
-          {message.role === "assistant" && (message.interrupted || freeze) ? <p className="pause-mark" data-testid="paused-mark">paused — you sent a message</p> : null}
         </div>
         {chip ? <p className="mt-2 block truncate text-xs" data-testid={`chip-${message.chip}`} title={chipTitle(message)}>{chip}</p> : null}
         {message.chip === "held" && message.id && botId && chatId ? (
@@ -304,6 +303,7 @@ const MessageRow = memo(function MessageRow({
           ) : null}
         </div>
       ) : null}
+      {message.role === "assistant" && (message.interrupted || freeze) ? <p className="pause-mark" data-testid="paused-mark">paused — you sent a message</p> : null}
     </li>
   );
 }, (prev, next) =>
@@ -583,7 +583,7 @@ export function ChatPane() {
   }
   const placed = arrangeBusy(rows, pinnedBusy.current);
   let head = placed.head;
-  if (streamingReply && live && stamp) {
+  if ((streamingReply || frozen) && live && stamp) {
     head = placeLiveReply(
       head,
       {
@@ -592,6 +592,7 @@ export function ChatPane() {
         thinking: frozen ? frozen.reasoning : live.reasoning,
         thought_seconds: live.thoughtSeconds,
         client_id: stamp,
+        interrupted: Boolean(frozen),
       },
       stamp,
       frozen?.replyId || replyId,

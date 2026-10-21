@@ -68,6 +68,9 @@ export function placeLiveReply(rows: ChatMessage[], live: ChatMessage, stamp: st
     return next;
   }
   const painted: ChatMessage = { ...live, role: "assistant", client_id: live.client_id || stamp, live: undefined };
+  const already = rows.some((row) => row.role === "assistant" && !skippableRow(row));
+  // A later answer goes under every message already on screen.
+  if (already) return [...rows, painted];
   let at = rows.length;
   while (at > 0) {
     const row = rows[at - 1];

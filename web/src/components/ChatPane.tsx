@@ -120,7 +120,9 @@ const MessageRow = memo(function MessageRow({
   const botId = useApp((state) => state.botId);
   const chatId = useApp((state) => state.chatId);
   const setScreen = useApp((state) => state.setScreen);
-  if (hideWhileSending(message, sending) && !freeze) return null;
+  // An empty live placeholder can wait. A reply that already has words stays put
+  // while the next message is sent, or the row above it jumps.
+  if (hideWhileSending(message, sending) && !freeze && !messageHasBubble(message)) return null;
   if (message.about === "activity" || message.about === "queue" || message.id === "live-status" || message.id === "activity") return null;
   if (message.kind === "resume-note" && (message.content || "").includes("Picked up where it stopped")) {
     return (

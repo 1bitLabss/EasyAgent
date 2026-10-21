@@ -23,3 +23,21 @@ export function splitStreamingMarkdown(text: string, cap = STREAM_TAIL_CAP): { c
   tail = tail.slice(at);
   return { closed, tail };
 }
+
+/** Paragraphs that already ended. Each block stays put while the tail grows. */
+export function settledBlocks(text: string): string[] {
+  if (!text) return [];
+  const blocks: string[] = [];
+  let fence = false;
+  let start = 0;
+  for (let i = 0; i < text.length - 1; i += 1) {
+    if (text.startsWith("```", i) && (i === 0 || text[i - 1] === "\n")) fence = !fence;
+    if (!fence && text[i] === "\n" && text[i + 1] === "\n") {
+      blocks.push(text.slice(start, i + 2));
+      start = i + 2;
+      i += 1;
+    }
+  }
+  if (start < text.length) blocks.push(text.slice(start));
+  return blocks;
+}

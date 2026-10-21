@@ -1,41 +1,30 @@
-import { memo, useDeferredValue, useRef } from "react";
+import { Fragment, memo, useDeferredValue, useRef } from "react";
 import ReactMarkdown from "react-markdown";
 import rehypeHighlight from "rehype-highlight";
 import remarkGfm from "remark-gfm";
-import { splitStreamingMarkdown } from "@/lib/markdown";
+import { settledBlocks, splitStreamingMarkdown } from "@/lib/markdown";
+import { renderStreamingBlock } from "@/lib/streaming-markdown";
 
 const remarkPlugins = [remarkGfm];
 const rehypePlugins = [rehypeHighlight];
 
-const Closed = memo(function Closed({ text }: { text: string }) {
-  return <ReactMarkdown remarkPlugins={remarkPlugins}>{text}</ReactMarkdown>;
+const Settled = memo(function Settled({ text }: { text: string }) {
+  return <>{renderStreamingBlock(text, true)}</>;
 });
-
-/** Freeze earlier paragraphs so a growing reply does not re-parse the whole document. */
-function closedBlocks(text: string): string[] {
-  if (!text) return [];
-  const blocks: string[] = [];
-  let fence = false;
-  let start = 0;
-  for (let i = 0; i < text.length - 1; i += 1) {
-    if (text.startsWith("```", i) && (i === 0 || text[i - 1] === "\n")) fence = !fence;
-    if (!fence && text[i] === "\n" && text[i + 1] === "\n" && i + 2 - start >= 1200) {
-      const end = i + 2;
-      blocks.push(text.slice(start, end));
-      start = end;
-    }
-  }
-  if (start < text.length) blocks.push(text.slice(start));
-  return blocks;
-}
 
 function Lite({ text }: { text: string }) {
   const parts = splitStreamingMarkdown(text);
-  const blocks = closedBlocks(parts.closed);
+  const blocks = settledBlocks(parts.closed);
   return (
     <div className="chat-md">
-      {blocks.map((block, index) => <Closed key={index} text={block} />)}
-      {parts.tail ? <ReactMarkdown remarkPlugins={remarkPlugins}>{parts.tail}</ReactMarkdown> : null}
+      {blocks.map((block, index) =>
+        block.endsWith("\n\n") ? (
+          <Settled key={index} text={block} />
+        ) : (
+          <Fragment key={index}>{renderStreamingBlock(block)}</Fragment>
+        ),
+      )}
+      {parts.tail ? renderStreamingBlock(parts.tail) : null}
     </div>
   );
 }

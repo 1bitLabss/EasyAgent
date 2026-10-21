@@ -88,8 +88,10 @@ def main() -> int:
         child_env = env.copy()
         child_env["BUSY_HARNESS_OUT"] = str(out)
         child_env["BUSY_HARNESS_URL"] = f"http://127.0.0.1:{app_port}"
-        args = [sys.executable, str(HARNESS / "run.py"), endpoint["id"]]
-        if only:
+        mode = os.environ.get("BUSY_HARNESS_MODE") or "cases"
+        script = {"cases": "run.py", "seam": "seam.py", "long": "long10.py"}.get(mode, "run.py")
+        args = [sys.executable, str(HARNESS / script), endpoint["id"]]
+        if only and script == "run.py":
             args.append(only)
         ran = subprocess.run(args, cwd=str(HARNESS), env=child_env)
         return ran.returncode

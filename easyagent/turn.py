@@ -64,6 +64,10 @@ class Slot:
         self._turn_user_intervened = False
         self._supports_active_turn_redirect = True
         self.pause_for_user = False
+        # True after this reply's tokens are in hand, until the next model call or tool.
+        # A message in that window is the next turn. It does not pause a finished reply.
+        self.sealing = False
+        self.late_arrival = False
         self.listeners: list = []
         self.notify = None
 
@@ -218,6 +222,8 @@ def bind(store, chat_id: str, bot_id: str = "", *, resume: bool = False) -> Slot
     slot.user_stop = False
     slot.redirect = False
     slot.pause_for_user = False
+    slot.sealing = False
+    slot.late_arrival = False
     slot.sealed = False
     slot.cancel = asyncio.Event()
     slot.client = None
@@ -376,15 +382,24 @@ def _tool_in_progress(slot: Slot) -> bool:
 PAUSE_TOOL_TEXT = "Paused, reading your message — finishing current step"
 
 
+def _command_running(slot: Slot) -> bool:
+    proc = slot.proc
+    return proc is not None and proc.poll() is None
+
+
 def request_user_pause(store, chat_id: str) -> None:
     """A message arrived. Finish the current token or tool step, then stop that reply.
 
     The text already streamed stays. A read blocked on the next chunk is closed so
     the pause can happen. A command is left alone, and the screen says so at once.
-    Stop is a different flag.
+    Stop is a different flag. A reply that is already being saved is not paused:
+    the message stays queued and is the next turn.
     """
     slot = slot_for(store, chat_id)
     if slot.user_stop:
+        return
+    if slot.sealing and not _command_running(slot) and not slot._executing_tools:
+        slot.late_arrival = True
         return
     slot.pause_for_user = True
     if _tool_in_progress(slot):

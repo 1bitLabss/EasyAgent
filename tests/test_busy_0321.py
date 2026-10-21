@@ -198,6 +198,25 @@ def test_waiting_activity_names_tokens_and_clears_the_stuck_flag(tmp_path):
     client.close()
 
 
+def test_a_message_during_the_save_does_not_pause(tmp_path):
+    from easyagent.hermes_busy import _hm_busy_interrupt
+    from easyagent.plan import enqueue
+
+    app, client, bot, chat = _client(tmp_path)
+    store = app.state.store
+    _running(store, bot["id"], chat["id"], step="Writing, 33s")
+    _write_live(store, bot["id"], chat["id"], reply="the finished reply", step="Writing, 33s", force=True)
+    slot = turn_mod.slot_for(store, chat["id"])
+    slot.sealing = True
+    outcome = enqueue(store, bot["id"], chat["id"], "arrived at the end", client_id="c-seam")
+    assert outcome.get("message", {}).get("id")
+    _hm_busy_interrupt(store, bot["id"], chat["id"], "arrived at the end")
+    assert slot.pause_for_user is False
+    assert slot.late_arrival is True
+    assert slot.cancel.is_set() is False
+    client.close()
+
+
 def test_a_message_during_a_job_lands_after_the_partial_and_pauses(tmp_path):
     from easyagent.hermes_busy import _hm_busy_interrupt
     from easyagent.plan import enqueue

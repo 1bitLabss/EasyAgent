@@ -162,6 +162,10 @@ body {
   line-height: 1.4;
 }
 
+.sys-line-hold {
+  visibility: hidden;
+}
+
 .bubble-bot {
   max-width: 620px;
   border-radius: 16px;

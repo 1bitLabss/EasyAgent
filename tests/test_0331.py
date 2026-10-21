@@ -141,6 +141,31 @@ def test_the_same_words_after_a_new_message_are_a_new_answer(tmp_path):
     client.close()
 
 
+def test_a_message_during_the_save_updates_the_open_reply(tmp_path):
+    """The exit seam keeps one finished reply. The late message stays under it."""
+    app, client, bot, chat = _client(tmp_path)
+    store = app.state.store
+    doc = store.get_chat(bot["id"], chat["id"])
+    doc["messages"] = [
+        {"id": "u1", "role": "user", "content": "MEDIUM please", "created_at": now_iso()},
+        {"id": "a-live", "role": "assistant", "content": "Section 1 so far", "live": True, "created_at": now_iso()},
+        {"id": "u2", "role": "user", "content": "SHORT busy", "chip": "queued", "created_at": now_iso()},
+    ]
+    store.save_chat(doc)
+    done = _finish_reply(store, bot["id"], chat["id"], ANSWER, [])
+    rows = [
+        (item.get("id"), item.get("role"), item.get("content"), bool(item.get("interrupted")), bool(item.get("live")))
+        for item in done["chat"]["messages"]
+        if item.get("role") in {"user", "assistant"} and item.get("kind") not in {"status", "pickup", "resume-offer"}
+    ]
+    assert rows == [
+        ("u1", "user", "MEDIUM please", False, False),
+        ("a-live", "assistant", ANSWER, False, False),
+        ("u2", "user", "SHORT busy", False, False),
+    ]
+    client.close()
+
+
 def test_a_different_answer_after_an_interrupt_is_kept(tmp_path):
     app, client, bot, chat = _client(tmp_path)
     store = app.state.store

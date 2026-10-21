@@ -12,6 +12,9 @@
 - A pause during a tool says "Paused, reading your message — finishing current step" at once. The tool is allowed to finish.
 - A reply that runs on too long keeps the words already written and adds a note. Those words are not replaced. The end of a reply does not paint the same words a second time.
 - The transcript follows the bottom. A jump-to-latest button appears when you scroll up. Escape stops a running job. The up arrow recalls what you sent. Each chat keeps its draft across a reload. The caret comes back after Send, Stop, Retry, and Continue. Clocks tick in place.
+- A message that arrives while a reply is already being saved does not pause that reply, does not copy it, and does not post the "nothing was in flight" note. That message is answered next.
+- If the page hears nothing for five seconds while the server is still writing, it logs that and catches up from the server.
+- The working line keeps its height when a reply finishes, so the view does not jump.
 
 ## 0.3.44
 - The installed-app chat gate no longer expects a separate "Picked up your message" row. A message sent during a job stays in the transcript and is marked seen or answered, and the reply is still the model's answer.

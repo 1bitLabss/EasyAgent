@@ -18,8 +18,12 @@ B = os.environ.get("BUSY_HARNESS_URL", "http://127.0.0.1:8891")
 EID = sys.argv[1] if len(sys.argv) > 1 else ""
 
 INIT = r"""
-window.__ids=new WeakMap(); window.__n=0; window.__F=[]; window.__rec=false;
+window.__ids=new WeakMap(); window.__n=0; window.__F=[]; window.__rec=false; window.__long=[];
 window.qa=function(e){ if(!__ids.has(e)) __ids.set(e, ++__n); return __ids.get(e); };
+try {
+  const obs=new PerformanceObserver((list)=>{ for (const e of list.getEntries()) { if (e.duration>=50) window.__long.push([Math.round(e.startTime), Math.round(e.duration), e.name]); } });
+  obs.observe({type:'longtask', buffered:true});
+} catch (e) {}
 function frame(){ if(window.__rec){ const s=document.querySelector('.chat-scroll'); const sr=s?s.getBoundingClientRect():null;
   const rows=[...document.querySelectorAll('[data-testid=transcript] .message-row[data-role]')].map(r=>{const b=r.getBoundingClientRect(); return [qa(r), r.getAttribute('data-role'), r.getAttribute('data-message-id')||'', (r.textContent||'').length, Math.round(b.top-sr.top+s.scrollTop), (r.textContent||'').slice(0,80)]});
   const rs=document.querySelector('[data-testid=run-state]'); const btn=document.querySelector('.send-btn');
@@ -191,6 +195,14 @@ def analyze(F, sends, live_q, live_len_at_send, pause_needed=True):
                 last[row[0]] = row[3]
     result["assistant_len_drops"] = drops
     result["gap_max_after"] = max([frame["gap"] or 0 for frame in F if frame["t"] >= t0], default=None)
+    spaces = [frame["t"] - F[index - 1]["t"] for index, frame in enumerate(F) if index]
+    result["max_frame_gap_ms"] = round(max(spaces)) if spaces else 0
+    quiet = [
+        frame.get("gap") or 0
+        for frame in F
+        if (frame.get("st") or "").startswith("Idle") or (frame.get("st") or "").startswith("Waiting")
+    ]
+    result["finish_gap_px"] = max(quiet) if quiet else 0
     return result
 
 
@@ -204,6 +216,7 @@ def compare(pg, bid):
             item.get("id") or item.get("client_id") or "",
             (item.get("content") or "")[:30].replace("\n", " "),
             bool(item.get("interrupted")),
+            len(item.get("content") or ""),
         )
         for item in messages
         if item.get("kind") not in ("status", "pickup", "activity")
@@ -221,7 +234,7 @@ def compare(pg, bid):
         "roles_equal": roles_ok,
         "ids_equal": ids_ok,
         "stale_status_rows": stale,
-        "saved": [(item[0], item[2], item[3]) for item in stored],
+        "saved": [(item[0], item[2], item[3], item[4]) for item in stored],
         "dom_roles": [item[0] for item in dom],
         "msg_keys": sorted(messages[0].keys()) if messages else [],
     }
@@ -265,6 +278,17 @@ def problems_for(out):
         found.append(f"assistant text dropped {analysis.get('assistant_len_drops')} times")
     if analysis.get("row_reappear_events"):
         found.append(f"a row remounted {analysis.get('row_reappear_events')} times")
+    if (analysis.get("max_frame_gap_ms") or 0) > 1000:
+        found.append(f"frame gap {analysis.get('max_frame_gap_ms')}ms")
+    if (analysis.get("finish_gap_px") or 0) > 2:
+        found.append(f"finish jump {analysis.get('finish_gap_px')}px")
+    saved_rows = (out.get("cmp") or {}).get("saved") or []
+    assistants = [item for item in saved_rows if item[0] == "assistant"]
+    long_replies = [item for item in assistants if str(item[1]).startswith("##")]
+    if len(long_replies) > 1:
+        found.append("reply duplicated")
+    if long_replies and long_replies[0][2] and 3990 <= (long_replies[0][3] if len(long_replies[0]) > 3 else 0) <= 4100:
+        found.append("paused a finished reply")
     partial = analysis.get("partial")
     if partial and kind != "after_end":
         if partial.get("frames_missing"):
@@ -273,7 +297,9 @@ def problems_for(out):
         at_send = partial.get("len_at_send") or 0
         if minimum is not None and at_send and minimum < at_send - 20:
             found.append("partial shrank")
-    busy = kind != "after_end" and _running(out.get("trigger_status"))
+    # A reply that finished whole is not a pause, even if the send landed while the status still said Writing.
+    first_interrupted = bool(assistants and assistants[0][2])
+    busy = kind != "after_end" and _running(out.get("trigger_status")) and first_interrupted
     if kind == "tool" and not _running(out.get("trigger_status")):
         found.append("tool step was not showing before the send")
     if busy:

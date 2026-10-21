@@ -7678,6 +7678,16 @@ async def run_turn(
 
     def close(answer: str):
         nonlocal streamed
+        # Tokens for this reply are already in hand. A pause flag from the
+        # exit seam would stop the next turn before it answers. Drop it.
+        # The queued message is still there and runs after this save.
+        seam = turn_mod.current_slot()
+        if (
+            seam is not None
+            and getattr(seam, "sealing", False)
+            and not turn_mod._tool_in_progress(seam)
+        ):
+            turn_mod.take_user_pause()
         path = _last_write_path(lines)
         if (
             path
@@ -7776,6 +7786,7 @@ async def run_turn(
         narration_hits.append(spoken)
         return sum(1 for item in narration_hits if _near_line(item, spoken))
 
+    model_slot = None
     while True:
         if turn_mod.pause_requested():
             yield "pause", "Paused, reading your message"
@@ -7833,6 +7844,7 @@ async def run_turn(
         model_slot = turn_mod.current_slot()
         if model_slot is not None:
             model_slot._executing_tools = False
+            model_slot.sealing = False
             model_slot._model_request_active.set()
         try:
             async for kind, piece in _pull_model(
@@ -7932,7 +7944,10 @@ async def run_turn(
         finally:
             if model_slot is not None:
                 model_slot._model_request_active.clear()
-                model_slot._executing_tools = True
+                # The model call is over. Bookkeeping is not a tool. A message
+                # that lands while this reply is saved is the next turn.
+                model_slot._executing_tools = False
+                model_slot.sealing = True
         raw_text = "".join(text_bits)
         hidden, answer = llm.peel_thinking(raw_text)
         if hidden:
@@ -8199,7 +8214,14 @@ async def run_turn(
                 batch_label = status_label(work[0])
                 open_tool_step(batch_label)
                 yield "status", batch_label
-                results = await _run_together(store, work, bot_id)
+                if model_slot is not None:
+                    model_slot.sealing = False
+                    model_slot._executing_tools = True
+                try:
+                    results = await _run_together(store, work, bot_id)
+                finally:
+                    if model_slot is not None:
+                        model_slot._executing_tools = False
                 close_tool_step("failed" if results and all(error is not None for _item, _result, error in results) else "done")
                 yield "status", batch_label
                 details: list[str] = []
@@ -8501,7 +8523,14 @@ async def run_turn(
                     continue
                 return
             try:
-                findings = await search_mod.web_search(query)
+                if model_slot is not None:
+                    model_slot.sealing = False
+                    model_slot._executing_tools = True
+                try:
+                    findings = await search_mod.web_search(query)
+                finally:
+                    if model_slot is not None:
+                        model_slot._executing_tools = False
             except SearchError as exc:
                 detail = f"Web search failed: {exc}"
                 _failed(search_request, detail)
@@ -8528,7 +8557,14 @@ async def run_turn(
                         "the search found nothing, so a different query runs once",
                     )
                     try:
-                        newer = await search_mod.web_search(alternate)
+                        if model_slot is not None:
+                            model_slot.sealing = False
+                            model_slot._executing_tools = True
+                        try:
+                            newer = await search_mod.web_search(alternate)
+                        finally:
+                            if model_slot is not None:
+                                model_slot._executing_tools = False
                     except SearchError:
                         newer = ""
                     if newer and not _found_nothing(newer):

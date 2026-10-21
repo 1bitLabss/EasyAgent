@@ -52,6 +52,9 @@ export type Flight = {
   sending: boolean;
   replaced: boolean;
   settled: boolean;
+  /** A quiet-stream resync is already in flight. A second one waits. */
+  resyncing?: boolean;
+  watchGen?: number;
   /** The partial as it looked when the user row was inserted. It does not grow after that. */
   frozen?: FrozenReply;
 };
@@ -81,6 +84,8 @@ type FlushClock = {
   cost: number;
   raf: number | null;
   startedAt: number;
+  watch: ReturnType<typeof setInterval> | null;
+  watchGen?: number;
 };
 
 const clocks = new Map<string, FlushClock>();
@@ -88,7 +93,7 @@ const clocks = new Map<string, FlushClock>();
 function clockFor(key: string): FlushClock {
   let clock = clocks.get(key);
   if (!clock) {
-    clock = { timer: null, lastAt: 0, cost: 0, raf: null, startedAt: 0 };
+    clock = { timer: null, lastAt: 0, cost: 0, raf: null, startedAt: 0, watch: null };
     clocks.set(key, clock);
   }
   return clock;
@@ -156,6 +161,7 @@ export function resetStreamForTests() {
   for (const flight of flights.values()) flight.control.abort();
   for (const clock of clocks.values()) {
     if (clock.timer !== null) clearTimeout(clock.timer);
+    if (clock.watch !== null) clearInterval(clock.watch);
     if (clock.raf !== null && typeof cancelAnimationFrame === "function") cancelAnimationFrame(clock.raf);
   }
   flights.clear();
@@ -330,11 +336,22 @@ export function noteSettled(botId: string, chatId: string, runId: string) {
   settledRuns.set(flightKey(botId, chatId), { runId, at: Date.now() });
 }
 
+function replyFinishedWhole(chat: Chat | undefined, frozen?: FrozenReply): boolean {
+  if (!frozen?.replyId || !chat) return false;
+  const row = (chat.messages || []).find(
+    (item) => item.role === "assistant" && (item.id === frozen.replyId || item.client_id === `live-${frozen.replyId}`),
+  );
+  if (!row) return false;
+  return !row.interrupted && !row.live;
+}
+
 function finish(flight: Flight, chat?: Chat) {
   const runId = flight.runId || flight.live?.run?.id || chat?.run?.id || "";
   noteSettled(flight.botId, flight.chatId, runId);
   flight.settled = true;
   flight.sending = false;
+  // The reply finished whole. The optimistic pause was the exit seam, not a stop.
+  if (replyFinishedWhole(chat, flight.frozen)) flight.frozen = undefined;
   flight.live = null;
   const key = ["chat", flight.botId, flight.chatId] as const;
   const prev = queryClient.getQueryData<Chat>(key);
@@ -574,6 +591,75 @@ function apply(event: Record<string, unknown>, flight: Flight) {
   if (event.type === "done" && event.chat) finish(flight, event.chat as Chat);
 }
 
+const STREAM_QUIET_MS = 5000;
+
+function noteWatch(detail: string) {
+  if (typeof window === "undefined") return;
+  const host = window as Window & { __eaWatch?: string[] };
+  if (!host.__eaWatch) host.__eaWatch = [];
+  host.__eaWatch.push(detail);
+  console.warn(detail);
+}
+
+function armStreamWatch(flight: Flight) {
+  if (typeof window === "undefined") return;
+  const clock = clockFor(flightKey(flight.botId, flight.chatId));
+  const mine = (clock.watchGen || 0) + 1;
+  clock.watchGen = mine;
+  flight.watchGen = mine;
+  if (clock.watch !== null) clearInterval(clock.watch);
+  clock.watch = window.setInterval(() => {
+    void recoverQuietStream(flight);
+  }, 1000);
+}
+
+function disarmStreamWatch(flight: Flight) {
+  const clock = clocks.get(flightKey(flight.botId, flight.chatId));
+  if (!clock || clock.watch === null || clock.watchGen !== flight.watchGen) return;
+  clearInterval(clock.watch);
+  clock.watch = null;
+}
+
+async function recoverQuietStream(flight: Flight) {
+  if (flight.replaced || flight.settled || !flight.sending || flight.resyncing) return;
+  const heard = flight.live?.heardAt || 0;
+  const quiet = Date.now() - heard;
+  if (!heard || quiet < STREAM_QUIET_MS) return;
+  flight.resyncing = true;
+  try {
+    noteWatch(`stream-watch: no event for ${quiet}ms, resync`);
+    const chat = await api<Chat>(`/api/bots/${flight.botId}/chats/${flight.chatId}?window=80`);
+    const prev = queryClient.getQueryData<Chat>(["chat", flight.botId, flight.chatId]);
+    queryClient.setQueryData(["chat", flight.botId, flight.chatId], mergeChat(prev, chat));
+    if (chat.run?.status !== "running") {
+      finish(flight, chat);
+      return;
+    }
+    const saved = [...(chat.messages || [])].reverse().find((item) => item.role === "assistant" && (item.content || item.thinking));
+    if (saved && flight.live && (saved.content || "").length > (flight.live.text || "").length) {
+      remember(flight, carry(flight.live, {
+        text: saved.content || flight.live.text,
+        reasoning: saved.thinking || flight.live.reasoning,
+        replyId: saved.id || flight.live.replyId,
+        run: chat.run || flight.live.run,
+      }), true);
+    } else if (flight.live) {
+      flight.live.heardAt = Date.now();
+      flight.live.run = chat.run || flight.live.run;
+      remember(flight, flight.live, true);
+    }
+    // The socket has been quiet while the server is still writing. Join the run again.
+    flight.replaced = true;
+    flight.control.abort();
+    await attachLive(flight.botId, flight.chatId);
+  } catch (error) {
+    noteWatch(`stream-watch: resync failed ${error instanceof Error ? error.message : ""}`);
+    if (flight.live) flight.live.heardAt = Date.now();
+  } finally {
+    flight.resyncing = false;
+  }
+}
+
 async function readEvents(response: Response, flight: Flight) {
   if (!response.body) throw new Error("The reply did not arrive.");
   const reader = response.body.getReader();
@@ -581,27 +667,39 @@ async function readEvents(response: Response, flight: Flight) {
   let buffer = "";
   let saw = false;
   let ended = "";
-  while (true) {
-    const { value, done } = await reader.read();
-    if (done) break;
-    buffer += decoder.decode(value, { stream: true }).replace(/\r\n/g, "\n");
-    let split = buffer.indexOf("\n\n");
-    while (split >= 0) {
-      const raw = buffer.slice(0, split);
-      buffer = buffer.slice(split + 2);
-      const data = raw
-        .split("\n")
-        .filter((line) => line.startsWith("data:"))
-        .map((line) => line.slice(5).trim())
-        .join("\n");
-      if (data) {
-        saw = true;
-        const event = JSON.parse(data) as Record<string, unknown>;
-        if (event.type === "done" || event.type === "error" || event.type === "stopped") ended = String(event.type);
-        apply(event, flight);
+  let turned = 0;
+  armStreamWatch(flight);
+  try {
+    while (true) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true }).replace(/\r\n/g, "\n");
+      let split = buffer.indexOf("\n\n");
+      while (split >= 0) {
+        const raw = buffer.slice(0, split);
+        buffer = buffer.slice(split + 2);
+        const data = raw
+          .split("\n")
+          .filter((line) => line.startsWith("data:"))
+          .map((line) => line.slice(5).trim())
+          .join("\n");
+        if (data) {
+          saw = true;
+          const event = JSON.parse(data) as Record<string, unknown>;
+          if (event.type === "done" || event.type === "error" || event.type === "stopped") ended = String(event.type);
+          apply(event, flight);
+          turned += 1;
+          // A burst of events must not sit on the main thread until the frame loop starves.
+          if (turned >= 8) {
+            turned = 0;
+            await new Promise((resolve) => window.setTimeout(resolve, 0));
+          }
+        }
+        split = buffer.indexOf("\n\n");
       }
-      split = buffer.indexOf("\n\n");
     }
+  } finally {
+    disarmStreamWatch(flight);
   }
   if (!saw) throw new Error("The reply did not arrive.");
   return ended;

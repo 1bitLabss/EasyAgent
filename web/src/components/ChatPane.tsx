@@ -795,26 +795,30 @@ export function ChatPane() {
                   <Quiet text={`Used ${heldSteps.current.length} steps`} detail={heldSteps.current.map((item) => activityLabel(item)).join("\n")} />
                 </div>
               ) : null}
-              {running && view ? (
-                <div className="sys-line" role="status" data-testid="chat-working-pill">
-                  <p>
-                    <span className={cn("h-1.5 w-1.5 rounded-full", tone === "halted" ? "bg-danger" : "bg-current")} />
-                    <Elapsed>
-                      {(clock) => (
-                        <span data-testid="activity-line">
-                          {activityLine({
-                            step: named,
-                            jobStartedAt: runStarted,
-                            activityStartedAt: runStarted,
-                            now: clock,
-                            tokens: Math.floor((live?.chars || 0) / 4),
-                          }) || workingLine(live?.run || open?.run, clock).text || view?.words}
-                        </span>
-                      )}
-                    </Elapsed>
-                    {pill.stuck ? <span>No activity for a while</span> : null}
-                    {pill.queued ? <span data-testid="queued-badge">Queued</span> : null}
-                  </p>
+              {(open.messages || []).length || running ? (
+                <div className="sys-line" role="status" data-testid="chat-working-pill" aria-hidden={running && view ? undefined : true}>
+                  {running && view ? (
+                    <p>
+                      <span className={cn("h-1.5 w-1.5 rounded-full", tone === "halted" ? "bg-danger" : "bg-current")} />
+                      <Elapsed>
+                        {(clock) => (
+                          <span data-testid="activity-line">
+                            {activityLine({
+                              step: named,
+                              jobStartedAt: runStarted,
+                              activityStartedAt: runStarted,
+                              now: clock,
+                              tokens: Math.floor((live?.chars || 0) / 4),
+                            }) || workingLine(live?.run || open?.run, clock).text || view?.words}
+                          </span>
+                        )}
+                      </Elapsed>
+                      {pill.stuck ? <span>No activity for a while</span> : null}
+                      {pill.queued ? <span data-testid="queued-badge">Queued</span> : null}
+                    </p>
+                  ) : (
+                    <p className="sys-line-hold">Waiting on model, 0s</p>
+                  )}
                 </div>
               ) : null}
               {live && (live.phase === "stopped" || live.phase === "error") ? (

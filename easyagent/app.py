@@ -4867,6 +4867,12 @@ async def _continue_queued(store: Store, bot_id: str, chat_id: str):
     """After the model returns, take what was queued without starting a new run."""
     from easyagent.plan import pop_item, steer_into
 
+    slot = turn_mod.slot_for(store, chat_id)
+    # A message that landed while this reply was saved is the next turn.
+    # Leaving the pause flag set would make that turn stop before it answers.
+    if slot.late_arrival or (slot.sealing and slot.pause_for_user and not slot._executing_tools):
+        turn_mod.take_user_pause()
+        slot.late_arrival = False
     while True:
         if turn_mod.cancelled() or _follow_capped(store, chat_id) or _hold_drain(store, bot_id, chat_id):
             return
@@ -5387,6 +5393,23 @@ def _stale_stop_closed(messages: list) -> bool:
     return False
 
 
+def _open_live_reply(messages: list) -> dict | None:
+    """The reply still open, including when a message sent during the save sits under it."""
+    for message in reversed(messages or []):
+        if not isinstance(message, dict):
+            continue
+        if message.get("kind") in {"status", "activity", "pickup"} or message.get("about") in {"activity", "queue"}:
+            continue
+        if message.get("role") == "user" and (
+            message.get("steer") or message.get("chip") in {"queued", "seen", "held", "refused"}
+        ):
+            continue
+        if message.get("role") == "assistant" and message.get("live"):
+            return message
+        break
+    return None
+
+
 def _follows_latest_person(messages: list, row: dict | None) -> bool:
     """A reply for this turn sits after the newest user line. An older error does not."""
     if row is None:
@@ -5824,19 +5847,25 @@ def _finish_reply(
     _drop_activity(chat)
     messages = chat.setdefault("messages", [])
     already = _stored_resume_answer(messages, visible)
-    replacing = bool(messages and messages[-1].get("live") and messages[-1].get("role") == "assistant")
-    if replacing and not _follows_latest_person(messages, messages[-1]):
-        replacing = False
+    live = _open_live_reply(messages)
     if already is not None:
-        if replacing and messages[-1] is not already:
+        if (
+            messages
+            and messages[-1] is not already
+            and messages[-1].get("live")
+            and messages[-1].get("role") == "assistant"
+        ):
             messages.pop()
         message = already
         message.pop("live", None)
         message.pop("interrupted", None)
-    elif replacing:
-        message = messages[-1]
+    elif live is not None:
+        # This save is the end of the open reply, even if a person spoke while
+        # it was being saved. Updating that row is the reply. A second copy is not.
+        message = live
         message["content"] = visible
         message.pop("live", None)
+        message.pop("interrupted", None)
         message["created_at"] = now_iso()
     else:
         message = {

@@ -6,8 +6,11 @@
 - The message box is its own component, so typing does not redraw the transcript. Its height changes in small steps, and the dock stays one size. Send becomes Stop in the same button.
 - Everything typed during a job shows at once, at the bottom, and stays there. The agent pauses at the next safe point, keeps the words already written, and says "Paused, reading your message". The next answer is a new reply under that message.
 - Several messages sent close together all stay on screen, and one reply answers them together.
-- Reloading the page rejoins a live run and keeps the partial reply. A job that is still running is not paused for being idle.
-- A status line goes away when the run ends. Once tokens are arriving, the status says Writing.
+- Reloading the page rejoins a live run and keeps the partial reply. A job that is still running is not paused for being idle. The clock is the run's own start time.
+- A status line goes away when the run ends. Once tokens are arriving, the status says Writing. That line is not also a row in the transcript.
+- Once a message is on screen, the reply above it stays the size it was. A short "paused — you sent a message" sits in the gap under that reply.
+- A pause during a tool says "Paused, reading your message — finishing current step" at once. The tool is allowed to finish.
+- A reply that runs on too long keeps the words already written and adds a note. Those words are not replaced. The end of a reply does not paint the same words a second time.
 - The transcript follows the bottom. A jump-to-latest button appears when you scroll up. Escape stops a running job. The up arrow recalls what you sent. Each chat keeps its draft across a reload. The caret comes back after Send, Stop, Retry, and Continue. Clocks tick in place.
 
 ## 0.3.44

@@ -445,3 +445,114 @@ def test_finish_reason_ends_the_read_without_done(monkeypatch):
 
     assert asyncio.run(read()) == ["Section 1 already written."]
     assert hung["n"] == 0
+
+
+def _stream_client(lines_fn):
+    import easyagent.llm as llm
+
+    class FakeResponse:
+        status_code = 200
+        headers = {"content-type": "text/event-stream"}
+
+        def aiter_lines(self):
+            return lines_fn()
+
+        async def aread(self):
+            return b""
+
+    class FakeClient:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        async def aclose(self):
+            return None
+
+        def stream(self, method, url, json=None, headers=None):
+            class Context:
+                async def __aenter__(self_inner):
+                    return FakeResponse()
+
+                async def __aexit__(self_inner, *args):
+                    return False
+
+            return Context()
+
+    return llm, FakeClient
+
+
+def test_a_pause_on_the_last_token_keeps_the_finished_reply(monkeypatch):
+    """Cancel after the last words is the next turn. The finished reply is not cut."""
+    import easyagent.llm as llm
+
+    async def lines():
+        yield 'data: {"choices":[{"delta":{"content":"Section 1 already written."}}]}'
+        await asyncio.sleep(0.02)
+        yield 'data: {"choices":[{"delta":{},"finish_reason":"stop"}]}'
+
+    llm_mod, FakeClient = _stream_client(lines)
+    monkeypatch.setattr(llm_mod.httpx, "AsyncClient", FakeClient)
+
+    async def read():
+        slot = turn_mod.Slot()
+        slot.cancel = asyncio.Event()
+        slot.worker = asyncio.current_task()
+        turn_mod._cancel.set(slot.cancel)
+        turn_mod._slot.set(slot)
+        pieces = []
+        async for piece in llm._stream_attempt(
+            base_url="http://127.0.0.1:9/v1",
+            api_key=None,
+            model="stub",
+            messages=[{"role": "user", "content": "MEDIUM please"}],
+            timeout=5,
+        ):
+            pieces.append(piece)
+            slot.cancel.set()
+            slot.pause_for_user = True
+        return pieces
+
+    assert asyncio.run(read()) == ["Section 1 already written."]
+
+
+def test_a_pause_with_more_tokens_still_stops(monkeypatch):
+    """A later token is a real pause. The read does not wait the rest of the reply out."""
+    import time
+
+    import easyagent.llm as llm
+
+    async def lines():
+        yield 'data: {"choices":[{"delta":{"content":"Hello"}}]}'
+        yield 'data: {"choices":[{"delta":{"content":" there"}}]}'
+        await asyncio.sleep(0.4)
+        yield 'data: {"choices":[{"delta":{"content":" friend"}}]}'
+        yield 'data: {"choices":[{"delta":{},"finish_reason":"stop"}]}'
+
+    llm_mod, FakeClient = _stream_client(lines)
+    monkeypatch.setattr(llm_mod.httpx, "AsyncClient", FakeClient)
+
+    async def read():
+        slot = turn_mod.Slot()
+        slot.cancel = asyncio.Event()
+        slot.worker = asyncio.current_task()
+        turn_mod._cancel.set(slot.cancel)
+        turn_mod._slot.set(slot)
+        pieces = []
+        started = time.perf_counter()
+        try:
+            async for piece in llm._stream_attempt(
+                base_url="http://127.0.0.1:9/v1",
+                api_key=None,
+                model="stub",
+                messages=[{"role": "user", "content": "hi"}],
+                timeout=5,
+            ):
+                pieces.append(piece)
+                slot.cancel.set()
+                slot.pause_for_user = True
+        except turn_mod.TurnCancelled:
+            return pieces, time.perf_counter() - started
+        return pieces, time.perf_counter() - started
+
+    pieces, elapsed = asyncio.run(read())
+    assert pieces == ["Hello", " there"]
+    assert elapsed < 0.25

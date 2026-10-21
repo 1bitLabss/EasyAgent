@@ -155,6 +155,20 @@ async def _close_client(client: httpx.AsyncClient) -> None:
         return
 
 
+# Two short peeks (50ms each) decide whether the reply already ended.
+# The socket drops after that, still inside the 200ms pause budget.
+_PAUSE_CLOSE_DELAY = 0.16
+
+
+async def _close_client_after(client: httpx.AsyncClient, delay: float) -> None:
+    """Drop the socket after a finished reply has had a moment to notice the pause."""
+    try:
+        await asyncio.sleep(delay)
+    except asyncio.CancelledError:
+        return
+    await _close_client(client)
+
+
 def interrupt(store, chat_id: str, reason: str = "") -> None:
     """Abort the model request and any command for this chat. Nothing running is fine.
 
@@ -391,7 +405,8 @@ def request_user_pause(store, chat_id: str) -> None:
     """A message arrived. Finish the current token or tool step, then stop that reply.
 
     The text already streamed stays. A read blocked on the next chunk is closed so
-    the pause can happen. A command is left alone, and the screen says so at once.
+    the pause can happen, after a short wait so a reply that has already ended can
+    finish. A command is left alone, and the screen says so at once.
     Stop is a different flag. A reply that is already being saved is not paused:
     the message stays queued and is the next turn.
     """
@@ -411,7 +426,7 @@ def request_user_pause(store, chat_id: str) -> None:
         return
     slot.cancel.set()
     try:
-        asyncio.get_running_loop().create_task(_close_client(client))
+        asyncio.get_running_loop().create_task(_close_client_after(client, _PAUSE_CLOSE_DELAY))
     except RuntimeError:
         return
 

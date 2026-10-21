@@ -1996,6 +1996,43 @@ async def _drop_read(body: object, client: httpx.AsyncClient) -> None:
         pass
 
 
+async def _pause_unless_the_reply_ended(body) -> AsyncIterator[str]:
+    """A pause on the last token finishes the reply. A later token still pauses.
+
+    The next read is given a moment. StopAsyncIteration means the model already
+    ended, so the caller keeps this reply whole. A token that shows up is yielded,
+    and if another one is already waiting the pause still happens.
+    """
+    try:
+        async with asyncio.timeout(0.05):
+            piece = await body.__anext__()
+    except StopAsyncIteration:
+        return
+    except TimeoutError:
+        turn_mod.raise_if_cancelled()
+        raise turn_mod.TurnCancelled()
+    except httpx.HTTPError:
+        turn_mod.raise_if_cancelled()
+        raise
+    if piece:
+        yield piece
+    try:
+        async with asyncio.timeout(0.05):
+            extra = await body.__anext__()
+    except StopAsyncIteration:
+        return
+    except TimeoutError:
+        turn_mod.raise_if_cancelled()
+        raise turn_mod.TurnCancelled()
+    except httpx.HTTPError:
+        turn_mod.raise_if_cancelled()
+        raise
+    if extra:
+        yield extra
+    turn_mod.raise_if_cancelled()
+    raise turn_mod.TurnCancelled()
+
+
 async def _stream_attempt(
     *,
     base_url: str,
@@ -2048,6 +2085,17 @@ async def _stream_attempt(
             body = _iter_completion_body(response, started=started, messages=messages).__aiter__()
             wait = watch.limits.first_token_seconds
             while True:
+                if turn_mod.cancelled():
+                    # The pause landed on a token already in hand. If the model
+                    # has nothing further, this reply is whole and the message
+                    # is the next turn. One later token still pauses.
+                    async for piece in _pause_unless_the_reply_ended(body):
+                        watch.observe(piece or "")
+                        if piece:
+                            yielded = True
+                            wait = watch.limits.stall_seconds
+                            yield piece
+                    break
                 turn_mod.raise_if_cancelled()
                 release = asyncio.create_task(_unblock_stalled_read(client, wait))
                 try:
@@ -2082,7 +2130,6 @@ async def _stream_attempt(
                     yielded = True
                     wait = watch.limits.stall_seconds
                     yield piece
-                turn_mod.raise_if_cancelled()
         except GenerationLimit:
             raise
         except (httpx.HTTPError, asyncio.TimeoutError) as exc:

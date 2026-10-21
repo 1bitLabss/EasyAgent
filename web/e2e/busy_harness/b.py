@@ -65,7 +65,7 @@ class S:
         self.ta = pg.locator("#draft")
 
     def open(self):
-        self.pg.get_by_role("button", name=re.compile("^" + self.name + "(,.*)?$")).first.click()
+        self.pg.get_by_role("button", name=re.compile("^" + re.escape(self.name) + "(,.*)?$")).first.click()
         self.pg.wait_for_timeout(1200)
 
     def rec(self, on):

@@ -345,17 +345,45 @@ function replyFinishedWhole(chat: Chat | undefined, frozen?: FrozenReply): boole
   return !row.interrupted && !row.live;
 }
 
+/** The bubble above a new message stays the size it was. A longer save does not stretch it. */
+export function holdShownReply(chat: Chat, frozen: FrozenReply | undefined): Chat {
+  if (!frozen?.replyId) return chat;
+  const stamp = `live-${frozen.replyId}`;
+  let changed = false;
+  const messages = (chat.messages || []).map((item) => {
+    if (item.role !== "assistant") return item;
+    if (item.id !== frozen.replyId && item.client_id !== stamp) return item;
+    const saved = item.content || "";
+    const shorter = saved.length > frozen.text.length + 8;
+    const clientId = item.client_id || stamp;
+    if (!shorter && clientId === item.client_id) return item;
+    changed = true;
+    return {
+      ...item,
+      content: shorter ? frozen.text : saved,
+      thinking: shorter ? frozen.reasoning || item.thinking : item.thinking,
+      client_id: clientId,
+    };
+  });
+  return changed ? { ...chat, messages } : chat;
+}
+
 function finish(flight: Flight, chat?: Chat) {
   const runId = flight.runId || flight.live?.run?.id || chat?.run?.id || "";
   noteSettled(flight.botId, flight.chatId, runId);
   flight.settled = true;
   flight.sending = false;
-  // The reply finished whole. The optimistic pause was the exit seam, not a stop.
-  if (replyFinishedWhole(chat, flight.frozen)) flight.frozen = undefined;
+  // The reply finished whole. Keep the height that was on screen when the
+  // user message landed, so the rest of the text does not push that message.
+  let shown = chat;
+  if (replyFinishedWhole(shown, flight.frozen)) {
+    if (shown && flight.frozen) shown = holdShownReply(shown, flight.frozen);
+    flight.frozen = undefined;
+  }
   flight.live = null;
   const key = ["chat", flight.botId, flight.chatId] as const;
   const prev = queryClient.getQueryData<Chat>(key);
-  const next = chat ? releaseRun(chat) : prev ? releaseRun(prev) : undefined;
+  const next = shown ? releaseRun(shown) : prev ? releaseRun(prev) : undefined;
   if (next) {
     queryClient.setQueryData(key, mergeChat(prev, next));
     void queryClient.invalidateQueries({ queryKey: ["chats", flight.botId] });

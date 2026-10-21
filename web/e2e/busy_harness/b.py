@@ -287,7 +287,9 @@ def problems_for(out):
     long_replies = [item for item in assistants if str(item[1]).startswith("##")]
     if len(long_replies) > 1:
         found.append("reply duplicated")
-    if long_replies and long_replies[0][2] and 3990 <= (long_replies[0][3] if len(long_replies[0]) > 3 else 0) <= 4100:
+    # The medium reply is 4000 characters. A shorter interrupted body still
+    # had tokens in flight. Pausing the whole finished text is the failure.
+    if long_replies and long_replies[0][2] and (long_replies[0][3] if len(long_replies[0]) > 3 else 0) >= 4000:
         found.append("paused a finished reply")
     partial = analysis.get("partial")
     if partial and kind != "after_end":

@@ -2011,34 +2011,43 @@ async def _next_piece(body):
         _mark_model_read(False)
 
 
+async def _one_piece(body, wait: float):
+    """The next piece, or None when this reply has already ended."""
+    try:
+        async with asyncio.timeout(wait):
+            return await _next_piece(body)
+    except StopAsyncIteration:
+        return None
+
+
 async def _pause_unless_the_reply_ended(body) -> AsyncIterator[str]:
     """A pause on the last token finishes the reply. A later token still pauses.
 
-    Lines already sitting in the buffer are part of this reply, including the
-    end marker. A line that has to be waited for is the safe point: the next
-    read either ends the reply or proves another token is coming.
+    Nothing new is shown unless this read is the end of the reply. A buffer of
+    later tokens would grow the bubble above the message the user just sent.
     """
-    live = False
-    for _ in range(2000):
-        started = time.perf_counter()
-        try:
-            async with asyncio.timeout(0.05):
-                piece = await _next_piece(body)
-        except StopAsyncIteration:
-            return
-        except TimeoutError:
-            turn_mod.raise_if_cancelled()
-            raise turn_mod.TurnCancelled()
-        except httpx.HTTPError:
-            turn_mod.raise_if_cancelled()
-            raise
+    try:
+        piece = await _one_piece(body, 0.08)
+    except TimeoutError:
+        turn_mod.raise_if_cancelled()
+        raise turn_mod.TurnCancelled()
+    except httpx.HTTPError:
+        turn_mod.raise_if_cancelled()
+        raise
+    if piece is None:
+        return
+    try:
+        nxt = await _one_piece(body, 0.08)
+    except TimeoutError:
+        turn_mod.raise_if_cancelled()
+        raise turn_mod.TurnCancelled()
+    except httpx.HTTPError:
+        turn_mod.raise_if_cancelled()
+        raise
+    if nxt is None:
         if piece:
             yield piece
-        if live:
-            turn_mod.raise_if_cancelled()
-            raise turn_mod.TurnCancelled()
-        if time.perf_counter() - started >= 0.015:
-            live = True
+        return
     turn_mod.raise_if_cancelled()
     raise turn_mod.TurnCancelled()
 

@@ -6922,13 +6922,16 @@ async def _pull_model(
                         messages=messages,
                         timeout=limit,
                     ):
-                        turn_mod.raise_if_cancelled()
+                        # The reader decides a pause. Raising here drops a reply
+                        # whose last line is already in hand.
                         if kind in {"text", "thinking"} and piece:
                             started = True
                             retry.charge_unreachable()
                         yield kind, piece
-                    turn_mod.raise_if_cancelled()
                     retry.charge_unreachable()
+                    # The model finished. A message that landed on the last
+                    # token is the next turn, not a cut reply.
+                    turn_mod.take_user_pause()
                     return
                 except turn_mod.TurnCancelled:
                     raise

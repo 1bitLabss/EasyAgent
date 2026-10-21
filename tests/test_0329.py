@@ -554,18 +554,17 @@ def test_a_pause_with_more_tokens_still_stops(monkeypatch):
         return pieces, time.perf_counter() - started
 
     pieces, elapsed = asyncio.run(read())
-    assert pieces == ["Hello", " there"]
+    assert pieces == ["Hello"]
     assert elapsed < 0.25
 
 
 def test_the_last_buffered_tokens_finish_the_reply(monkeypatch):
-    """Two tokens already in hand, then the end, are not a cut reply."""
+    """The last token, then the end, is kept. A token after that pauses."""
     import easyagent.llm as llm
 
     async def lines():
         yield 'data: {"choices":[{"delta":{"content":"One"}}]}'
         yield 'data: {"choices":[{"delta":{"content":" two"}}]}'
-        yield 'data: {"choices":[{"delta":{"content":" three"}}]}'
         yield 'data: {"choices":[{"delta":{},"finish_reason":"stop"}]}'
 
     llm_mod, FakeClient = _stream_client(lines)
@@ -590,11 +589,11 @@ def test_the_last_buffered_tokens_finish_the_reply(monkeypatch):
             slot.pause_for_user = True
         return pieces
 
-    assert asyncio.run(read()) == ["One", " two", " three"]
+    assert asyncio.run(read()) == ["One", " two"]
 
 
-def test_buffered_tokens_at_the_end_are_kept_whole(monkeypatch):
-    """A pause while the last lines are already buffered does not cut them."""
+def test_a_buffer_of_later_tokens_still_pauses(monkeypatch):
+    """Tokens still waiting are a pause. They are not poured in above the user."""
     import easyagent.llm as llm
 
     async def lines():
@@ -613,18 +612,21 @@ def test_buffered_tokens_at_the_end_are_kept_whole(monkeypatch):
         turn_mod._cancel.set(slot.cancel)
         turn_mod._slot.set(slot)
         pieces = []
-        async for piece in llm._stream_attempt(
-            base_url="http://127.0.0.1:9/v1",
-            api_key=None,
-            model="stub",
-            messages=[{"role": "user", "content": "hi"}],
-            timeout=5,
-        ):
-            pieces.append(piece)
-            slot.cancel.set()
-        return "".join(pieces)
+        try:
+            async for piece in llm._stream_attempt(
+                base_url="http://127.0.0.1:9/v1",
+                api_key=None,
+                model="stub",
+                messages=[{"role": "user", "content": "hi"}],
+                timeout=5,
+            ):
+                pieces.append(piece)
+                slot.cancel.set()
+        except turn_mod.TurnCancelled:
+            return pieces
+        return pieces
 
-    assert asyncio.run(read()) == "A" + "".join(f"n{i}-" for i in range(30))
+    assert asyncio.run(read()) == ["A"]
 
 
 def test_a_pause_between_tokens_leaves_the_socket_open():

@@ -1872,16 +1872,19 @@ async def _iter_completion_body(response: httpx.Response, *, started: float | No
             take_field(choice)
             _collect_calls(calls, choice)
         text = _choice_text(choice if isinstance(choice, dict) else {})
-        if not text:
-            continue
-        pieces = _answer_pieces(splitter, text, saw_field=saw_field)
-        if calls:
-            held.extend(pieces)
-        else:
-            for piece in pieces:
-                if piece:
-                    saw_answer = True
-                yield piece
+        if text:
+            pieces = _answer_pieces(splitter, text, saw_field=saw_field)
+            if calls:
+                held.extend(pieces)
+            else:
+                for piece in pieces:
+                    if piece:
+                        saw_answer = True
+                    yield piece
+        # finish_reason ends the completion. Waiting on [DONE] or a close that
+        # never arrives is what left a finished reply marked Writing.
+        if finish_reason in {"stop", "length", "tool_calls", "content_filter", "function_call"}:
+            break
     for piece in _finish_pieces(splitter, saw_field=saw_field):
         if calls:
             held.append(piece)
@@ -1962,6 +1965,37 @@ def _unfenced_unknown(calls: list[dict]) -> bool:
     return False
 
 
+async def _unblock_stalled_read(client: httpx.AsyncClient, delay: float) -> None:
+    """Close a stream whose next line never arrives.
+
+    asyncio.timeout cancels the waiter, but a socket that ignores that
+    cancellation sits until the peer dies. A finished stub reply then stayed
+    on Writing until the connection itself gave up, and the limit replaced
+    the text. Closing the client is what makes the stall limit real.
+    """
+    try:
+        await asyncio.sleep(delay)
+    except asyncio.CancelledError:
+        return
+    try:
+        await client.aclose()
+    except Exception:
+        return
+
+
+async def _drop_read(body: object, client: httpx.AsyncClient) -> None:
+    closer = getattr(body, "aclose", None)
+    if closer is not None:
+        try:
+            await asyncio.wait_for(closer(), 1.0)
+        except Exception:
+            pass
+    try:
+        await asyncio.wait_for(client.aclose(), 1.0)
+    except Exception:
+        pass
+
+
 async def _stream_attempt(
     *,
     base_url: str,
@@ -2015,22 +2049,34 @@ async def _stream_attempt(
             wait = watch.limits.first_token_seconds
             while True:
                 turn_mod.raise_if_cancelled()
+                release = asyncio.create_task(_unblock_stalled_read(client, wait))
                 try:
-                    # Stay in this task. Python 3.11's wait_for copies the context
-                    # into another task, so tool-call ids set while reading are lost.
-                    # The first token may take longer than the gap between tokens.
-                    async with asyncio.timeout(wait):
-                        piece = await body.__anext__()
-                except StopAsyncIteration:
-                    break
-                except TimeoutError as exc:
-                    closer = getattr(body, "aclose", None)
-                    if closer is not None:
-                        await closer()
-                    reason = "stall" if yielded else "first_token"
-                    raise GenerationLimit(reason) from exc
-                except GenerationLimit:
-                    raise
+                    try:
+                        # Stay in this task. Python 3.11's wait_for copies the context
+                        # into another task, so tool-call ids set while reading are lost.
+                        # The first token may take longer than the gap between tokens.
+                        async with asyncio.timeout(wait):
+                            piece = await body.__anext__()
+                    except StopAsyncIteration:
+                        break
+                    except TimeoutError as exc:
+                        await _drop_read(body, client)
+                        reason = "stall" if yielded else "first_token"
+                        raise GenerationLimit(reason) from exc
+                    except httpx.HTTPError as exc:
+                        if release.done() and not release.cancelled():
+                            await _drop_read(body, client)
+                            reason = "stall" if yielded else "first_token"
+                            raise GenerationLimit(reason) from exc
+                        raise
+                    except GenerationLimit:
+                        raise
+                finally:
+                    release.cancel()
+                    try:
+                        await release
+                    except asyncio.CancelledError:
+                        pass
                 watch.observe(piece or "")
                 if piece:
                     yielded = True

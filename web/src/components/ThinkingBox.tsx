@@ -24,7 +24,7 @@ export function ThinkingBox({
   now?: number;
 }) {
   const body = (text || "").trim();
-  const [opened, setOpened] = useState<boolean | null>(null);
+  const [opened, setOpened] = useState<boolean | null>(streaming ? true : null);
   const stick = useRef(true);
   const scroller = useRef<HTMLDivElement>(null);
   const [tick, setTick] = useState(() => Date.now());
@@ -33,6 +33,7 @@ export function ThinkingBox({
     const timer = window.setInterval(() => setTick(Date.now()), 1000);
     return () => window.clearInterval(timer);
   }, [streaming]);
+  // Stay as it was when reasoning finished. Collapsing here shifts the transcript.
   const expanded = opened === null ? streaming : opened;
   const elapsed = seconds ?? (startedAt ? Math.max(0, Math.round(((now || tick) - startedAt) / 1000)) : undefined);
   const clock = thoughtLabel(elapsed);

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import pytest
 
+from easyagent.app import _pause_for_runaway
 from easyagent.generation import RUNAWAY_TEXT, GenerationLimit
 from easyagent.llm import ProviderError
 from easyagent.store import now_iso
@@ -398,6 +399,33 @@ def test_past_the_drain_cap_the_queue_is_shown_held(tmp_path, monkeypatch):
 
     assert queued_items(store, bot["id"], chat["id"]) == []
     assert saved["run"]["status"] != "running"
+    client.close()
+
+
+def test_a_runaway_keeps_the_words_already_written(tmp_path):
+    app, client, bot, chat = _client(tmp_path)
+    store = app.state.store
+    doc = store.get_chat(bot["id"], chat["id"])
+    doc["messages"] = [
+        {"id": "u1", "role": "user", "content": "write the page", "created_at": now_iso()},
+        {
+            "id": "a1",
+            "role": "assistant",
+            "content": "Section 1 is already on screen.",
+            "live": True,
+            "created_at": now_iso(),
+        },
+    ]
+    store.save_chat(doc)
+    body = _pause_for_runaway(store, bot["id"], chat["id"])
+    assert "Section 1 is already on screen." in body["reply"]
+    assert RUNAWAY_TEXT in body["reply"]
+    saved = store.get_chat(bot["id"], chat["id"])
+    reply = next(item for item in saved["messages"] if item.get("id") == "a1")
+    assert reply["content"].startswith("Section 1 is already on screen.")
+    assert reply["content"].endswith(RUNAWAY_TEXT)
+    assert reply.get("kind") != "resume-offer"
+    assert reply.get("interrupted") is True
     client.close()
 
 

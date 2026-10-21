@@ -16,7 +16,8 @@ import { yoloClock, yoloRemaining } from "@/lib/yolo";
 import { activityLabel, askedLine, type ActivityStep } from "@/lib/activity";
 import { deriveUserHistory } from "@/lib/composer-history";
 import { activityLine, describeRun, faceStateFor, runPresence, runTone, shownStep, workingLine } from "@/lib/run";
-import { arrangeBusy, hideWhileSending, messageHasBubble, placeLiveReply, reactionWho, rowKey } from "@/lib/transcript";
+import { arrangeBusy, hideWhileSending, messageHasBubble, placeLiveReply, reactionWho, rowKey, shownThinking } from "@/lib/transcript";
+import type { FrozenReply } from "@/stream";
 import { cn } from "@/lib/utils";
 import { keepLoadedHistory, mergeChat, sameMessage, shareChat, type MessagePage } from "@/lib/window";
 import { useApp } from "@/store";
@@ -101,6 +102,8 @@ const MessageRow = memo(function MessageRow({
   botName,
   sending,
   streaming = false,
+  lite = false,
+  freeze = false,
   onChoose,
 }: {
   message: ChatMessage;
@@ -108,6 +111,8 @@ const MessageRow = memo(function MessageRow({
   botName: string;
   sending: boolean;
   streaming?: boolean;
+  lite?: boolean;
+  freeze?: boolean;
   onChoose: (choice: string) => void;
 }) {
   const botId = useApp((state) => state.botId);
@@ -150,13 +155,14 @@ const MessageRow = memo(function MessageRow({
       data-role={message.role}
       data-message-id={message.id || message.client_id || ""}
     >
-      {message.role === "assistant" && !failed && (message.thinking || "").trim() ? <ThinkingBox text={message.thinking} streaming={streaming} seconds={message.thought_seconds} /> : null}
+      {message.role === "assistant" && !failed && shownThinking(message.thinking) ? <ThinkingBox text={shownThinking(message.thinking)} streaming={streaming && !freeze} seconds={message.thought_seconds} /> : null}
       {showBubble ? (
       <div className={cn(mine ? "bubble-user" : "bubble-bot", failed && "bg-danger/10 text-danger")}>
         {message.routine_name ? <p className="mb-1 text-xs opacity-70">Routine · {message.routine_name}</p> : null}
         {message.speaker_name ? <p className="mb-1 text-xs opacity-70">{message.speaker_name}</p> : null}
         <div className={mine ? "whitespace-pre-wrap" : ""}>
-          {mine ? (message.content || "") : <Markdown text={message.content || ""} streaming={streaming} />}
+          {mine ? (message.content || "") : <Markdown text={message.content || ""} streaming={streaming || lite || freeze} freeze={freeze} />}
+          {message.role === "assistant" && (message.interrupted || freeze) ? <p className="pause-mark" data-testid="paused-mark">paused — you sent a message</p> : null}
         </div>
         {chip ? <p className="mt-2 block truncate text-xs" data-testid={`chip-${message.chip}`} title={chipTitle(message)}>{chip}</p> : null}
         {message.chip === "held" && message.id && botId && chatId ? (
@@ -304,36 +310,58 @@ const MessageRow = memo(function MessageRow({
   prev.last === next.last &&
   prev.sending === next.sending &&
   prev.streaming === next.streaming &&
+  prev.lite === next.lite &&
+  prev.freeze === next.freeze &&
   prev.botName === next.botName &&
   sameMessage(prev.message, next.message)
 );
+
+function rowFrozen(message: ChatMessage, frozen?: FrozenReply): boolean {
+  if (!frozen?.replyId || message.role !== "assistant") return false;
+  return message.id === frozen.replyId || message.client_id === `live-${frozen.replyId}`;
+}
+
+function keptLite(message: ChatMessage, ids: Set<string>): boolean {
+  if (message.role !== "assistant") return false;
+  return ids.has(message.client_id || "") || ids.has(message.id || "") || ids.has(`live-${message.id || ""}`);
+}
 
 const Transcript = memo(function Transcript({
   rows,
   botName,
   sending,
   liveKey,
+  frozen,
+  liteIds,
   onChoose,
 }: {
   rows: ChatMessage[];
   botName: string;
   sending: boolean;
   liveKey: string;
+  frozen?: FrozenReply;
+  liteIds: Set<string>;
   onChoose: (choice: string) => void;
 }) {
   return (
     <ol className="flex flex-col gap-4" data-testid="transcript">
-      {rows.map((message, index) => (
-        <MessageRow
-          key={rowKey(message, index)}
-          message={message}
-          last={index === rows.length - 1}
-          botName={botName}
-          sending={sending}
-          streaming={Boolean(liveKey) && message.client_id === liveKey}
-          onChoose={onChoose}
-        />
-      ))}
+      {rows.map((message, index) => {
+        const live = Boolean(liveKey) && message.client_id === liveKey;
+        const freeze = rowFrozen(message, frozen) || Boolean(message.interrupted);
+        return (
+          <MessageRow
+            key={rowKey(message, index)}
+            message={message}
+            last={index === rows.length - 1}
+            botName={botName}
+            sending={sending}
+            streaming={live}
+            lite={!freeze && keptLite(message, liteIds)}
+            freeze={freeze}
+            onChoose={onChoose}
+          />
+        );
+      })}
     </ol>
   );
 });
@@ -368,6 +396,7 @@ export function ChatPane() {
   const composerRef = useRef<ComposerHandle>(null);
   const heldSteps = useRef<ActivityStep[]>([]);
   const seenRun = useRef("");
+  const streamedLite = useRef(new Set<string>());
   const pinnedBusy = useRef(new Set<string>());
   const historyRef = useRef<ChatMessage[]>([]);
   const getHistory = useCallback(() => deriveUserHistory(historyRef.current), []);
@@ -545,16 +574,36 @@ export function ChatPane() {
   const liveTurn = Boolean(live && live.phase !== "error" && live.phase !== "stopped");
   const replyId = live?.replyId || live?.run?.reply_id || "";
   const stamp = replyId ? `live-${replyId}` : runId ? `live-${runId}` : "";
+  const frozen = flight?.frozen;
   const streamingReply = Boolean(liveTurn && ((live?.text || "").trim() || (live?.reasoning || "").trim()));
+  if (streamingReply && stamp) streamedLite.current.add(stamp);
+  if (replyId) {
+    streamedLite.current.add(replyId);
+    streamedLite.current.add(`live-${replyId}`);
+  }
   const placed = arrangeBusy(rows, pinnedBusy.current);
   let head = placed.head;
   if (streamingReply && live && stamp) {
     head = placeLiveReply(
       head,
-      { role: "assistant", content: live.text, thinking: live.reasoning, thought_seconds: live.thoughtSeconds, client_id: stamp },
+      {
+        role: "assistant",
+        content: frozen ? frozen.text : live.text,
+        thinking: frozen ? frozen.reasoning : live.reasoning,
+        thought_seconds: live.thoughtSeconds,
+        client_id: stamp,
+      },
       stamp,
-      replyId,
+      frozen?.replyId || replyId,
     );
+  }
+  if (frozen?.replyId) {
+    head = head.map((row) => {
+      if (row.role !== "assistant") return row;
+      if (row.id !== frozen.replyId && row.client_id !== `live-${frozen.replyId}`) return row;
+      if (row.content === frozen.text && (row.thinking || "") === frozen.reasoning) return row;
+      return { ...row, content: frozen.text, thinking: frozen.reasoning };
+    });
   }
   const shown = placed.tail.length ? [...head, ...placed.tail] : head;
   const asked = askedLine(bot.endpoint_name || "", rows);
@@ -562,14 +611,11 @@ export function ChatPane() {
   const checklist = (open?.plan?.steps || []).filter((step) => step && step.text);
   const active = Boolean(open && (running || (flight?.sending && live && live.phase !== "error" && live.phase !== "stopped")));
   const presenceStep = named;
-  const presenceWaiting = !presenceStep || /^(Thinking|Waiting|Revising)\b/.test(presenceStep) || presenceStep.startsWith("Waiting on model") || presenceStep.startsWith("Model not answering") || presenceStep.startsWith("Paused");
-  const presenceStarted = presenceWaiting
-    ? (live?.waitAt ? new Date(live.waitAt).toISOString() : (open?.run?.activity_started_at || open?.run?.started_at || live?.run?.started_at))
-    : (open?.run?.activity_started_at || live?.run?.activity_started_at || open?.run?.started_at || live?.run?.started_at);
+  const runStarted = live?.run?.started_at || open?.run?.started_at || live?.run?.activity_started_at || open?.run?.activity_started_at;
   const status = (
     <Elapsed>
       {(clock) => {
-        const line = runPresence({ active, step: presenceStep, startedAt: presenceStarted, now: clock });
+        const line = runPresence({ active, step: presenceStep, startedAt: runStarted, now: clock });
         return <span data-testid="run-state" data-state={line.kind}>{line.text}</span>;
       }}
     </Elapsed>
@@ -720,6 +766,8 @@ export function ChatPane() {
                 botName={bot?.name || "the bot"}
                 sending={Boolean(flight?.sending)}
                 liveKey={streamingReply ? stamp : ""}
+                frozen={frozen}
+                liteIds={streamedLite.current}
                 onChoose={onChoose}
               />
               {liveTurn && steps.length ? steps.map((item) => (
@@ -743,8 +791,8 @@ export function ChatPane() {
                         <span data-testid="activity-line">
                           {activityLine({
                             step: named,
-                            jobStartedAt: live?.run?.started_at || open?.run?.started_at,
-                            activityStartedAt: live?.waitAt ? new Date(live.waitAt).toISOString() : (live?.run?.activity_started_at || open?.run?.activity_started_at),
+                            jobStartedAt: runStarted,
+                            activityStartedAt: runStarted,
                             now: clock,
                             tokens: Math.floor((live?.chars || 0) / 4),
                           }) || workingLine(live?.run || open?.run, clock).text || view?.words}

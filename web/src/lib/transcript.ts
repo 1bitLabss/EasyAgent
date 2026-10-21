@@ -1,5 +1,16 @@
 import type { ChatMessage } from "@/types";
 
+const CHECK_NOTE = /^(?:Checked\. No problem found\.|The check did not return a grade\.|Revised after check\.)$/;
+
+/** Reasoning the person saw arrive. A check status line is not a second copy of the reply. */
+export function shownThinking(text?: string): string {
+  const kept = (text || "")
+    .split("\n")
+    .map((line) => line.trim())
+    .filter((line) => line && !CHECK_NOTE.test(line));
+  return kept.join("\n");
+}
+
 export function messageHasBubble(message: Pick<ChatMessage, "content" | "attachment" | "choices" | "error">): boolean {
   if (message.error) return true;
   if ((message.content || "").trim()) return true;

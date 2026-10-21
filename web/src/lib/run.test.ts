@@ -82,6 +82,9 @@ describe("run tone", () => {
     expect(shownStep("Waiting on model", "Writing index.html")).toBe("Writing index.html");
     expect(shownStep("Writing, 4s", "Waiting on model, 4s")).toBe("Writing, 4s");
     expect(shownStep("Paused, reading your message", "Writing index.html")).toBe("Paused, reading your message");
+    expect(shownStep("Running sleep 8", "Paused, reading your message — finishing current step")).toBe(
+      "Paused, reading your message — finishing current step",
+    );
     expect(runTone("Writing index.html", "running")).toBe("tool");
     expect(runTone("Writing, 3m 10s", "running")).toBe("thinking");
   });

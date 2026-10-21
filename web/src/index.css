@@ -197,6 +197,17 @@ body {
   outline: none;
 }
 
+.pause-mark {
+  position: absolute;
+  top: calc(100% + 1px);
+  left: 0;
+  margin: 0;
+  color: hsl(var(--muted));
+  font-size: 11px;
+  line-height: 14px;
+  pointer-events: none;
+}
+
 .reaction-row {
   display: flex;
   align-items: center;

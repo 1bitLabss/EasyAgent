@@ -91,6 +91,8 @@ function genericWait(step: string): boolean {
 export function shownStep(label?: string, serverStep?: string): string {
   const live = (label || "").trim();
   const server = (serverStep || "").trim();
+  if (live.startsWith("Paused")) return live;
+  if (server.startsWith("Paused")) return server;
   if (genericWait(live) && !genericWait(server)) return server;
   return live || server;
 }

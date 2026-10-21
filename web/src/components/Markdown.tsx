@@ -1,4 +1,4 @@
-import { memo, useDeferredValue } from "react";
+import { memo, useDeferredValue, useRef } from "react";
 import ReactMarkdown from "react-markdown";
 import rehypeHighlight from "rehype-highlight";
 import remarkGfm from "remark-gfm";
@@ -11,8 +11,23 @@ const Closed = memo(function Closed({ text }: { text: string }) {
   return <ReactMarkdown remarkPlugins={remarkPlugins}>{text}</ReactMarkdown>;
 });
 
-export const Markdown = memo(function Markdown({ text, streaming = false }: { text: string; streaming?: boolean }) {
+function Lite({ text }: { text: string }) {
+  const parts = splitStreamingMarkdown(text);
+  return (
+    <div className="chat-md">
+      {parts.closed ? <Closed text={parts.closed} /> : null}
+      {parts.tail ? <ReactMarkdown remarkPlugins={remarkPlugins}>{parts.tail}</ReactMarkdown> : null}
+    </div>
+  );
+}
+
+export const Markdown = memo(function Markdown({ text, streaming = false, freeze = false }: { text: string; streaming?: boolean; freeze?: boolean }) {
   const shown = useDeferredValue(text || "");
+  const locked = useRef<string | null>(null);
+  if (freeze) {
+    if (locked.current === null) locked.current = shown;
+    return <Lite text={locked.current} />;
+  }
   if (!streaming) {
     return (
       <div className="chat-md">
@@ -20,11 +35,5 @@ export const Markdown = memo(function Markdown({ text, streaming = false }: { te
       </div>
     );
   }
-  const parts = splitStreamingMarkdown(shown);
-  return (
-    <div className="chat-md">
-      {parts.closed ? <Closed text={parts.closed} /> : null}
-      {parts.tail ? <ReactMarkdown remarkPlugins={remarkPlugins}>{parts.tail}</ReactMarkdown> : null}
-    </div>
-  );
+  return <Lite text={shown} />;
 });

@@ -385,3 +385,63 @@ def test_stall_guard_keeps_native_tool_call_ids(monkeypatch):
         assert stalled.value.reason == "first_token"
     finally:
         _limits.reset(token)
+
+
+def test_finish_reason_ends_the_read_without_done(monkeypatch):
+    """A terminal finish_reason is the end of the completion. [DONE] is not required."""
+    import easyagent.llm as llm
+
+    lines = [
+        'data: {"choices":[{"delta":{"role":"assistant","content":""}}]}',
+        'data: {"choices":[{"delta":{"content":"Section 1 already written."}}]}',
+        'data: {"choices":[{"delta":{},"finish_reason":"stop"}]}',
+    ]
+    hung = {"n": 0}
+
+    class FakeResponse:
+        status_code = 200
+        headers = {"content-type": "text/event-stream"}
+
+        async def aiter_lines(self):
+            for line in lines:
+                yield line
+            hung["n"] += 1
+            await asyncio.sleep(30)
+            yield "data: [DONE]"
+
+        async def aread(self):
+            return b""
+
+    class FakeClient:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        async def aclose(self):
+            return None
+
+        def stream(self, method, url, json=None, headers=None):
+            class Context:
+                async def __aenter__(self_inner):
+                    return FakeResponse()
+
+                async def __aexit__(self_inner, *args):
+                    return False
+
+            return Context()
+
+    monkeypatch.setattr(llm.httpx, "AsyncClient", FakeClient)
+
+    async def read():
+        pieces = []
+        async for piece in llm._stream_attempt(
+            base_url="http://127.0.0.1:9/v1",
+            api_key=None,
+            model="stub",
+            messages=[{"role": "user", "content": "MEDIUM please"}],
+            timeout=5,
+        ):
+            pieces.append(piece)
+        return pieces
+
+    assert asyncio.run(read()) == ["Section 1 already written."]
+    assert hung["n"] == 0

@@ -3969,6 +3969,7 @@ def _apply_run(
             if slot is not None:
                 slot.job_started = run["started_at"]
         run["id"] = turn_mod.current_run_id() or run.get("id") or ""
+        run["activity_started_at"] = run["started_at"]
     if start and reason is None:
         run["reason"] = ""
     run["status"] = status
@@ -4487,8 +4488,14 @@ def _pause_for_runaway(store: Store, bot_id: str, chat_id: str) -> dict:
     if target is None:
         target = {"id": new_id(), "role": "assistant", "created_at": now_iso()}
         messages.append(target)
-    target["content"] = RUNAWAY_TEXT
-    target["kind"] = "resume-offer"
+    # A limit stops the request. Text already written stays, with the note after it.
+    written = str(target.get("content") or "").strip()
+    if written and written != RUNAWAY_TEXT and not written.endswith(RUNAWAY_TEXT):
+        target["content"] = written + "\n\n" + RUNAWAY_TEXT
+        target.pop("kind", None)
+    else:
+        target["content"] = RUNAWAY_TEXT
+        target["kind"] = "resume-offer"
     target["interrupted"] = True
     target.pop("live", None)
     target.pop("error", None)
@@ -4503,7 +4510,8 @@ def _pause_for_runaway(store: Store, bot_id: str, chat_id: str) -> dict:
     slot.deliver_queue = False
     slot.sealed = True
     chat = store.get_chat(bot_id, chat_id)
-    return {"reply": RUNAWAY_TEXT, "skills_saved": [], "chat": _public_chat(store, chat)}
+    kept = target.get("content") or RUNAWAY_TEXT
+    return {"reply": kept, "skills_saved": [], "chat": _public_chat(store, chat)}
 
 
 def _pause_for_repeat(store: Store, bot_id: str, chat_id: str, text: str) -> dict:
@@ -6056,6 +6064,7 @@ async def _stream_reply(
             if kind == "stage":
                 freeze_thought()
                 body = text or ""
+                replace = False
                 if sent and (body.startswith(sent) or sent.startswith(body) or sent.strip() == body.strip()):
                     extra = body[len(sent):] if body.startswith(sent) else ""
                     if len(body) >= len(sent):
@@ -6063,6 +6072,7 @@ async def _stream_reply(
                 else:
                     extra = body
                     sent = body
+                    replace = bool(extra)
                 saved_run = _write_live(
                     store,
                     bot_id,
@@ -6073,7 +6083,10 @@ async def _stream_reply(
                 )
                 saved_chars = len(sent)
                 if extra:
-                    yield _sse({"type": "delta", "text": extra})
+                    payload = {"type": "delta", "text": extra}
+                    if replace:
+                        payload["reset"] = True
+                    yield _sse(payload)
                 if saved_run:
                     yield _sse({"type": "run", "run": saved_run})
                 continue
@@ -6297,6 +6310,8 @@ async def _emit_run(store: Store, bot_id: str, chat_id: str, producer, *, resume
             with suppress(Exception):
                 queue.put_nowait(item)
 
+    slot.notify = publish
+
     async def worker() -> None:
         try:
             async with chat_lock(store, chat_id):
@@ -6330,6 +6345,8 @@ async def _emit_run(store: Store, bot_id: str, chat_id: str, producer, *, resume
             await _finish_turn(store, bot_id, chat_id)
             with suppress(Exception):
                 await publish(None)
+            if getattr(slot, "notify", None) is publish:
+                slot.notify = None
 
     queue: asyncio.Queue = asyncio.Queue()
     async with guard:

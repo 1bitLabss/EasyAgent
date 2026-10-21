@@ -1,8 +1,15 @@
 import { describe, expect, it } from "vitest";
 import { FACE_PALETTE, STATE_COLORS } from "@/components/Face";
-import { arrangeBusy, hideWhileSending, messageHasBubble, placeLiveReply, reactionWho } from "@/lib/transcript";
+import { arrangeBusy, hideWhileSending, messageHasBubble, placeLiveReply, reactionWho, shownThinking } from "@/lib/transcript";
 
 describe("chat transcript", () => {
+  it("hides a check note so finish does not mount a second copy of the reply", () => {
+    expect(shownThinking("Checked. No problem found.")).toBe("");
+    expect(shownThinking("The check did not return a grade.\n")).toBe("");
+    expect(shownThinking("Revised after check.")).toBe("");
+    expect(shownThinking("Looking at the question.\nChecked. No problem found.")).toBe("Looking at the question.");
+  });
+
   it("does not draw an empty bubble for a reaction-only turn", () => {
     expect(messageHasBubble({ content: "", reaction: "👀" } as never)).toBe(false);
     expect(messageHasBubble({ content: "   " })).toBe(false);

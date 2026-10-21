@@ -55,6 +55,7 @@ export function sameMessage(left: ChatMessage, right: ChatMessage): boolean {
     left.seen_step === right.seen_step &&
     left.refuse_reason === right.refuse_reason &&
     (left.client_id || "") === (right.client_id || "") &&
+    Boolean(left.interrupted) === Boolean(right.interrupted) &&
     sameList(left.choices, right.choices) &&
     sameList(left.skills_saved, right.skills_saved) &&
     (left.attachment?.id || "") === (right.attachment?.id || "") &&

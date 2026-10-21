@@ -103,6 +103,7 @@ export type ChatMessage = {
   refuse_reason?: string;
   client_id?: string;
   before_id?: string;
+  interrupted?: boolean;
   queued?: boolean;
   about?: string;
 };

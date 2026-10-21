@@ -65,6 +65,7 @@ class Slot:
         self._supports_active_turn_redirect = True
         self.pause_for_user = False
         self.listeners: list = []
+        self.notify = None
 
 
 _GUARD = threading.Lock()
@@ -372,17 +373,22 @@ def _tool_in_progress(slot: Slot) -> bool:
     return bool(getattr(slot, "_executing_tools", False))
 
 
+PAUSE_TOOL_TEXT = "Paused, reading your message — finishing current step"
+
+
 def request_user_pause(store, chat_id: str) -> None:
     """A message arrived. Finish the current token or tool step, then stop that reply.
 
     The text already streamed stays. A read blocked on the next chunk is closed so
-    the pause can happen. A command is left alone. Stop is a different flag.
+    the pause can happen. A command is left alone, and the screen says so at once.
+    Stop is a different flag.
     """
     slot = slot_for(store, chat_id)
     if slot.user_stop:
         return
     slot.pause_for_user = True
     if _tool_in_progress(slot):
+        _announce_tool_pause(slot)
         return
     # No model socket yet: the step finishes, and the next model call sees the pause.
     client = slot.client
@@ -393,6 +399,28 @@ def request_user_pause(store, chat_id: str) -> None:
         asyncio.get_running_loop().create_task(_close_client(client))
     except RuntimeError:
         return
+
+
+def _announce_tool_pause(slot: Slot) -> None:
+    """The tool keeps running. The viewer still hears the pause on this turn."""
+    notify = getattr(slot, "notify", None)
+    if notify is None:
+        return
+    import json
+
+    chunk = "data: " + json.dumps({"type": "status", "text": PAUSE_TOOL_TEXT}, ensure_ascii=False) + "\n\n"
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        return
+
+    async def send() -> None:
+        try:
+            await notify(chunk)
+        except Exception:
+            return
+
+    loop.create_task(send())
 
 
 def pause_requested() -> bool:

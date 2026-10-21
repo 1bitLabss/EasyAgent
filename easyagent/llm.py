@@ -1996,16 +1996,31 @@ async def _drop_read(body: object, client: httpx.AsyncClient) -> None:
         pass
 
 
+def _mark_model_read(active: bool) -> None:
+    slot = turn_mod.current_slot()
+    if slot is not None:
+        slot.in_model_read = active
+
+
+async def _next_piece(body):
+    """One line from the completion. The pause flag can see that this read is in progress."""
+    _mark_model_read(True)
+    try:
+        return await body.__anext__()
+    finally:
+        _mark_model_read(False)
+
+
 async def _pause_unless_the_reply_ended(body) -> AsyncIterator[str]:
     """A pause on the last token finishes the reply. A later token still pauses.
 
     The next read is given a moment. StopAsyncIteration means the model already
-    ended, so the caller keeps this reply whole. A token that shows up is yielded,
-    and if another one is already waiting the pause still happens.
+    ended, so the caller keeps this reply whole. A token that shows up is yielded.
+    If the line after that is the end, the reply is still whole. Another token pauses.
     """
     try:
         async with asyncio.timeout(0.05):
-            piece = await body.__anext__()
+            piece = await _next_piece(body)
     except StopAsyncIteration:
         return
     except TimeoutError:
@@ -2018,7 +2033,7 @@ async def _pause_unless_the_reply_ended(body) -> AsyncIterator[str]:
         yield piece
     try:
         async with asyncio.timeout(0.05):
-            extra = await body.__anext__()
+            extra = await _next_piece(body)
     except StopAsyncIteration:
         return
     except TimeoutError:
@@ -2029,6 +2044,19 @@ async def _pause_unless_the_reply_ended(body) -> AsyncIterator[str]:
         raise
     if extra:
         yield extra
+    try:
+        async with asyncio.timeout(0.05):
+            tail = await _next_piece(body)
+    except StopAsyncIteration:
+        return
+    except TimeoutError:
+        turn_mod.raise_if_cancelled()
+        raise turn_mod.TurnCancelled()
+    except httpx.HTTPError:
+        turn_mod.raise_if_cancelled()
+        raise
+    if tail:
+        yield tail
     turn_mod.raise_if_cancelled()
     raise turn_mod.TurnCancelled()
 
@@ -2104,7 +2132,7 @@ async def _stream_attempt(
                         # into another task, so tool-call ids set while reading are lost.
                         # The first token may take longer than the gap between tokens.
                         async with asyncio.timeout(wait):
-                            piece = await body.__anext__()
+                            piece = await _next_piece(body)
                     except StopAsyncIteration:
                         break
                     except TimeoutError as exc:
@@ -2138,6 +2166,7 @@ async def _stream_attempt(
             await opened.__aexit__(None, None, None)
             opened = None
     finally:
+        _mark_model_read(False)
         turn_mod.detach_client(client)
         await client.aclose()
     if not yielded:

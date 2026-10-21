@@ -556,3 +556,96 @@ def test_a_pause_with_more_tokens_still_stops(monkeypatch):
     pieces, elapsed = asyncio.run(read())
     assert pieces == ["Hello", " there"]
     assert elapsed < 0.25
+
+
+def test_the_last_buffered_tokens_finish_the_reply(monkeypatch):
+    """Two tokens already in hand, then the end, are not a cut reply."""
+    import easyagent.llm as llm
+
+    async def lines():
+        yield 'data: {"choices":[{"delta":{"content":"One"}}]}'
+        yield 'data: {"choices":[{"delta":{"content":" two"}}]}'
+        yield 'data: {"choices":[{"delta":{"content":" three"}}]}'
+        yield 'data: {"choices":[{"delta":{},"finish_reason":"stop"}]}'
+
+    llm_mod, FakeClient = _stream_client(lines)
+    monkeypatch.setattr(llm_mod.httpx, "AsyncClient", FakeClient)
+
+    async def read():
+        slot = turn_mod.Slot()
+        slot.cancel = asyncio.Event()
+        slot.worker = asyncio.current_task()
+        turn_mod._cancel.set(slot.cancel)
+        turn_mod._slot.set(slot)
+        pieces = []
+        async for piece in llm._stream_attempt(
+            base_url="http://127.0.0.1:9/v1",
+            api_key=None,
+            model="stub",
+            messages=[{"role": "user", "content": "hi"}],
+            timeout=5,
+        ):
+            pieces.append(piece)
+            slot.cancel.set()
+            slot.pause_for_user = True
+        return pieces
+
+    assert asyncio.run(read()) == ["One", " two", " three"]
+
+
+def test_a_pause_between_tokens_leaves_the_socket_open():
+    """Closing between tokens drops the last line of a reply that already ended."""
+    closed = []
+
+    class Client:
+        async def aclose(self):
+            closed.append("closed")
+
+    slot = turn_mod.Slot()
+    slot.client = Client()
+    slot.in_model_read = False
+
+    async def run():
+        turn_mod.request_user_pause(object(), "chat")
+        await asyncio.sleep(0.25)
+
+    import easyagent.turn as turn
+
+    # request_user_pause looks the slot up. This chat is not on disk.
+    original = turn.slot_for
+    turn.slot_for = lambda store, chat_id: slot
+    try:
+        asyncio.run(run())
+    finally:
+        turn.slot_for = original
+    assert slot.pause_for_user is True
+    assert slot.cancel.is_set()
+    assert closed == []
+
+
+def test_a_pause_during_the_read_closes_the_socket():
+    closed = []
+
+    class Client:
+        async def aclose(self):
+            closed.append("closed")
+
+    slot = turn_mod.Slot()
+    slot.client = Client()
+    slot.in_model_read = True
+
+    async def run():
+        turn_mod.request_user_pause(object(), "chat")
+        await asyncio.sleep(0.05)
+        assert closed == []
+        await asyncio.sleep(0.2)
+
+    import easyagent.turn as turn
+
+    original = turn.slot_for
+    turn.slot_for = lambda store, chat_id: slot
+    try:
+        asyncio.run(run())
+    finally:
+        turn.slot_for = original
+    assert closed == ["closed"]

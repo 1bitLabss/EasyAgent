@@ -64,6 +64,8 @@ class Slot:
         self._turn_user_intervened = False
         self._supports_active_turn_redirect = True
         self.pause_for_user = False
+        # True only while the model read is waiting on the next line, not while a token is being saved.
+        self.in_model_read = False
         # True after this reply's tokens are in hand, until the next model call or tool.
         # A message in that window is the next turn. It does not pause a finished reply.
         self.sealing = False
@@ -238,6 +240,7 @@ def bind(store, chat_id: str, bot_id: str = "", *, resume: bool = False) -> Slot
     slot.pause_for_user = False
     slot.sealing = False
     slot.late_arrival = False
+    slot.in_model_read = False
     slot.sealed = False
     slot.cancel = asyncio.Event()
     slot.client = None
@@ -425,6 +428,11 @@ def request_user_pause(store, chat_id: str) -> None:
     if client is None:
         return
     slot.cancel.set()
+    # Between tokens the read loop can still see a reply that already ended.
+    # Closing here would drop that last line. A read blocked on the socket
+    # cannot see the flag, so that one is closed.
+    if not slot.in_model_read:
+        return
     try:
         asyncio.get_running_loop().create_task(_close_client_after(client, _PAUSE_CLOSE_DELAY))
     except RuntimeError:

@@ -2014,49 +2014,31 @@ async def _next_piece(body):
 async def _pause_unless_the_reply_ended(body) -> AsyncIterator[str]:
     """A pause on the last token finishes the reply. A later token still pauses.
 
-    The next read is given a moment. StopAsyncIteration means the model already
-    ended, so the caller keeps this reply whole. A token that shows up is yielded.
-    If the line after that is the end, the reply is still whole. Another token pauses.
+    Lines already sitting in the buffer are part of this reply, including the
+    end marker. A line that has to be waited for is the safe point: the next
+    read either ends the reply or proves another token is coming.
     """
-    try:
-        async with asyncio.timeout(0.05):
-            piece = await _next_piece(body)
-    except StopAsyncIteration:
-        return
-    except TimeoutError:
-        turn_mod.raise_if_cancelled()
-        raise turn_mod.TurnCancelled()
-    except httpx.HTTPError:
-        turn_mod.raise_if_cancelled()
-        raise
-    if piece:
-        yield piece
-    try:
-        async with asyncio.timeout(0.05):
-            extra = await _next_piece(body)
-    except StopAsyncIteration:
-        return
-    except TimeoutError:
-        turn_mod.raise_if_cancelled()
-        raise turn_mod.TurnCancelled()
-    except httpx.HTTPError:
-        turn_mod.raise_if_cancelled()
-        raise
-    if extra:
-        yield extra
-    try:
-        async with asyncio.timeout(0.05):
-            tail = await _next_piece(body)
-    except StopAsyncIteration:
-        return
-    except TimeoutError:
-        turn_mod.raise_if_cancelled()
-        raise turn_mod.TurnCancelled()
-    except httpx.HTTPError:
-        turn_mod.raise_if_cancelled()
-        raise
-    if tail:
-        yield tail
+    live = False
+    for _ in range(2000):
+        started = time.perf_counter()
+        try:
+            async with asyncio.timeout(0.05):
+                piece = await _next_piece(body)
+        except StopAsyncIteration:
+            return
+        except TimeoutError:
+            turn_mod.raise_if_cancelled()
+            raise turn_mod.TurnCancelled()
+        except httpx.HTTPError:
+            turn_mod.raise_if_cancelled()
+            raise
+        if piece:
+            yield piece
+        if live:
+            turn_mod.raise_if_cancelled()
+            raise turn_mod.TurnCancelled()
+        if time.perf_counter() - started >= 0.015:
+            live = True
     turn_mod.raise_if_cancelled()
     raise turn_mod.TurnCancelled()
 

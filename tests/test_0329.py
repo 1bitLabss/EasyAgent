@@ -593,6 +593,40 @@ def test_the_last_buffered_tokens_finish_the_reply(monkeypatch):
     assert asyncio.run(read()) == ["One", " two", " three"]
 
 
+def test_buffered_tokens_at_the_end_are_kept_whole(monkeypatch):
+    """A pause while the last lines are already buffered does not cut them."""
+    import easyagent.llm as llm
+
+    async def lines():
+        yield 'data: {"choices":[{"delta":{"content":"A"}}]}'
+        for i in range(30):
+            yield 'data: {"choices":[{"delta":{"content":"' + f"n{i}-" + '"}}]}'
+        yield 'data: {"choices":[{"delta":{},"finish_reason":"stop"}]}'
+
+    llm_mod, FakeClient = _stream_client(lines)
+    monkeypatch.setattr(llm_mod.httpx, "AsyncClient", FakeClient)
+
+    async def read():
+        slot = turn_mod.Slot()
+        slot.cancel = asyncio.Event()
+        slot.worker = asyncio.current_task()
+        turn_mod._cancel.set(slot.cancel)
+        turn_mod._slot.set(slot)
+        pieces = []
+        async for piece in llm._stream_attempt(
+            base_url="http://127.0.0.1:9/v1",
+            api_key=None,
+            model="stub",
+            messages=[{"role": "user", "content": "hi"}],
+            timeout=5,
+        ):
+            pieces.append(piece)
+            slot.cancel.set()
+        return "".join(pieces)
+
+    assert asyncio.run(read()) == "A" + "".join(f"n{i}-" for i in range(30))
+
+
 def test_a_pause_between_tokens_leaves_the_socket_open():
     """Closing between tokens drops the last line of a reply that already ended."""
     closed = []

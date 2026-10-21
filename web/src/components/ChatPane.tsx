@@ -104,6 +104,7 @@ const MessageRow = memo(function MessageRow({
   streaming = false,
   lite = false,
   freeze = false,
+  pauseNote = false,
   onChoose,
 }: {
   message: ChatMessage;
@@ -113,13 +114,14 @@ const MessageRow = memo(function MessageRow({
   streaming?: boolean;
   lite?: boolean;
   freeze?: boolean;
+  pauseNote?: boolean;
   onChoose: (choice: string) => void;
 }) {
   const botId = useApp((state) => state.botId);
   const chatId = useApp((state) => state.chatId);
   const setScreen = useApp((state) => state.setScreen);
   if (hideWhileSending(message, sending) && !freeze) return null;
-  if (message.about === "activity" || message.about === "queue") return null;
+  if (message.about === "activity" || message.about === "queue" || message.id === "live-status" || message.id === "activity") return null;
   if (message.kind === "resume-note" && (message.content || "").includes("Picked up where it stopped")) {
     return (
       <li className="message-row" data-kind="resume-note">
@@ -303,7 +305,9 @@ const MessageRow = memo(function MessageRow({
           ) : null}
         </div>
       ) : null}
-      {message.role === "assistant" && (message.interrupted || freeze) ? <p className="pause-mark" data-testid="paused-mark">paused — you sent a message</p> : null}
+      {(message.role === "assistant" && (message.interrupted || freeze)) || pauseNote ? (
+        <p className={cn("pause-mark", pauseNote && "pause-mark-above")} data-testid="paused-mark">paused — you sent a message</p>
+      ) : null}
     </li>
   );
 }, (prev, next) =>
@@ -312,9 +316,14 @@ const MessageRow = memo(function MessageRow({
   prev.streaming === next.streaming &&
   prev.lite === next.lite &&
   prev.freeze === next.freeze &&
+  prev.pauseNote === next.pauseNote &&
   prev.botName === next.botName &&
   sameMessage(prev.message, next.message)
 );
+
+function frozenHasBody(frozen?: FrozenReply): boolean {
+  return Boolean((frozen?.text || "").trim() || (frozen?.reasoning || "").trim());
+}
 
 function rowFrozen(message: ChatMessage, frozen?: FrozenReply): boolean {
   if (!frozen?.replyId || message.role !== "assistant") return false;
@@ -348,6 +357,7 @@ const Transcript = memo(function Transcript({
       {rows.map((message, index) => {
         const live = Boolean(liveKey) && message.client_id === liveKey;
         const freeze = rowFrozen(message, frozen) || Boolean(message.interrupted);
+        const pauseOnUser = Boolean(frozen && !frozenHasBody(frozen) && message.role === "user" && !rows.slice(index + 1).some((row) => row.role === "user"));
         return (
           <MessageRow
             key={rowKey(message, index)}
@@ -358,6 +368,7 @@ const Transcript = memo(function Transcript({
             streaming={live}
             lite={!freeze && keptLite(message, liteIds)}
             freeze={freeze}
+            pauseNote={pauseOnUser}
             onChoose={onChoose}
           />
         );
@@ -583,7 +594,8 @@ export function ChatPane() {
   }
   const placed = arrangeBusy(rows, pinnedBusy.current);
   let head = placed.head;
-  if ((streamingReply || frozen) && live && stamp) {
+  const showFrozen = Boolean(frozen && frozenHasBody(frozen));
+  if ((frozen ? showFrozen : streamingReply) && live && stamp) {
     head = placeLiveReply(
       head,
       {

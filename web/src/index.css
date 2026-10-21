@@ -208,6 +208,11 @@ body {
   pointer-events: none;
 }
 
+.pause-mark-above {
+  top: auto;
+  bottom: calc(100% + 1px);
+}
+
 .reaction-row {
   display: flex;
   align-items: center;

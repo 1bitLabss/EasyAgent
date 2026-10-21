@@ -307,7 +307,7 @@ const MessageRow = memo(function MessageRow({
           ) : null}
         </div>
       ) : null}
-      {(message.role === "assistant" && (message.interrupted || freeze)) || pauseNote ? (
+      {(message.role === "assistant" && message.interrupted) || pauseNote ? (
         <p className={cn("pause-mark", pauseNote && "pause-mark-above")} data-testid="paused-mark">paused — you sent a message</p>
       ) : null}
     </li>
@@ -606,7 +606,6 @@ export function ChatPane() {
         thinking: frozen ? frozen.reasoning : live.reasoning,
         thought_seconds: live.thoughtSeconds,
         client_id: stamp,
-        interrupted: Boolean(frozen),
       },
       stamp,
       frozen?.replyId || replyId,

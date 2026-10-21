@@ -345,6 +345,27 @@ function replyFinishedWhole(chat: Chat | undefined, frozen?: FrozenReply): boole
   return !row.interrupted && !row.live;
 }
 
+/** A reply already on screen must not be replaced by a shorter copy of itself. */
+export function keepLongerReply(chat: Chat, replyId: string, text: string, reasoning = ""): Chat {
+  if (!replyId || !text) return chat;
+  const stamp = `live-${replyId}`;
+  let changed = false;
+  const messages = (chat.messages || []).map((item) => {
+    if (item.role !== "assistant") return item;
+    if (item.id !== replyId && item.client_id !== stamp) return item;
+    const content = (item.content || "").length >= text.length ? item.content || "" : text;
+    const thinking = (item.thinking || "").length >= reasoning.length ? item.thinking || "" : reasoning;
+    if (content === (item.content || "") && thinking === (item.thinking || "")) return item;
+    changed = true;
+    return { ...item, content, thinking };
+  });
+  return changed ? { ...chat, messages } : chat;
+}
+
+function pinLongerReply(botId: string, chatId: string, replyId: string, text: string, reasoning: string) {
+  queryClient.setQueryData<Chat>(["chat", botId, chatId], (chat) => (chat ? keepLongerReply(chat, replyId, text, reasoning) : chat));
+}
+
 /** Keep the row's key when a live reply becomes the saved one, so it does not remount. */
 export function holdShownReply(chat: Chat, frozen: FrozenReply | undefined): Chat {
   if (!frozen?.replyId) return chat;
@@ -368,6 +389,9 @@ function finish(flight: Flight, chat?: Chat) {
   // The reply finished whole. Keep the height that was on screen when the
   // user message landed, so the rest of the text does not push that message.
   let shown = chat;
+  if (shown && flight.frozen?.replyId && flight.frozen.text) {
+    shown = keepLongerReply(shown, flight.frozen.replyId, flight.frozen.text, flight.frozen.reasoning || "");
+  }
   if (replyFinishedWhole(shown, flight.frozen)) {
     if (shown && flight.frozen) shown = holdShownReply(shown, flight.frozen);
     flight.frozen = undefined;
@@ -411,7 +435,13 @@ function apply(event: Record<string, unknown>, flight: Flight) {
     const statusChanged = (live.run?.status || "") !== (run.status || "");
     const replyId = run.reply_id || live.replyId || "";
     const switched = Boolean(live.replyId && replyId && live.replyId !== replyId);
-    if (switched) flight.frozen = undefined;
+    if (switched) {
+      const kept = flight.frozen?.text || live.text || "";
+      const reason = flight.frozen?.reasoning || live.reasoning || "";
+      const oldId = flight.frozen?.replyId || live.replyId || "";
+      if (kept && oldId) pinLongerReply(flight.botId, flight.chatId, oldId, kept, reason);
+      flight.frozen = undefined;
+    }
     const keepPause = Boolean(flight.frozen && (live.label || "").startsWith("Paused") && !(run.current_step || "").startsWith("Paused"));
     remember(flight, carry(live, {
       label: keepPause ? live.label : (run.current_step || live.label),

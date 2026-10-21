@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { canResume, eventMatches, holdShownReply, noteSettled, resetStreamForTests, runIsFinished, type Flight } from "@/stream";
+import { canResume, eventMatches, holdShownReply, keepLongerReply, noteSettled, resetStreamForTests, runIsFinished, type Flight } from "@/stream";
 import type { Chat } from "@/types";
 
 function flight(runId = ""): Flight {
@@ -43,5 +43,18 @@ describe("server run state", () => {
     const held = holdShownReply(chat, { replyId: "a1", text: "x".repeat(80), reasoning: "" });
     expect(held.messages?.[0]?.content).toHaveLength(4000);
     expect(held.messages?.[0]?.client_id).toBe("live-a1");
+  });
+
+  it("does not replace a reply with a shorter copy", () => {
+    const chat = {
+      id: "chat",
+      bot_id: "bot",
+      title: "Chat",
+      messages: [{ id: "a1", role: "assistant", content: "x".repeat(4000) }],
+    } as Chat;
+    const kept = keepLongerReply(chat, "a1", "x".repeat(80));
+    expect(kept.messages?.[0]?.content).toHaveLength(4000);
+    const grown = keepLongerReply(chat, "a1", "y".repeat(4001));
+    expect(grown.messages?.[0]?.content).toHaveLength(4001);
   });
 });

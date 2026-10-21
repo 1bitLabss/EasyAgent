@@ -14,6 +14,7 @@
 - The transcript follows the bottom. A jump-to-latest button appears when you scroll up. Escape stops a running job. The up arrow recalls what you sent. Each chat keeps its draft across a reload. The caret comes back after Send, Stop, Retry, and Continue. Clocks tick in place.
 - A message that arrives while a reply is already being saved does not pause that reply, does not copy it, and does not post the "nothing was in flight" note. That message is answered next.
 - A message that lands on the last token does not cut a reply the model has already finished. That reply is saved whole, and the message is answered next. A reply that already has words stays on screen when you send, so your message does not jump.
+- Lines already on screen are not replaced by a shorter copy when the next turn starts. The pause mark appears only after that reply was actually paused.
 - If the page hears nothing for five seconds while the server is still writing, it logs that and catches up from the server.
 - The working line keeps its height when a reply finishes, so the view does not jump.
 

@@ -345,7 +345,7 @@ function replyFinishedWhole(chat: Chat | undefined, frozen?: FrozenReply): boole
   return !row.interrupted && !row.live;
 }
 
-/** The bubble above a new message stays the size it was. A longer save does not stretch it. */
+/** Keep the row's key when a live reply becomes the saved one, so it does not remount. */
 export function holdShownReply(chat: Chat, frozen: FrozenReply | undefined): Chat {
   if (!frozen?.replyId) return chat;
   const stamp = `live-${frozen.replyId}`;
@@ -353,17 +353,9 @@ export function holdShownReply(chat: Chat, frozen: FrozenReply | undefined): Cha
   const messages = (chat.messages || []).map((item) => {
     if (item.role !== "assistant") return item;
     if (item.id !== frozen.replyId && item.client_id !== stamp) return item;
-    const saved = item.content || "";
-    const shorter = saved.length > frozen.text.length + 8;
-    const clientId = item.client_id || stamp;
-    if (!shorter && clientId === item.client_id) return item;
+    if (item.client_id) return item;
     changed = true;
-    return {
-      ...item,
-      content: shorter ? frozen.text : saved,
-      thinking: shorter ? frozen.reasoning || item.thinking : item.thinking,
-      client_id: clientId,
-    };
+    return { ...item, client_id: stamp };
   });
   return changed ? { ...chat, messages } : chat;
 }

@@ -33,7 +33,7 @@ describe("server run state", () => {
     expect(canResume(stopped, flight("run-old")).retry).toBe(true);
   });
 
-  it("keeps the on-screen reply when the save is longer", () => {
+  it("keeps the row key when a live reply is saved", () => {
     const chat = {
       id: "chat",
       bot_id: "bot",
@@ -41,9 +41,7 @@ describe("server run state", () => {
       messages: [{ id: "a1", role: "assistant", content: "x".repeat(4000) }],
     } as Chat;
     const held = holdShownReply(chat, { replyId: "a1", text: "x".repeat(80), reasoning: "" });
-    expect(held.messages?.[0]?.content).toHaveLength(80);
+    expect(held.messages?.[0]?.content).toHaveLength(4000);
     expect(held.messages?.[0]?.client_id).toBe("live-a1");
-    const same = holdShownReply(chat, { replyId: "a1", text: "x".repeat(4000), reasoning: "" });
-    expect(same.messages?.[0]?.content).toHaveLength(4000);
   });
 });

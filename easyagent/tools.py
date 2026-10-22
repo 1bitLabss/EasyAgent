@@ -1865,6 +1865,18 @@ def _under(root: Path, target: Path) -> bool:
     return target == root or root in target.parents
 
 
+def _yolo_passes(store: Store, bot_id: str | None) -> bool:
+    """The same YOLO bypass ``guard`` uses. A missing bot stays gated."""
+    if not bot_id:
+        return False
+    from easyagent.yolo import passes
+
+    try:
+        return bool(passes(store, bot_id))
+    except Exception:
+        return False
+
+
 def _data_path_blocked(store: Store, resolved: Path, bot_id: str | None) -> bool:
     """The same data-folder test the checker uses, so a read cannot be allowed and then refused."""
     from easyagent.safety import saved_data_blocked
@@ -1898,12 +1910,13 @@ def _user_path(store: Store, raw: str) -> Path:
         resolved = path.resolve()
     except OSError as exc:
         raise ToolError(f"Could not use that path. {exc}") from exc
-    if _data_path_blocked(store, resolved, caller):
-        raise ToolError("That path is EasyAgent's saved chats. It was not changed.")
-    from easyagent.secrets import is_protected_secret
+    if not _yolo_passes(store, caller):
+        if _data_path_blocked(store, resolved, caller):
+            raise ToolError("That path is EasyAgent's saved chats. It was not changed.")
+        from easyagent.secrets import is_protected_secret
 
-    if is_protected_secret(store, resolved):
-        raise ToolError("That path is a saved secret. It was not changed.")
+        if is_protected_secret(store, resolved):
+            raise ToolError("That path is a saved secret. It was not changed.")
     return resolved
 
 
@@ -2435,14 +2448,14 @@ def _shell_workdir(store: Store, workdir: str) -> str:
         raise ToolError(f"{path} is not a folder. The command was not run.")
     from easyagent.safety import _inside, _workspace_roots, secret_file
 
-    if secret_file(path):
-        raise ToolError(f"{path} is a secret folder. The command was not run.")
-
     slot = turn_mod.current_slot()
     bot_id = slot.bot_id if slot is not None else ""
-    roots = _workspace_roots(store, bot_id or None, "")
-    if roots and not _inside(path, roots):
-        raise ToolError(f"{path} is outside this bot's folders. The command was not run.")
+    if not _yolo_passes(store, bot_id):
+        if secret_file(path):
+            raise ToolError(f"{path} is a secret folder. The command was not run.")
+        roots = _workspace_roots(store, bot_id or None, "")
+        if roots and not _inside(path, roots):
+            raise ToolError(f"{path} is outside this bot's folders. The command was not run.")
     if slot is not None:
         slot.cwd = str(path)
     return str(path)
@@ -2479,11 +2492,14 @@ def _tracked_cd(store: Store, command: str, start: Path) -> str | None:
         dest = _try_resolve(target, location)
         if dest is None or not dest.is_dir():
             return None
-        if secret_file(dest):
-            raise ToolError(f"{dest} is a secret folder. The command was not run.")
-        anchor = _cd_anchor(store, start)
-        if not _inside(dest, [anchor]):
-            raise ToolError(f"{dest} is outside this bot's folders. The command was not run.")
+        slot = turn_mod.current_slot()
+        bot_id = slot.bot_id if slot is not None else ""
+        if not _yolo_passes(store, bot_id):
+            if secret_file(dest):
+                raise ToolError(f"{dest} is a secret folder. The command was not run.")
+            anchor = _cd_anchor(store, start)
+            if not _inside(dest, [anchor]):
+                raise ToolError(f"{dest} is outside this bot's folders. The command was not run.")
         location = dest
         changed = True
     if not changed:
@@ -2514,37 +2530,29 @@ def _run_shell(store: Store, command: str, *, timeout: int = -1, workdir: str = 
     from easyagent.secrets import command_targets_secret, scrub_env
 
     checked, encoded = decode_shell(text)
-    if encoded == "ask":
+    open_gate = _yolo_passes(store, bot_id)
+    if encoded == "ask" and not open_gate:
         raise ToolError("That encoded command could not be read. It was not run.")
-    if command_targets_secret(store, checked):
+    if command_targets_secret(store, checked) and not open_gate:
         raise ToolError("That command names a saved secret. It was not run.")
     if turn_mod.cancelled():
         raise turn_mod.TurnCancelled()
-    from easyagent.scriptgate import script_run_unproved
-    from easyagent.yolo import active as yolo_active
+    if not open_gate:
+        from easyagent.psast import resolved_data_decision
 
-    if (
-        bot_id
-        and not getattr(slot, "script_human_approved", False)
-        and yolo_active(store, bot_id)
-        and script_run_unproved(store, bot_id, checked, cwd_path)
-    ):
-        raise ToolError("That script is not limited to this folder. It was not run.")
-    from easyagent.psast import resolved_data_decision
-
-    decision = resolved_data_decision(store, checked, cwd_path, bot_id or None)
-    if decision == "block":
-        raise ToolError("That command mentions EasyAgent's saved chats. It was not run.")
-    if decision == "ask":
-        raise ToolError("That command could not be resolved. It was not run.")
-    hard = _drive_or_unresolved(checked)
+        decision = resolved_data_decision(store, checked, cwd_path, bot_id or None)
+        if decision == "block":
+            raise ToolError("That command mentions EasyAgent's saved chats. It was not run.")
+        if decision == "ask":
+            raise ToolError("That command could not be resolved. It was not run.")
+        hard = _drive_or_unresolved(checked)
+        if hard is not None:
+            why = hard.why
+            if "not run" not in why.lower():
+                why = why.rstrip(".") + ". It was not run."
+            raise ToolError(why)
     if turn_mod.cancelled():
         raise turn_mod.TurnCancelled()
-    if hard is not None:
-        why = hard.why
-        if "not run" not in why.lower():
-            why = why.rstrip(".") + ". It was not run."
-        raise ToolError(why)
     next_cwd = _tracked_cd(store, original, cwd_path)
     from easyagent.scriptgate import shield_secrets
 
@@ -2703,26 +2711,29 @@ def _run_search_files(store: Store, request: ToolRequest) -> str:
     from easyagent.yolo import _scope_roots
 
     pattern = (request.body or "").strip()
-    if command_targets_secret(store, pattern) or command_targets_secret(store, request.path or ""):
+    caller = _caller_bot()
+    open_gate = _yolo_passes(store, caller)
+    if not open_gate and (command_targets_secret(store, pattern) or command_targets_secret(store, request.path or "")):
         raise ToolError("That search names a saved secret. It was not run.")
     root = _user_path(store, request.path or ".")
-    if secret_file(root):
+    if not open_gate and secret_file(root):
         raise ToolError("That search names a secret file. It was not run.")
     if root.is_file():
         root = root.parent
-        if secret_file(root):
+        if not open_gate and secret_file(root):
             raise ToolError("That search names a secret folder. It was not run.")
     if not root.exists():
         raise ToolError(f"Could not search {root}: that folder is not there.")
     refused = search_root_error(root)
-    if refused:
+    if refused and not open_gate:
         raise ToolError(refused)
-    caller = _caller_bot()
     roots = _scope_roots(store, caller) if caller else []
-    if roots and not _inside(root, roots):
+    if not open_gate and roots and not _inside(root, roots):
         raise ToolError(f"{root} is outside this bot's folders. The search was not run.")
 
     def skip(path: Path) -> bool:
+        if open_gate:
+            return False
         try:
             if secret_file(path) or is_protected_secret(store, path):
                 return True

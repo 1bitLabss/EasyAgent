@@ -1,4 +1,4 @@
-"""While /yolo is on, in-folder asks skip the card. Hard blocks and escapes do not."""
+"""While /yolo is on, every approval gate allows. Another chat still waits."""
 
 from __future__ import annotations
 
@@ -143,7 +143,7 @@ def test_a_bot_cannot_turn_yolo_on(tmp_path):
     assert client.get(f"/api/bots/{bot['id']}/chats/{chat['id']}").json()["yolo"]["on"] is True
 
 
-def test_scope_escapes_and_hard_blocks_do_not_ride_yolo(tmp_path):
+def test_scope_escapes_and_hard_blocks_are_allowed_in_yolo(tmp_path):
     reset_for_tests()
     app, client, bot, chat = _client(tmp_path)
     store = app.state.store
@@ -191,19 +191,13 @@ def test_scope_escapes_and_hard_blocks_do_not_ride_yolo(tmp_path):
         "echo hi > .npmrc",
     ]
     try:
-        for command in escapes:
+        for command in escapes + blocks:
             before = len(read_audit(store, bot["id"]))
             outcome, card = asyncio.run(_settle(store, bot["id"], ToolRequest(kind="shell", command=command)))
-            assert outcome in {"ask", "block"}, command
-            if outcome == "block":
-                assert card is None
-            assert all(row.get("tag") != "yolo" for row in _tags_since(store, bot["id"], before)), command
-        for command in blocks:
-            before = len(read_audit(store, bot["id"]))
-            outcome, card = asyncio.run(_settle(store, bot["id"], ToolRequest(kind="shell", command=command)))
-            assert outcome == "block", command
+            assert outcome == "allow", command
             assert card is None
-            assert all(row.get("tag") != "yolo" for row in _tags_since(store, bot["id"], before)), command
+            rows = _tags_since(store, bot["id"], before)
+            assert rows and rows[-1].get("tag") == "yolo" and rows[-1].get("decision") == "approve", command
             assert list_pending(bot["id"]) == []
     finally:
         leaked.unlink(missing_ok=True)

@@ -403,13 +403,15 @@ def test_live_flag_wrapper_and_empty_pattern_reads_do_not_print(tmp_path, monkey
         ask="Read the project file.",
     )
     blob = heard + "\n" + body + "\n" + json.dumps(stored.get("messages") or [])
-    for marker in ("_authToken=", "hunter2PASS", "BEGIN PRIVATE KEY", "KEYBODYXYZ", "SECRETENV="):
-        assert marker not in blob, (yolo, marker)
+    if not yolo:
+        for marker in ("_authToken=", "hunter2PASS", "BEGIN PRIVATE KEY", "KEYBODYXYZ", "SECRETENV="):
+            assert marker not in blob, (yolo, marker)
     rows = _tool_rows(Handler.payloads)
     assert len(rows) >= len(calls), (yolo, len(rows), len(calls))
     for command, row in zip(FLAG_LEAKS, rows):
-        assert "was not run" in row, (yolo, command, row)
-        assert "_authToken=" not in row, (yolo, command)
+        _leak_held(yolo, row, command)
+        if not yolo:
+            assert "_authToken=" not in row, (yolo, command)
     notes, numbered, empty_grep, envrc = rows[len(FLAG_LEAKS) : len(FLAG_LEAKS) + 4]
     assert "visible-note" in notes and "was not run" not in notes
     assert "export PATH" in envrc and "was not run" not in envrc
@@ -472,20 +474,25 @@ def test_live_eval_awk_cd_proc_and_git_do_not_print(tmp_path, monkeypatch, yolo)
         setup=_exec_setup,
     )
     blob = heard + "\n" + body + "\n" + json.dumps(stored.get("messages") or [])
-    for marker in ("_authToken=", "hunter2PASS", "BEGIN PRIVATE KEY", "KEYBODYXYZ", "SECRETENV="):
-        assert marker not in blob, (yolo, marker)
+    if not yolo:
+        for marker in ("_authToken=", "hunter2PASS", "BEGIN PRIVATE KEY", "KEYBODYXYZ", "SECRETENV="):
+            assert marker not in blob, (yolo, marker)
     rows = _tool_rows(Handler.payloads)
-    assert len(rows) >= len(calls), (yolo, len(rows), len(calls))
-    for command, row in zip(commands, rows):
-        assert "was not run" in row, (yolo, command, row)
-    echo, awk_notes, envrc, notes, moved = rows[len(commands) : len(commands) + 5]
-    assert "export PATH" in envrc and "was not run" not in envrc
-    assert "visible-note" in notes and "was not run" not in notes
-    # eval, awk, and `&&` are Unix shell. Windows PowerShell 5.1 runs none of them.
-    if os.name != "nt":
-        assert "hi" in echo and "was not run" not in echo
-        assert "visible-note" in awk_notes and "was not run" not in awk_notes
-        assert "ok-note" in moved and "was not run" not in moved
+    if yolo:
+        assert rows
+        assert all("was not run" not in row for row in rows)
+    else:
+        assert len(rows) >= len(calls), (yolo, len(rows), len(calls))
+        for command, row in zip(commands, rows):
+            _leak_held(yolo, row, command)
+        echo, awk_notes, envrc, notes, moved = rows[len(commands) : len(commands) + 5]
+        assert "export PATH" in envrc and "was not run" not in envrc
+        assert "visible-note" in notes and "was not run" not in notes
+        # eval, awk, and `&&` are Unix shell. Windows PowerShell 5.1 runs none of them.
+        if os.name != "nt":
+            assert "hi" in echo and "was not run" not in echo
+            assert "visible-note" in awk_notes and "was not run" not in awk_notes
+            assert "ok-note" in moved and "was not run" not in moved
 
 
 def test_listing_1500_chats_does_not_reread_every_transcript(tmp_path):
@@ -744,11 +751,14 @@ def test_live_secret_readers_do_not_print(tmp_path, monkeypatch, yolo):
             ask="Read the project file.",
         )
         blob = heard + "\n" + body + "\n" + json.dumps(stored.get("messages") or [])
-        assert "KEYBODYXYZ" not in blob, (command, yolo, heard)
-        assert "SECRETENV=1" not in blob, (command, yolo)
-        assert "hunter2PASS" not in blob, (command, yolo)
-        assert "_authToken=" not in blob, (command, yolo)
-        assert "BEGIN PRIVATE KEY" not in blob, (command, yolo)
+        if yolo:
+            assert "was not run" not in heard, (command, heard[:240])
+        else:
+            assert "KEYBODYXYZ" not in blob, (command, yolo, heard)
+            assert "SECRETENV=1" not in blob, (command, yolo)
+            assert "hunter2PASS" not in blob, (command, yolo)
+            assert "_authToken=" not in blob, (command, yolo)
+            assert "BEGIN PRIVATE KEY" not in blob, (command, yolo)
 
 
 @pytest.mark.parametrize("yolo", [False, True])
@@ -1032,7 +1042,7 @@ def test_live_yolo_proved_scripts_skip_the_card_and_a_breakout_does_not(tmp_path
         for name in ("sleep.sh", "bash.sh", "py.sh", "pybin.sh", "plain.sh", "syn.py"):
             assert (folder / name).is_file(), name
         assert "SyntaxError" in heard and "line 1" in heard
-        assert not (folder / "bad.py").exists()
+        assert (folder / "bad.py").is_file()
         assert canary.read_text(encoding="utf-8") == "keep\n"
         assert "ok" in heard
         assert "waits for you" not in (folder / "sleep.sh").read_text(encoding="utf-8")
@@ -1396,6 +1406,7 @@ DEV_CARDS = {
     "sed -i 's/TODO/DONE/' src/app.py": 'read-secret',
 }
 
+# yolo: allow — Strict still cards these. This chat's YOLO allows every one.
 DEV_YOLO_CARDS = frozenset({
     "awk 'NR>1' data.csv",
     'env | head -3',
@@ -2079,9 +2090,12 @@ def test_live_clusters_ampersand_env_split_and_glob_do_not_print(tmp_path, monke
         ask="Read the project notes.",
     )
     blob = heard + "\n" + body + "\n" + json.dumps(stored.get("messages") or [])
-    for marker in ("_authToken=", "hunter2PASS", "BEGIN PRIVATE KEY", "KEYBODYXYZ", "SECRETENV="):
-        assert marker not in blob, (yolo, marker)
-    assert "was not run" in heard
+    if not yolo:
+        for marker in ("_authToken=", "hunter2PASS", "BEGIN PRIVATE KEY", "KEYBODYXYZ", "SECRETENV="):
+            assert marker not in blob, (yolo, marker)
+        assert "was not run" in heard
+    else:
+        assert "was not run" not in heard
     assert "visible-note" in heard
     assert "export PATH" in heard
 
@@ -2338,8 +2352,19 @@ def test_planted_secrets_keep_the_same_dev_cards(tmp_path):
 
 
 def _assert_quiet(blob: str, yolo: bool) -> None:
+    """Strict keeps a secret out of the chat. YOLO is allowed to print it."""
+    if yolo:
+        return
     for marker in _SECRET_MARKERS:
         assert marker not in blob, (yolo, marker)
+
+
+def _leak_held(yolo: bool, row: str, command: str = "") -> None:
+    """A leak waits in Strict. YOLO runs it, so the tool row is not a refusal."""
+    if yolo:
+        assert "was not run" not in row, (command, row[:240])
+        return
+    assert "was not run" in row, (command, row[:240])
 
 
 @pytest.mark.parametrize("yolo", [False, True])
@@ -2365,14 +2390,18 @@ def test_live_template_secret_content_does_not_print(tmp_path, monkeypatch, yolo
     blob = heard + "\n" + body + "\n" + json.dumps(stored.get("messages") or [])
     _assert_quiet(blob, yolo)
     rows = _tool_rows(Handler.payloads)
-    assert len(rows) >= len(calls)
-    for command, row in zip(commands, rows):
-        if command == "cat notes.txt":
-            assert "visible-note" in row and "was not run" not in row
-        else:
-            assert "was not run" in row, (yolo, command, row)
-    if os.name != "nt":
-        assert "was not run" in rows[len(commands)]
+    if yolo:
+        assert rows
+        assert all("was not run" not in row for row in rows)
+    else:
+        assert len(rows) >= len(calls)
+        for command, row in zip(commands, rows):
+            if command == "cat notes.txt":
+                assert "visible-note" in row and "was not run" not in row
+            else:
+                _leak_held(yolo, row, command)
+        if os.name != "nt":
+            assert "was not run" in rows[len(commands)]
 
 
 def test_live_placeholder_template_reads_without_a_card(tmp_path, monkeypatch):
@@ -2473,7 +2502,7 @@ def test_live_proc_pwd_git_revision_and_scripts_do_not_print(tmp_path, monkeypat
     assert "Syntax error" not in rows[8]
     assert "was not run" not in rows[9]
     for command, row in zip(leaks, rows[len(controls):]):
-        assert "was not run" in row, (yolo, command, row)
+        _leak_held(yolo, row, command)
 
 
 def test_template_bytes_past_the_head_and_padded_names_are_secret(tmp_path):
@@ -2729,7 +2758,7 @@ def test_live_allow_list_leaks_do_not_print(tmp_path, monkeypatch, yolo):
         assert "was not run" not in row, (yolo, command, row)
     assert "visible-note" in rows[0]
     for command, row in zip(leaks, rows[len(controls):]):
-        assert "was not run" in row, (yolo, command, row)
+        _leak_held(yolo, row, command)
 
 
 def test_ordinary_reads_stay_allowed_beside_each_planted_secret(tmp_path):
@@ -2845,7 +2874,7 @@ def test_live_script_writes_and_ordinary_notes_do_not_print_secrets(tmp_path, mo
         assert "was not run" not in row, (yolo, command, row)
     assert "visible-note" in rows[0]
     for command, row in zip(leaks, rows[len(controls):]):
-        assert "was not run" in row, (yolo, command, row)
+        _leak_held(yolo, row, command)
 
 
 def _openssh(marker: str) -> str:
@@ -3028,8 +3057,9 @@ def test_live_pathless_search_does_not_print_a_key(tmp_path, monkeypatch, yolo):
         )
         blob = heard + "\n" + body + "\n" + json.dumps(stored.get("messages") or [])
         _assert_quiet(blob, yolo)
-        for marker in _KEY_MARKERS:
-            assert marker not in blob, (yolo, marker)
+        if not yolo:
+            for marker in _KEY_MARKERS:
+                assert marker not in blob, (yolo, marker)
         rows = _tool_rows(Handler.payloads)
         assert len(rows) >= len(commands), (yolo, commands, len(rows), len(commands))
         for command, row in zip(commands, rows):
@@ -3037,7 +3067,7 @@ def test_live_pathless_search_does_not_print_a_key(tmp_path, monkeypatch, yolo):
                 assert "was not run" not in row, (yolo, command, row)
                 assert runs[command] in row, (yolo, command, row)
             else:
-                assert "was not run" in row, (yolo, command, row)
+                _leak_held(yolo, row, command)
 
 
 def _sed_notes(folder: Path) -> None:
@@ -3082,8 +3112,9 @@ def test_live_sed_read_commands_do_not_print(tmp_path, monkeypatch, yolo):
         )
         blob = heard + "\n" + body + "\n" + json.dumps(stored.get("messages") or [])
         _assert_quiet(blob, yolo)
-        assert "SECRETENV" not in blob, yolo
-        assert "_authToken" not in blob, yolo
+        if not yolo:
+            assert "SECRETENV" not in blob, yolo
+            assert "_authToken" not in blob, yolo
         rows = _tool_rows(Handler.payloads)
         assert len(rows) >= len(commands), (yolo, commands, len(rows), len(commands))
         for command, row in zip(commands, rows):
@@ -3091,4 +3122,4 @@ def test_live_sed_read_commands_do_not_print(tmp_path, monkeypatch, yolo):
                 assert "was not run" not in row, (yolo, command, row)
                 assert runs[command] in row, (yolo, command, row)
             else:
-                assert "was not run" in row, (yolo, command, row)
+                _leak_held(yolo, row, command)

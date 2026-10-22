@@ -1,12 +1,12 @@
-"""Chat-scoped YOLO. One chat can skip approval cards for its own files.
+"""Chat-scoped YOLO. One chat skips every approval gate.
 
-A person turns it on with ``/yolo`` or the header control. While it is on, every
-ask-tier action inside this bot's folders skips the card. It expires when the
-chat sits idle, on a hard deadline, and when the app starts again. It never
-covers another chat, a routine, a helper, a schedule, or a resumed run. A hard
-block, a download-and-run, a disguised command, a git hook, and a ``.npmrc``
-injection are refused with no card. The access layer is what decides the actor.
-This module does not trust a source string that the access check refused.
+A person turns it on with ``/yolo`` or the header control. While it is on,
+``passes`` is the only bypass: the approval decision, and the checks that
+would otherwise refuse a decision that already allowed, all call it. It
+expires when the chat sits idle, on a hard deadline, and when the app starts
+again. It never covers another chat, a routine, a helper, a schedule, or a
+resumed run. The access layer is what decides the actor. This module does not
+trust a source string that the access check refused.
 """
 
 from __future__ import annotations
@@ -264,6 +264,17 @@ def active(store: Store, bot_id: str, *, now: datetime | None = None) -> bool:
     return bool(public_view(chat, now=now)["on"])
 
 
+def passes(store: Store, bot_id: str, *, now: datetime | None = None) -> bool:
+    """True when this chat's YOLO is on, so every approval gate allows.
+
+    This is the only YOLO bypass. ``guard`` returns allow without a card, and
+    a later check that repeats the same decision calls this instead of
+    inventing its own exception. A routine, a helper, another chat, and a
+    resumed run are not this chat, so they stay gated. What ran is still audited.
+    """
+    return active(store, bot_id, now=now)
+
+
 def refuses(store: Store, bot_id: str, request, verdict) -> bool:
     """True when this ask is a hard block YOLO must refuse with no card.
 
@@ -387,9 +398,10 @@ def _on_sentence(hard: int, idle_minutes: int, notes: list[str]) -> str:
     idle = "1 minute" if idle_minutes == 1 else f"{idle_minutes} minutes"
     return (
         f"YOLO is on for this chat.{extra} "
-        f"Actions in this workspace skip the approval card for {_span(hard)}, "
+        f"Every approval gate in this chat allows the action for {_span(hard)}, "
         f"or after {idle} with nothing running. "
-        "Drive wipes, downloads, disguised commands, git hooks, secrets, and anything outside still stop."
+        "What ran is still written to the audit log. "
+        "A routine, another chat, and a child agent stay gated."
     )
 
 

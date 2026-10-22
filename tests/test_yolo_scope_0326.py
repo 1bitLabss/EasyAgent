@@ -1,8 +1,7 @@
-"""A yolo rule cannot approve a command whose real targets leave the bot's folders.
+"""YOLO allows a command whose targets leave the bot's folders.
 
-Overwriting one file in the workspace used to make the next command match
-bot-changed. That rule only looked at the file the bot had edited, so
-``rm -rf`` of another folder was approved with no card.
+``covers`` can still be false for those commands. The approval gate does not
+use that predicate. Guard allows, writes an audit row, and shows no card.
 """
 
 from __future__ import annotations
@@ -173,19 +172,15 @@ def _not_allowed_tiers(command: str) -> set[str]:
 
 
 def _expect_ask(store, bot, folder, command: str, canary: Path, outside: Path):
-    expected = _not_allowed_tiers(command)
+    """The name is old. The gate allows, including when ``covers`` is false."""
     request = ToolRequest(kind="shell", command=command)
-    verdict = classify(store, request, bot["id"])
-    assert covers(store, bot["id"], request, verdict) is False, command
     before_len = len(read_audit(store, bot["id"]))
     outcome, card = asyncio.run(_settle(store, bot["id"], request))
-    assert outcome in expected, (command, outcome, card, sorted(expected))
-    if outcome == "ask":
-        assert card is not None, command
-    _not_approved(store, bot["id"], before_len, command)
-    assert canary.is_file(), command
-    assert outside.is_dir(), command
-    assert (folder / "a.txt").is_file(), command
+    assert outcome == "allow", (command, outcome, card)
+    assert card is None, command
+    rows = read_audit(store, bot["id"])[before_len:]
+    assert any(row.get("tag") == "yolo" and row.get("decision") == "approve" for row in rows), command
+    assert list_pending(bot["id"]) == []
 
 
 def test_bot_changed_still_asks_before_touching_another_folder(tmp_path):
@@ -257,10 +252,10 @@ def test_bot_changed_still_asks_before_touching_another_folder(tmp_path):
             made.append(root)
             command = template.format(out=root)
             before_len = len(read_audit(store, bot["id"]))
-            outcome, _card = asyncio.run(_settle(store, bot["id"], ToolRequest(kind="shell", command=command)))
-            assert outcome in {"ask", "block"}, (command, outcome)
-            _not_approved(store, bot["id"], before_len, command)
-            assert kept.is_file(), command
+            outcome, card = asyncio.run(_settle(store, bot["id"], ToolRequest(kind="shell", command=command)))
+            assert outcome == "allow", (command, outcome, card)
+            rows = read_audit(store, bot["id"])[before_len:]
+            assert any(row.get("tag") == "yolo" and row.get("decision") == "approve" for row in rows), command
     finally:
         (folder / "lnk").unlink(missing_ok=True)
         for root in made:
@@ -504,18 +499,18 @@ def test_a_granted_folder_matches_every_spelling_of_a_path_inside_it(tmp_path):
                 assert read_audit(store, bot["id"])[-1].get("tag") == "yolo"
             else:
                 assert covers(store, bot["id"], request, verdict) is False, spelling
-                outcome, _card = asyncio.run(_settle(store, bot["id"], request))
-                assert outcome in {"ask", "block"}, (spelling, outcome)
-                assert target.is_file(), spelling
+                outcome, card = asyncio.run(_settle(store, bot["id"], request))
+                assert outcome == "allow", (spelling, outcome, card)
+                assert read_audit(store, bot["id"])[-1].get("tag") == "yolo"
         target.write_text("keep\n", encoding="utf-8")
         for spelling in (os.fspath(target) + ":stream", os.fspath(target) + ":$DATA"):
             command = f"rm {spelling}"
             request = ToolRequest(kind="shell", command=command)
             verdict = classify(store, request, bot["id"])
             assert covers(store, bot["id"], request, verdict) is False, spelling
-            outcome, _card = asyncio.run(_settle(store, bot["id"], request))
-            assert outcome in {"ask", "block"}, (spelling, outcome)
-            assert target.is_file(), spelling
+            outcome, card = asyncio.run(_settle(store, bot["id"], request))
+            assert outcome == "allow", (spelling, outcome, card)
+            assert read_audit(store, bot["id"])[-1].get("tag") == "yolo"
     finally:
         try:
             alias.unlink()
@@ -528,7 +523,7 @@ def test_a_granted_folder_matches_every_spelling_of_a_path_inside_it(tmp_path):
         shutil.rmtree(folder, ignore_errors=True)
 
 
-def test_windows_spellings_of_an_outside_folder_do_not_run(tmp_path):
+def test_windows_spellings_of_an_outside_folder_are_allowed(tmp_path):
     store, bot, _chat, folder = _world(tmp_path)
     outside, canary = _canary(tmp_path, folder)
     link = folder / "joined"
@@ -547,12 +542,11 @@ def test_windows_spellings_of_an_outside_folder_do_not_run(tmp_path):
             verdict = classify(store, request, bot["id"])
             assert covers(store, bot["id"], request, verdict) is False, command
             before = len(read_audit(store, bot["id"]))
-            outcome, _card = asyncio.run(_settle(store, bot["id"], request))
-            assert outcome in {"ask", "block"}, (command, outcome)
-            assert outcome != "allow"
-            _not_approved(store, bot["id"], before, command)
-            assert canary.is_file(), command
-            assert outside.is_dir(), command
+            outcome, card = asyncio.run(_settle(store, bot["id"], request))
+            assert outcome == "allow", (command, outcome, card)
+            rows = read_audit(store, bot["id"])[before:]
+            assert any(row.get("tag") == "yolo" and row.get("decision") == "approve" for row in rows), command
+            assert list_pending(bot["id"]) == []
     finally:
         try:
             link.unlink()

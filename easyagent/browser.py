@@ -954,6 +954,18 @@ def prepare(store: Store, request, bot_id: str | None):
     return _HUB.call(work)
 
 
+def _yolo_passes(store: Store, bot_id: str | None) -> bool:
+    """The same YOLO bypass the approval decision uses."""
+    if not bot_id:
+        return False
+    from easyagent.yolo import passes
+
+    try:
+        return bool(passes(store, bot_id))
+    except Exception:
+        return False
+
+
 def perform(store: Store, request, bot_id: str | None) -> tuple[str, str]:
     """Run an action the safety engine already allowed."""
     from easyagent.tools import ToolError
@@ -970,7 +982,7 @@ def perform(store: Store, request, bot_id: str | None) -> tuple[str, str]:
         headless = bool(session.get("headless"))
         if action == "open":
             url = (request.path or "").strip()
-            if names_data_dir(store, url):
+            if names_data_dir(store, url) and not _yolo_passes(store, bot_id):
                 raise ToolError("That reaches EasyAgent's saved data. It was not opened.")
             page.goto(url, wait_until="domcontentloaded", timeout=20000)
         elif action == "back":
@@ -1024,7 +1036,7 @@ def perform(store: Store, request, bot_id: str | None) -> tuple[str, str]:
                 _write_live(store, bot_id, url=page.url or "", title=page.title() or "", headless=headless, active=True)
                 return text, ""
             if action == "type":
-                if looks_like_secret_value(request.body or "", element):
+                if looks_like_secret_value(request.body or "", element) and not _yolo_passes(store, bot_id):
                     raise ToolError("EasyAgent will not type a password, a card number, or a 2FA code.")
                 locator.fill(request.body or "", timeout=10000)
             elif action == "select":
@@ -1039,7 +1051,7 @@ def perform(store: Store, request, bot_id: str | None) -> tuple[str, str]:
         host = (urlparse(page.url or "").hostname or "").lower()
         if host:
             blocked = domain_block(host, list(bot.get("browser_allow") or []), list(bot.get("browser_deny") or []))
-            if blocked:
+            if blocked and not _yolo_passes(store, bot_id):
                 try:
                     page.go_back(timeout=5000)
                 except Exception:

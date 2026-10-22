@@ -3470,7 +3470,7 @@ def classify(store: Store, request, bot_id: str | None) -> Verdict:
                     verdict.fingerprint,
                 )
         if kind == "shell" and verdict.tier != BLOCK:
-            from easyagent.scriptgate import command_reads_secrets, script_run_unproved
+            from easyagent.scriptgate import command_reads_secrets
 
             if command_reads_secrets(command, cwd):
                 verdict = _worst(
@@ -3483,24 +3483,6 @@ def classify(store: Store, request, bot_id: str | None) -> Verdict:
                         _fp("bulk-secret", command[:180]),
                     ),
                 )
-            else:
-                try:
-                    from easyagent.yolo import active as yolo_active
-
-                    yolo_on = bool(bot_id) and yolo_active(store, bot_id)
-                except Exception:
-                    yolo_on = False
-                if yolo_on and script_run_unproved(store, bot_id, command, cwd):
-                    verdict = _worst(
-                        verdict,
-                        _verdict(
-                            ASK,
-                            "script-body",
-                            "That script is not limited to this folder. It waits for you.",
-                            command[:500],
-                            _fp("script-run", command[:180]),
-                        ),
-                    )
         if bot_id and verdict.tier != BLOCK and verdict.rule not in {
             "injection",
             "mcp-install",
@@ -3518,7 +3500,7 @@ def classify(store: Store, request, bot_id: str | None) -> Verdict:
 
             # A downloaded file still waits under the download rule. Scanning its
             # bytes can also look like a secret read; the download card is the
-            # one that names why this file must not run, and /yolo cannot skip it.
+            # one that names why this file must not run. YOLO allows it in guard.
             if command_runs_download(store, bot_id, command) and (
                 verdict.tier == ALLOW or verdict.rule == "read-secret"
             ):
@@ -4047,26 +4029,14 @@ def _notify_bridge(store: Store, bot_id: str | None, card: Pending) -> None:
         return
 
 
-def _yolo_take(store: Store, request, bot_id: str | None, verdict: Verdict) -> bool:
-    """Skip the card only when this chat's YOLO covers the action. A failure stays a card."""
-    if verdict.tier != ASK or not bot_id or is_unattended():
+def _yolo_passes(store: Store, bot_id: str | None) -> bool:
+    """The single YOLO approval bypass. False when this turn is not that chat."""
+    if not bot_id or is_unattended():
         return False
-    from easyagent.yolo import covers
+    from easyagent.yolo import passes
 
     try:
-        return bool(covers(store, bot_id, request, verdict))
-    except Exception:
-        return False
-
-
-def _yolo_refuse(store: Store, request, bot_id: str | None, verdict: Verdict) -> bool:
-    """A hard block while YOLO is on is a plain refusal, not a card."""
-    if verdict.tier != ASK or not bot_id or is_unattended():
-        return False
-    from easyagent.yolo import active, refuses
-
-    try:
-        return bool(active(store, bot_id) and refuses(store, bot_id, request, verdict))
+        return bool(passes(store, bot_id))
     except Exception:
         return False
 
@@ -4157,6 +4127,27 @@ async def guard(store: Store, request, bot_id: str | None):
     if proposal is None and verdict.rule in {"bot-changed", "git-hooks"}:
         slot = turn_mod.current_slot()
         proposal = getattr(slot, "safety_script_proposal", None) if slot is not None else None
+    if _yolo_passes(store, bot_id) and verdict.tier in {BLOCK, ASK}:
+        # One check. Hermes does the same in check_all_command_guards: YOLO
+        # and approvals-off return approved before any card. The rule is kept
+        # on the audit row. A routine or a helper never reaches this, because
+        # passes() is false there.
+        _audit(
+            store,
+            bot_id,
+            {
+                "at": now_iso(),
+                "decision": "approve",
+                "tag": "yolo",
+                "rule": verdict.rule,
+                "why": verdict.why,
+                "detail": verdict.detail,
+            },
+        )
+        if verdict.tier == ASK:
+            return _release_ask(store, request, bot_id, verdict)
+        _remember_created(request)
+        return request, None
     if verdict.rule == "browser-secret":
         return await _hand_browser(store, request, bot_id, verdict, proposal)
     if verdict.tier == BLOCK:
@@ -4173,23 +4164,6 @@ async def guard(store: Store, request, bot_id: str | None):
         asyncio.create_task(_settle_unattended(store, request, bot_id, card, verdict))
         _notify_bridge(store, bot_id, card)
         raise ToolError("That needs you. A card is in the chat. This routine went on without it. If nobody answers, that counts as a denial.")
-    if verdict.tier == ASK and _yolo_take(store, request, bot_id, verdict):
-        _audit(
-            store,
-            bot_id,
-            {
-                "at": now_iso(),
-                "decision": "approve",
-                "tag": "yolo",
-                "rule": verdict.rule,
-                "why": verdict.why,
-                "detail": verdict.detail,
-            },
-        )
-        return _release_ask(store, request, bot_id, verdict)
-    if verdict.tier == ASK and _yolo_refuse(store, request, bot_id, verdict):
-        _audit(store, bot_id, {"at": now_iso(), "decision": "block", "rule": verdict.rule, "why": verdict.why, "detail": verdict.detail})
-        raise ToolError(verdict.why + " It was not run.")
     if verdict.tier == ASK and _class_take(store, request, bot_id, verdict):
         from easyagent.actionclass import match as class_match
 

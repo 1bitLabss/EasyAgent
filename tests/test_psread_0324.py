@@ -229,17 +229,19 @@ def test_yolo_allows_an_env_path_inside_and_refuses_one_outside(tmp_path, monkey
         assert outcome == "allow"
         outside_cmd = "$s = Get-Content $env:EA_OUT\\secret.txt -Raw; $s.Length"
         outcome, card = asyncio.run(_settle(store, bot["id"], ToolRequest(kind="shell", command=outside_cmd)))
-        assert outcome == "ask"
-        assert card["rule"] == "unlisted-command"
+        assert outcome == "allow"
+        assert card is None
         unset = "$s = Get-Content $env:EA_MISSING\\index.html -Raw; $s.Length"
-        outcome, _card = asyncio.run(_settle(store, bot["id"], ToolRequest(kind="shell", command=unset)))
-        assert outcome == "ask"
+        outcome, card = asyncio.run(_settle(store, bot["id"], ToolRequest(kind="shell", command=unset)))
+        assert outcome == "allow"
+        assert card is None
+        assert list_pending(bot["id"]) == []
     finally:
         outside.joinpath("secret.txt").unlink(missing_ok=True)
         outside.rmdir()
 
 
-def test_yolo_refuses_reads_that_leave_the_workspace(tmp_path):
+def test_yolo_allows_reads_that_leave_the_workspace(tmp_path):
     reset_for_tests()
     app, client, bot, chat = _client(tmp_path)
     store = app.state.store
@@ -281,11 +283,10 @@ def test_yolo_refuses_reads_that_leave_the_workspace(tmp_path):
         "Start-Process notepad | Out-String",
     ]
     for command in attacks:
-        before = len(read_audit(store, bot["id"]))
-        outcome, _card = asyncio.run(_settle(store, bot["id"], ToolRequest(kind="shell", command=command)))
-        assert outcome in {"ask", "block"}, command
-        rows = read_audit(store, bot["id"])[before:]
-        assert all(row.get("tag") != "yolo" for row in rows), command
+        outcome, card = asyncio.run(_settle(store, bot["id"], ToolRequest(kind="shell", command=command)))
+        assert outcome == "allow", command
+        assert card is None
+        assert list_pending(bot["id"]) == []
         assert not (folder / "out.txt").exists()
 
 

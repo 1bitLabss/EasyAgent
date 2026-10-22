@@ -89,18 +89,18 @@ def test_a_normal_chat_streams_reasoning_and_the_check_note(tmp_path, monkeypatc
         joined = "".join(str(event.get("text") or "") for event in thinking)
         assert "field plan one." in joined
         assert "field plan two." in joined
-        assert "Checked. No problem found." in joined
+        assert "Checked. No problem found." not in joined
+        assert "Revising" not in body
         answer_at = body.index("The field reply is ready.")
-        note_at = body.index("Checked. No problem found.")
-        assert body.index("field plan one.") < answer_at < note_at
+        assert body.index("field plan one.") < answer_at
         stored = client.get(f"/api/bots/{bot['id']}/chats/{chat['id']}").json()
         assert len(client.get(f"/api/bots/{bot['id']}/chats").json()) == 1
         reply = stored["messages"][-1]
         assert "field plan one." in reply["thinking"]
-        assert "Checked. No problem found." in reply["thinking"]
+        assert "Checked. No problem found." not in (reply.get("thinking") or "")
         assert "field plan" not in reply["content"]
         assert reply["thought_seconds"] >= 1
-        assert reply.get("check") == "checked"
+        assert reply.get("check") != "checked"
 
         with client.stream("POST", url, json={"content": "reason-tags please"}, headers={"Accept": "text/event-stream"}) as response:
             assert response.status_code == 200, response.read()

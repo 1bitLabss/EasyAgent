@@ -1619,6 +1619,10 @@ def _step_excerpt(command: str, limit: int = 72) -> str:
 
 LOOP_TEXT = "The bot repeated itself without making progress, so I stopped it."
 REPEAT_LIMIT = 3
+# A runaway that only calls tools still answers. A long read, such as thirty
+# files, is under this and is not cut off.
+TURN_STEP_CAP = 200
+SEARCH_CAP = 2
 
 _STATUS_ONLY = re.compile(
     r"^(?:looking|thinking|revising|searching|remembering|connecting|asking|"
@@ -7684,27 +7688,10 @@ async def run_turn(
         return await _hold_for_dead_asset()
 
     async def _defect_continues(prose: str) -> bool:
-        if ledger is None or ledger.playbook not in {"research", "decide"} or ledger.defect_rounds >= 2:
-            return False
-        try:
-            verdict = await llm.complete(
-                base_url=base_url,
-                api_key=api_key,
-                model=model,
-                messages=[
-                    {"role": "system", "content": BREAKER_PROMPT},
-                    {"role": "user", "content": ledger.render() + "\n\nAnswer:\n" + (prose or "")},
-                ],
-            )
-        except llm.ProviderError:
-            ledger.used_breaker = True
-            return False
-        ledger.used_breaker = True
-        defect = judge_breaker(verdict)
-        if defect is None:
-            return False
-        ledger.add_defect(defect)
-        return True
+        # The done-gate does not start a review. Review runs once after the
+        # turn, and only for coding or a multi-step change.
+        del prose
+        return False
 
     def stuck_events(reason: str):
         if _keep_thinking():
@@ -7743,7 +7730,7 @@ async def run_turn(
             "result": (detail or "")[:1200],
         })
 
-    def _seal(final: str):
+    def _ledger_items():
         items = []
         for index, step in enumerate(steps):
             raw = raws[index] if index < len(raws) else ""
@@ -7751,11 +7738,15 @@ async def run_turn(
                 "kind": step.get("kind") or "",
                 "action": step.get("action") or "",
                 "path": step.get("path") or "",
+                "command": step.get("command") or "",
                 "ok": True,
                 "result": (raw or "")[:1200],
             })
         items.extend(fails)
-        yield "ledger", json.dumps(items)
+        return items
+
+    def _seal(final: str):
+        yield "ledger", json.dumps(_ledger_items())
         yield "final", final or ""
 
     def close(answer: str):
@@ -7869,7 +7860,12 @@ async def run_turn(
         return sum(1 for item in narration_hits if _near_line(item, spoken))
 
     model_slot = None
+    searches_run = 0
     while True:
+        if len(steps) >= TURN_STEP_CAP:
+            _note_heuristic("_steps", "the step cap is reached, so the turn answers with what it has")
+            yield "ledger", json.dumps(_ledger_items())
+            return
         if turn_mod.pause_requested():
             yield "pause", "Paused, reading your message"
             return
@@ -8597,6 +8593,10 @@ async def run_turn(
                 yield event
             return
         if query:
+            if searches_run >= SEARCH_CAP:
+                _note_heuristic("_search", "the search cap is reached, so the turn answers with what it has")
+                yield "ledger", json.dumps(_ledger_items())
+                return
             sig = ("search", query)
             if search_call is not None:
                 search_request = search_call
@@ -8628,6 +8628,7 @@ async def run_turn(
                 if resume:
                     continue
                 return
+            searches_run += 1
             try:
                 if model_slot is not None:
                     model_slot.sealing = False
@@ -8656,8 +8657,9 @@ async def run_turn(
                 continue
             if _found_nothing(findings) and empty_search_retries < 1:
                 alternate = _alternate_search_query(query)
-                if alternate and alternate.casefold() != query.casefold():
+                if alternate and alternate.casefold() != query.casefold() and searches_run < SEARCH_CAP:
                     empty_search_retries += 1
+                    searches_run += 1
                     _note_heuristic(
                         "_search",
                         "the search found nothing, so a different query runs once",
@@ -8684,9 +8686,11 @@ async def run_turn(
             if (
                 _live_release_ask(ask)
                 and release_retries < 1
+                and searches_run < SEARCH_CAP
                 and _hits_look_old(findings)
             ):
                 release_retries += 1
+                searches_run += 1
                 follow = _release_query(ask, followup=True)
                 _note_heuristic(
                     "_release",

@@ -8,11 +8,35 @@ At once line. A short reply with no tools is skipped.
 from __future__ import annotations
 
 import json
+import re
 
 from easyagent import llm
 from easyagent import turn as turn_mod
-from easyagent.judge import checks_enabled, check_revision_limit, parse_grade
+from easyagent.judge import checks_enabled, parse_grade
 from easyagent.store import Store, StoreError
+
+# A review is for work that changed something. A lookup is not that work.
+_LOOKUP_KINDS = frozenset({"search", "fetch", "research", "browser", "history"})
+_FILE_KINDS = frozenset({"files", "file", "project"})
+_WRITE_ACTIONS = frozenset({
+    "write", "edit", "create", "append", "patch", "delete", "remove",
+    "mkdir", "move", "rename", "trash",
+})
+_TEST_COMMAND = re.compile(
+    r"(?i)(?:^|[;&|`]\s*)"
+    r"(?:python(?:3)?\s+-m\s+(?:pytest|unittest)|pytest|py\.test|"
+    r"npm\s+(?:run\s+)?test|pnpm\s+(?:run\s+)?test|yarn\s+test|"
+    r"cargo\s+test|go\s+test|vitest|jest|ctest)\b"
+)
+_READ_SHELL = re.compile(
+    r"(?i)^\s*(?:sudo\s+)?"
+    r"(?:ls|dir|cat|type|head|tail|pwd|wc|stat|file|which|whoami|date|"
+    r"true|false|echo|printf|rg|grep|find|git\s+(?:status|log|diff|show|blame))\b"
+)
+_MUTATING_SHELL = re.compile(
+    r"(?i)(?:>>?|\btee\b|\brm\b|\bmv\b|\bcp\b|\bmkdir\b|\btouch\b|"
+    r"\bpip3?\s+install\b|\bnpm\s+install\b|\bapt(?:-get)?\s+install\b)"
+)
 
 CHECK_PROMPT = (
     "EASYAGENT_CHECK_V1\n"
@@ -43,6 +67,69 @@ def _bot(store: Store, bot_id: str | None) -> dict | None:
         return store.get_bot(bot_id)
     except StoreError:
         return None
+
+
+def _step(item) -> dict:
+    return item if isinstance(item, dict) else {}
+
+
+def _command_text(step: dict) -> str:
+    return " ".join(str(step.get("command") or "").split())
+
+
+def _edited_or_tested(step: dict) -> bool:
+    """A file was written or a test command ran. A failed attempt did not."""
+    if step.get("ok") is False:
+        return False
+    kind = str(step.get("kind") or "")
+    action = str(step.get("action") or "").lower()
+    if kind in _FILE_KINDS and action in _WRITE_ACTIONS:
+        return True
+    if kind in {"shell", "ssh", "windows"} and _TEST_COMMAND.search(_command_text(step)):
+        return True
+    return False
+
+
+def _changed_state(step: dict) -> bool:
+    """A tool that changed the machine. A read, a search, and a fetch do not."""
+    if step.get("ok") is False:
+        return False
+    if _edited_or_tested(step):
+        return True
+    kind = str(step.get("kind") or "")
+    action = str(step.get("action") or "").lower()
+    if kind in _LOOKUP_KINDS:
+        return False
+    if kind in _FILE_KINDS:
+        return action in _WRITE_ACTIONS
+    if kind == "memory" and action not in {"", "read", "list"}:
+        return True
+    if kind in {"shell", "ssh", "windows"}:
+        command = _command_text(step)
+        if not command:
+            return False
+        if _MUTATING_SHELL.search(command):
+            return True
+        if _READ_SHELL.search(command):
+            return False
+        return True
+    return False
+
+
+def review_budget(steps) -> int:
+    """How many review passes this turn gets. The answer is 0 or 1.
+
+    A chat question, a web lookup, a search-and-answer, and a single file
+    read get none. Coding gets one: the turn edited or created a file, or
+    ran tests. A multi-step task gets one when three or more steps changed
+    state. The result is never more than one, and a later pass cannot ask again.
+    """
+    rows = [_step(item) for item in steps or []]
+    if any(_edited_or_tested(row) for row in rows):
+        return 1
+    if sum(1 for row in rows if _changed_state(row)) >= 3:
+        return 1
+    return 0
 
 
 def should_skip(reply: str, tools: list) -> bool:
@@ -135,113 +222,217 @@ async def _grade(
     return parse_grade(text)
 
 
-async def review_turn(run_turn, **kwargs):
-    """Run the turn, then grade the draft with this bot's model. At most two revisions."""
-    store: Store = kwargs["store"]
-    bot = _bot(store, kwargs.get("bot_id"))
-    enabled = _force_check or checks_enabled(bot)
-    if not enabled:
-        async for kind, text in run_turn(**kwargs):
-            if kind == "ledger":
-                continue
-            yield kind, text
-        return
-    limit = check_revision_limit(bot)
-    current = list(kwargs.get("messages") or [])
-    revisions = 0
-    pending = ""
-    while True:
-        turn_mod.raise_if_cancelled()
-        final = ""
-        ledger_raw = "[]"
-        call = dict(kwargs)
-        call["messages"] = current
-        async for kind, text in run_turn(**call):
-            if kind == "loop":
-                yield kind, text
-                return
-            if kind == "ledger":
-                ledger_raw = text or "[]"
-                continue
-            if kind == "final":
-                final = text
-                continue
-            yield kind, text
-        tools, tool_text = _tool_text(ledger_raw)
-        request = _request_text(list(kwargs.get("messages") or []))
-        if should_skip(final, tools):
-            if revisions:
-                await _offer_revision(store, bot, request, final, revisions)
-                yield "check", json.dumps({"badge": "revised", "problems": []})
-                yield "face", "sad"
-            lesson = _close_learning(
-                store, kwargs.get("bot_id"), kwargs.get("chat_id"), request, final, tools, None, revisions
-            ) or pending
-            if lesson.startswith("Learned:"):
-                yield "lesson", lesson
-            yield "final", final
+ANSWER_NOW = (
+    "Answer the user now with what you have. "
+    "Do not call a tool. Do not ask another bot. "
+    "Write the answer in your own words."
+)
+NO_ANSWER = "The turn ended before an answer was written."
+_FENCE = re.compile(r"```.*?```", re.DOTALL)
+
+
+class _Held:
+    """What one run_turn produced. An async generator cannot return this."""
+
+    def __init__(self) -> None:
+        self.stopped = False
+        self.loop = False
+        self.loop_text = ""
+        self.final = ""
+        self.ledger = "[]"
+
+
+def _plain_answer(text: str) -> str:
+    _hidden, answer = llm.peel_thinking(text or "")
+    return _FENCE.sub("", answer or "").strip()
+
+
+def _child_reply(text: str, tools: list) -> bool:
+    """True when the words are another bot's reply, not this bot's own answer.
+
+    A parent answer may quote that reply and add its own words. Those words
+    stay. An answer that is only the other bot's text does not.
+    """
+    spoken = " ".join(_plain_answer(text).split())
+    if not spoken:
+        return False
+    for item in tools or []:
+        if not isinstance(item, dict) or item.get("kind") != "delegate":
+            continue
+        result = " ".join(str(item.get("result") or "").split())
+        if result and (spoken == result or spoken in result):
+            return True
+    return False
+
+
+def _usable(text: str, tools: list) -> str:
+    """A reply the user can be shown. Empty and a copied child reply are not."""
+    raw = text or ""
+    if not raw.strip():
+        return ""
+    if _child_reply(raw, tools):
+        return ""
+    return raw
+
+
+async def _drive(run_turn, call, held: _Held):
+    async for kind, text in run_turn(**call):
+        if kind == "loop":
+            # A repeat stop already has a plain sentence. It is not an empty turn.
+            held.stopped = True
+            held.loop = True
+            held.loop_text = text or ""
             return
-        grade = await _grade(
+        if kind == "ledger":
+            held.ledger = text or "[]"
+            continue
+        if kind == "final":
+            held.final = text
+            continue
+        yield kind, text
+
+
+async def _salvage(kwargs, messages, draft: str, tool_text: str) -> str:
+    """One last call, with no tools. The draft and the tool results are context."""
+    turn_mod.raise_if_cancelled()
+    prior = list(messages or [])
+    kept = _plain_answer(draft)
+    if kept:
+        prior = [*prior, {"role": "assistant", "content": kept}]
+    note = ANSWER_NOW
+    if (tool_text or "").strip():
+        note = f"{ANSWER_NOW}\n\nTool results:\n{tool_text}"
+    prior = [*prior, {"role": "user", "content": note}]
+    try:
+        text = await llm.complete(
             base_url=kwargs.get("base_url") or "",
             api_key=kwargs.get("api_key"),
             model=kwargs.get("model"),
-            request=request,
-            reply=final,
-            tool_text=tool_text,
+            messages=prior,
+            tools=False,
         )
-        if grade is None or not grade.get("parsed"):
-            if grade is not None:
-                yield "thinking", "The check did not return a grade.\n"
-            if revisions:
-                await _offer_revision(store, bot, request, final, revisions)
-            lesson = pending if pending.startswith("Learned:") else ""
-            if lesson.startswith("Learned:"):
-                yield "lesson", lesson
-            yield "final", final
-            return
-        if grade.get("pass") or revisions >= limit:
-            if revisions:
-                await _offer_revision(store, bot, request, final, revisions)
-            badge = "revised" if revisions else ("checked" if grade.get("pass") else "")
-            note = _note(grade, revisions)
-            if note:
-                yield "thinking", note if note.endswith("\n") else note + "\n"
-            if badge:
-                yield "check", json.dumps({"badge": badge, "problems": grade.get("problems") or []})
-                yield "face", "glad" if badge == "checked" else "sad"
-            lesson = _close_learning(
-                store, kwargs.get("bot_id"), kwargs.get("chat_id"), request, final, tools, grade, revisions
-            )
-            if lesson:
-                yield "lesson", lesson
-            yield "final", final
-            return
-        pending = _close_learning(
-            store,
-            kwargs.get("bot_id"),
-            kwargs.get("chat_id"),
-            request,
-            final,
-            tools,
-            grade,
-            revisions,
-            closing=False,
-        )
-        revisions += 1
-        print("heuristic check: the draft failed, so the reply is revised", flush=True)
-        yield "face", "sad"
-        from easyagent.tools import open_tool_step
+    except turn_mod.TurnCancelled:
+        raise
+    except llm.ProviderError:
+        return ""
+    return _plain_answer(text or "")
 
-        open_tool_step("Revising")
-        yield "status", "Revising"
-        note = _note(grade, revisions)
+
+async def _emit_answer(kwargs, messages, final: str, tools: list, tool_text: str, draft: str = ""):
+    """Yield a visible answer. Another bot's reply is not that answer."""
+    spoken = _usable(final, tools)
+    if spoken:
+        yield "final", final
+        return
+    recovered = await _salvage(kwargs, messages, draft or "", tool_text)
+    if _child_reply(recovered, tools):
+        recovered = ""
+    text = recovered or _usable(draft, tools) or NO_ANSWER
+    yield "delta", text
+    yield "final", text
+
+
+async def review_turn(run_turn, **kwargs):
+    """Run the turn. Review at most once, and only after complex work.
+
+    A chat question, a lookup, and a search-and-answer are not reviewed.
+    Coding and a multi-step change get one grade. If that grade fails, one
+    revision runs and the turn finishes. The done-gate does not start another.
+    A turn that stops with no words of its own gets one last answer, with no tools.
+    """
+    store: Store = kwargs["store"]
+    bot = _bot(store, kwargs.get("bot_id"))
+    enabled = _force_check or checks_enabled(bot)
+    current = list(kwargs.get("messages") or [])
+    call = dict(kwargs)
+    call["messages"] = current
+    held = _Held()
+    turn_mod.raise_if_cancelled()
+    async for kind, text in _drive(run_turn, call, held):
+        yield kind, text
+    tools, tool_text = _tool_text(held.ledger)
+    request = _request_text(current)
+    if held.loop:
+        yield "loop", held.loop_text
+        return
+    if not enabled or held.stopped or review_budget(tools) < 1 or should_skip(held.final, tools):
+        if _usable(held.final, tools) and not held.stopped:
+            lesson = _close_learning(
+                store, kwargs.get("bot_id"), kwargs.get("chat_id"), request, held.final, tools, None, 0
+            )
+            if str(lesson).startswith("Learned:"):
+                yield "lesson", lesson
+            yield "final", held.final
+            return
+        async for kind, text in _emit_answer(kwargs, current, "" if held.stopped else held.final, tools, tool_text):
+            yield kind, text
+        return
+    grade = await _grade(
+        base_url=kwargs.get("base_url") or "",
+        api_key=kwargs.get("api_key"),
+        model=kwargs.get("model"),
+        request=request,
+        reply=held.final,
+        tool_text=tool_text,
+    )
+    turn_mod.raise_if_cancelled()
+    if grade is None or not grade.get("parsed") or grade.get("pass"):
+        if grade is not None and not grade.get("parsed"):
+            yield "thinking", "The check did not return a grade.\n"
+        badge = "checked" if grade and grade.get("parsed") and grade.get("pass") else ""
+        note = _note(grade, 0) if grade and grade.get("parsed") else ""
         if note:
             yield "thinking", note if note.endswith("\n") else note + "\n"
-        current = [
-            *current,
-            {"role": "assistant", "content": final or "(empty reply)"},
-            {"role": "user", "content": _revision_note(grade)},
-        ]
+        if badge:
+            yield "check", json.dumps({"badge": badge, "problems": grade.get("problems") or []})
+            yield "face", "glad"
+        lesson = _close_learning(
+            store, kwargs.get("bot_id"), kwargs.get("chat_id"), request, held.final, tools, grade, 0
+        )
+        if lesson:
+            yield "lesson", lesson
+        async for kind, text in _emit_answer(kwargs, current, held.final, tools, tool_text):
+            yield kind, text
+        return
+    # One revision. It is not graded again, and it cannot throw the draft away.
+    draft = held.final
+    print("heuristic check: the draft failed, so the reply is revised", flush=True)
+    yield "face", "sad"
+    from easyagent.tools import open_tool_step
+
+    open_tool_step("Revising")
+    yield "status", "Revising"
+    note = _note(grade, 1)
+    if note:
+        yield "thinking", note if note.endswith("\n") else note + "\n"
+    call["messages"] = [
+        *current,
+        {"role": "assistant", "content": draft or "(empty reply)"},
+        {"role": "user", "content": _revision_note(grade)},
+    ]
+    revised = _Held()
+    turn_mod.raise_if_cancelled()
+    async for kind, text in _drive(run_turn, call, revised):
+        yield kind, text
+    revised_tools, revised_text = _tool_text(revised.ledger)
+    if _usable(revised.final, revised_tools) and not revised.stopped:
+        await _offer_revision(store, bot, request, revised.final, 1)
+        yield "check", json.dumps({"badge": "revised", "problems": grade.get("problems") or []})
+        yield "face", "sad"
+        lesson = _close_learning(
+            store, kwargs.get("bot_id"), kwargs.get("chat_id"), request, revised.final, revised_tools, grade, 1
+        )
+        if lesson:
+            yield "lesson", lesson
+        yield "final", revised.final
+        return
+    await _offer_revision(store, bot, request, draft, 1)
+    yield "check", json.dumps({"badge": "revised", "problems": grade.get("problems") or []})
+    yield "face", "sad"
+    async for kind, text in _emit_answer(
+        kwargs, current, "" if revised.stopped else revised.final, revised_tools, revised_text or tool_text, draft
+    ):
+        yield kind, text
 
 
 async def _offer_revision(store, bot, request: str, final: str, revisions: int) -> None:

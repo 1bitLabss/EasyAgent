@@ -464,7 +464,9 @@ def test_a_checker_revision_and_the_nightly_pass_propose_candidates(tmp_path, mo
     async def run_turn(**kwargs):
         if not getattr(run_turn, "done", False):
             run_turn.done = True
-            yield "ledger", json.dumps([{"kind": "files", "action": "read", "ok": False, "result": "No such file"}])
+            yield "ledger", json.dumps(
+                [{"kind": "files", "action": "write", "ok": True, "path": "kiln.py", "result": "wrote kiln.py"}]
+            )
             yield "final", "The first line is FABRICATED-CLAIM."
             return
         yield "ledger", "[]"

@@ -3810,13 +3810,15 @@ def test_a_breaker_shrug_is_not_approval(tmp_path, monkeypatch):
     )
     assert sent.status_code == 200, sent.text
     answer = sent.json()["chat"]["messages"][-1]["content"]
+    assert "The harbor closed, according to one page." in answer
     assert "Unproven" not in answer
     assert "Proven" not in answer
     assert "C1" not in answer
     assert "Evidence" not in answer
-    assert "same model" in answer
     assert "Looks fine" not in answer
-    assert len(recorder.seen) == before + 2
+    assert "same model" not in answer
+    # The done-gate does not start a breaker pass. The shrug is never asked.
+    assert len(recorder.seen) == before + 1
 
 
 def test_ten_notes_are_read_and_the_summary_path_stays_a_file(tmp_path, monkeypatch):

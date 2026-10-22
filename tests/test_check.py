@@ -58,7 +58,7 @@ def test_a_fabricated_reply_is_revised(tmp_path, monkeypatch):
     async def run_turn(**kwargs):
         if not seen:
             yield "ledger", json.dumps(
-                [{"kind": "files", "action": "read", "ok": False, "result": "No such file"}]
+                [{"kind": "files", "action": "write", "ok": True, "path": "kiln.py", "result": "wrote kiln.py"}]
             )
             yield "final", "The first line is FABRICATED-CLAIM."
             return
@@ -93,7 +93,8 @@ def test_a_fabricated_reply_is_revised(tmp_path, monkeypatch):
     assert "EASYAGENT_CHECK_V1" in seen[0]["messages"][0]["content"]
 
 
-def test_a_failed_check_stops_after_two_revisions(tmp_path, monkeypatch):
+def test_a_chat_question_is_not_reviewed(tmp_path, monkeypatch):
+    """A long chat with no tools is not graded, and it is not revised."""
     store, _endpoint, bot = _store(tmp_path)
     turns = {"n": 0}
     grades = {"n": 0}
@@ -116,10 +117,44 @@ def test_a_failed_check_stops_after_two_revisions(tmp_path, monkeypatch):
         events = _collect(store, bot, run_turn, [{"role": "user", "content": "Give a long status."}])
     finally:
         force_check(False)
-    assert turns["n"] == 3
-    assert grades["n"] == 3
+    assert turns["n"] == 1
+    assert grades["n"] == 0
     finals = [text for kind, text in events if kind == "final"]
     assert finals == [paragraph]
+    assert not [kind for kind, _text in events if kind == "status"]
+
+
+def test_a_failing_grade_revises_once_then_stops(tmp_path, monkeypatch):
+    """A file write is reviewed once. A still-failing revision is the reply."""
+    store, _endpoint, bot = _store(tmp_path)
+    turns = {"n": 0}
+    grades = {"n": 0}
+    paragraph = "LOOP-CHECK " + ("ordinary note " * 30)
+
+    async def run_turn(**kwargs):
+        turns["n"] += 1
+        yield "ledger", json.dumps(
+            [{"kind": "files", "action": "write", "ok": True, "path": "kiln.py", "result": "wrote kiln.py"}]
+        )
+        yield "final", paragraph
+
+    async def complete(**kwargs):
+        grades["n"] += 1
+        return json.dumps(
+            {"pass": False, "problems": ["The reply still has the marker."], "fix_hint": "Remove the marker."}
+        )
+
+    monkeypatch.setattr("easyagent.llm.complete", complete)
+    force_check(True)
+    try:
+        events = _collect(store, bot, run_turn, [{"role": "user", "content": "Write the kiln note."}])
+    finally:
+        force_check(False)
+    assert turns["n"] == 2
+    assert grades["n"] == 1
+    finals = [text for kind, text in events if kind == "final"]
+    assert finals == [paragraph]
+    assert [text for kind, text in events if kind == "status"] == ["Revising"]
     assert json.loads([text for kind, text in events if kind == "check"][-1])["badge"] == "revised"
 
 
@@ -130,7 +165,9 @@ def test_stop_between_revisions_does_not_start_another(tmp_path, monkeypatch):
 
     async def run_turn(**kwargs):
         turns["n"] += 1
-        yield "ledger", json.dumps([{"kind": "files", "action": "read", "ok": False, "result": "No such file"}])
+        yield "ledger", json.dumps(
+            [{"kind": "files", "action": "write", "ok": True, "path": "kiln.py", "result": "wrote kiln.py"}]
+        )
         yield "final", "The first line is FABRICATED-CLAIM."
 
     async def complete(**kwargs):
@@ -175,7 +212,9 @@ def test_a_missed_grade_keeps_the_draft(tmp_path, monkeypatch):
 
     async def run_turn(**kwargs):
         turns["n"] += 1
-        yield "ledger", json.dumps([{"kind": "files", "action": "read", "ok": True, "result": "pine"}])
+        yield "ledger", json.dumps(
+            [{"kind": "files", "action": "write", "ok": True, "path": "kiln.py", "result": "pine"}]
+        )
         yield "final", "The note says pine."
 
     async def down(**kwargs):
@@ -203,7 +242,9 @@ def test_the_grade_waits_on_the_bots_connection(tmp_path, monkeypatch):
     gate.reset_lanes()
 
     async def run_turn(**kwargs):
-        yield "ledger", json.dumps([{"kind": "files", "action": "read", "ok": True, "result": "pine"}])
+        yield "ledger", json.dumps(
+            [{"kind": "files", "action": "write", "ok": True, "path": "kiln.py", "result": "pine"}]
+        )
         yield "final", "The note says pine."
 
     async def complete(**kwargs):

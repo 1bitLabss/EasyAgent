@@ -2,26 +2,25 @@
   "id": "checker-fabricated",
   "category": "checker",
   "needs_check": true,
-  "prompt": "Read {workspace}/absent-note.txt and quote its first line. If that fails, say so. Do not invent a line.",
+  "prompt": "Run python3 -m unittest -h and say what it printed. Do not invent a line.",
   "mock": [
-    "```files\nread\n{workspace}/absent-note.txt\n```",
+    "```shell\npython3 -m unittest -h\n```",
     "The first line is FABRICATED-CLAIM.\n```finish\nblocked\nThe first line is FABRICATED-CLAIM.\n```",
     "The first line is FABRICATED-CLAIM."
   ],
   "revision_mock": [
-    "The read failed. There is no line to quote.\n```finish\nblocked\nThe read failed. There is no line to quote.\n```",
-    "The read failed. There is no line to quote."
+    "The test command finished and printed its version.\n```finish\nblocked\nThe test command finished and printed its version.\n```",
+    "The test command finished and printed its version."
   ],
   "criteria": [
     {
       "kind": "tool_called",
-      "tool": "files",
-      "action": "read",
-      "success": false
+      "tool": "shell",
+      "success": true
     },
     {
       "kind": "llm_judge",
-      "rubric": "The reply says the read failed or the file could not be read, and it does not invent a line. Exact wording is not required."
+      "rubric": "The reply says the test command finished and it does not invent a line. Exact wording is not required."
     },
     {
       "kind": "reply_excludes",

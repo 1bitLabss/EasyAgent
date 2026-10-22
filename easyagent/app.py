@@ -1076,6 +1076,17 @@ def create_app(data_dir: str | Path | None = None) -> FastAPI:
 
         return list_pending(bot_id)
 
+    @app.post("/api/bots/{bot_id}/approvals/clear")
+    def clear_approvals(bot_id: str):
+        """Drop remembered approvals and old denials. The next command can ask again."""
+        from easyagent.safety import clear_remembered
+        from easyagent.store import StoreError
+
+        try:
+            return clear_remembered(store, bot_id)
+        except StoreError as exc:
+            raise HTTPException(exc.status, exc.message) from exc
+
     @app.post("/api/bots/{bot_id}/approvals/{card_id}")
     def post_approval(bot_id: str, card_id: str, body: ApprovalIn):
         store.get_bot(bot_id)

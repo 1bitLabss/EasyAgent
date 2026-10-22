@@ -204,7 +204,7 @@ def test_unattended_ask_becomes_a_card_and_expiry_is_deny(tmp_path, monkeypatch)
         assert victim.read_text(encoding="utf-8") == "keep"
         assert list_pending(bot["id"]) == []
         bot_after = store.get_bot(bot["id"])
-        assert bot_after.get("safety_denied")
+        assert not bot_after.get("safety_denied")
         expired = [row for row in read_audit(store, bot["id"]) if row.get("decision") == "expired"]
         assert expired
         assert not is_unattended()

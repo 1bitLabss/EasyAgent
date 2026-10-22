@@ -420,6 +420,17 @@ function SafetyBlock({ botId, botName, mode, unlocks, always, onError }: { botId
         </>
       ) : null}
       <Button type="button" onClick={() => void save().catch((reason: Error) => onError(reason.message))}>Save safety</Button>
+      <Button
+        type="button"
+        variant="outline"
+        onClick={() => void api(`/api/bots/${botId}/approvals/clear`, { method: "POST" }).then(() => {
+          void queryClient.invalidateQueries({ queryKey: ["bots"] });
+          void queryClient.invalidateQueries({ queryKey: ["chat"] });
+        }).catch((reason: Error) => onError(reason.message))}
+      >
+        Clear remembered decisions
+      </Button>
+        <Note>This drops Always approvals and any old denial. The next command can ask again.</Note>
       <h3 className="text-sm font-medium">Always allowed</h3>
       <Note>Allow once runs that test or build this time. Allow for this session lasts until a restart. Always allow is saved for that one tool in that workspace, such as pytest or npm test there, and it stays after a restart.</Note>
       <ul className="space-y-2 text-sm" data-testid="exec-always">

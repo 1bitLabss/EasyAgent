@@ -2,7 +2,7 @@
 
 A deterministic rules engine decides allow, ask, or block. Anything it does
 not recognize is sent to this bot's own model, and if that call cannot be
-made the action is asked, not run. A denial or an expired card is final.
+made the action is asked, not run. A denial stops this turn only. An expired card is not a denial, and neither one is remembered.
 """
 
 from __future__ import annotations
@@ -3768,6 +3768,30 @@ def _audit(store: Store, bot_id: str | None, row: dict) -> None:
         return
 
 
+def clear_remembered(store: Store, bot_id: str) -> dict:
+    """Drop saved approvals and old denials for this bot. The next command can ask again."""
+    bot = store.get_bot(bot_id)
+    for key in ("safety_denied", "safety_allows", "safety_type_allows"):
+        bot.pop(key, None)
+    atomic_write_json(store._bot_dir(bot["id"]) / "bot.json", bot)
+    chats = 0
+    for item in store.list_chats(bot_id):
+        chat_id = str(item.get("id") or "")
+        if not chat_id:
+            continue
+        chat = store.get_chat(bot_id, chat_id)
+        changed = False
+        for key in ("type_grants", "class_grants"):
+            if key in chat:
+                chat.pop(key, None)
+                changed = True
+        if changed:
+            chat["updated_at"] = now_iso()
+            store.save_chat(chat)
+            chats += 1
+    return {"cleared": True, "chats": chats}
+
+
 def _remember_denial(store: Store, bot_id: str | None, fingerprint: str) -> None:
     if not bot_id or not fingerprint:
         return
@@ -4175,8 +4199,6 @@ async def guard(store: Store, request, bot_id: str | None):
         return await _hand_browser(store, request, bot_id, verdict, proposal)
     if verdict.tier == BLOCK:
         _audit(store, bot_id, {"at": now_iso(), "decision": "block", "rule": verdict.rule, "why": verdict.why, "detail": verdict.detail})
-        if verdict.rule == "already-denied":
-            _remember_denial(store, bot_id, verdict.fingerprint)
         raise ToolError(verdict.why + " It was not run.")
     if verdict.tier == ASK and is_unattended():
         exact = (getattr(request, "command", "") or getattr(request, "path", "") or "").strip()
@@ -4186,7 +4208,7 @@ async def guard(store: Store, request, bot_id: str | None):
         _audit(store, bot_id, {"at": now_iso(), "decision": "ask", "rule": verdict.rule, "why": verdict.why, "detail": verdict.detail})
         asyncio.create_task(_settle_unattended(store, request, bot_id, card, verdict))
         _notify_bridge(store, bot_id, card)
-        raise ToolError("That needs you. A card is in the chat. This routine went on without it. If nobody answers, that counts as a denial.")
+        raise ToolError("That needs you. A card is in the chat. This routine went on without it. If nobody answers, the command is not run, and it can be asked again.")
     if verdict.tier == ASK and _class_take(store, request, bot_id, verdict):
         from easyagent.actionclass import match as class_match
 
@@ -4258,9 +4280,10 @@ async def guard(store: Store, request, bot_id: str | None):
             audited["class"] = card.action_class
             audited["tool"] = card.action_tool
         _audit(store, bot_id, audited)
+        if decision == "expired":
+            raise ToolError("That card expired. It was not run.")
         if decision != "approve":
-            _remember_denial(store, bot_id, verdict.fingerprint)
-            raise ToolError("You denied that, or the card expired. It will not be asked again, and it was not run.")
+            raise ToolError("You denied that. It was not run.")
         approved_slot = turn_mod.current_slot()
         if approved_slot is not None:
             approved_slot.script_human_approved = True
@@ -4311,15 +4334,13 @@ def _make_card(bot_id: str | None, verdict: Verdict, exact: str, proposal: dict 
 
 
 async def _settle_unattended(store: Store, request, bot_id: str | None, card: Pending, verdict: Verdict) -> None:
-    """The card stays until someone answers. Expiry is a denial and is remembered."""
+    """The card stays until someone answers. Expiry does not remember a denial."""
     decision = await _wait(card)
     if decision == "always" and bot_id and card.exact:
         _remember_allow(store, bot_id, card.exact)
         decision = "approve"
     decision, session_grant = _opened_session(store, bot_id, decision, card.exact or getattr(request, "command", "") or "")
     _audit(store, bot_id, {"at": now_iso(), "decision": decision, "rule": verdict.rule, "why": verdict.why, "detail": verdict.detail})
-    if decision != "approve":
-        _remember_denial(store, bot_id, verdict.fingerprint)
     _PENDING.pop(card.id, None)
     if decision != "approve":
         return
@@ -4391,7 +4412,8 @@ async def _hand_browser(store: Store, request, bot_id: str | None, verdict: Verd
     _PENDING.pop(card.id, None)
     _audit(store, bot_id, {"at": now_iso(), "decision": decision or "deny", "rule": verdict.rule, "why": verdict.why, "detail": verdict.detail})
     if decision != "done":
-        _remember_denial(store, bot_id, verdict.fingerprint)
+        if decision == "expired":
+            raise ToolError("That card expired. EasyAgent did not type a password, a card number, or a 2FA code.")
         raise ToolError("You denied that. EasyAgent did not type a password, a card number, or a 2FA code.")
     return request, "EasyAgent did not type a password, a card number, or a 2FA code. The browser window was yours."
 
@@ -4399,8 +4421,6 @@ async def _hand_browser(store: Store, request, bot_id: str | None, verdict: Verd
 async def _settle_secret(store: Store, bot_id: str | None, card: Pending, verdict: Verdict) -> None:
     decision = await _wait(card)
     _audit(store, bot_id, {"at": now_iso(), "decision": decision or "deny", "rule": verdict.rule, "why": verdict.why, "detail": verdict.detail})
-    if decision == "deny":
-        _remember_denial(store, bot_id, verdict.fingerprint)
     _PENDING.pop(card.id, None)
 
 

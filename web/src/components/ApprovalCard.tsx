@@ -115,7 +115,7 @@ export function ApprovalCard({ botId, botName, active }: { botId: string; botNam
       {card.proposal?.kind === "script-diff" && card.proposal.diff ? (
         <pre className="mt-2 max-h-48 overflow-auto whitespace-pre-wrap rounded-xl bg-black/5 p-3 text-xs dark:bg-white/10" data-testid="script-diff">{card.proposal.diff}</pre>
       ) : null}
-      <p className="mt-2 text-xs text-muted">Tier {card.tier}. Rule {card.rule}.{card.action_class ? ` Class ${card.action_class}.` : ""} If you do not answer, the card expires and that counts as a denial.</p>
+      <p className="mt-2 text-xs text-muted">Tier {card.tier}. Rule {card.rule}.{card.action_class ? ` Class ${card.action_class}.` : ""} If you do not answer, the card expires and the command is not run. You can be asked again.</p>
       <pre className="mt-2 max-h-40 overflow-auto whitespace-pre-wrap rounded-xl bg-black/5 p-3 text-xs dark:bg-white/10">{card.detail}</pre>
       <div className="mt-3 flex flex-wrap gap-2">
         {takeover ? (

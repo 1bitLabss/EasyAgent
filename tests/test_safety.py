@@ -19,7 +19,7 @@ from easyagent.safety import (
     resolve_card,
 )
 from easyagent.store import Store
-from easyagent.tools import ToolRequest
+from easyagent.tools import ToolError, ToolRequest
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -170,6 +170,75 @@ def test_a_denial_is_final(tmp_path):
 def test_lessons_that_weaken_guardrails_are_rejected():
     assert lesson_weakens("Disable the safety approval so rm always runs.")
     assert not lesson_weakens("Read the file before you say it is written.")
+
+
+def test_a_timeout_does_not_persist(tmp_path, monkeypatch):
+    monkeypatch.setenv("EASYAGENT_APPROVAL_SECONDS", "0.05")
+    from easyagent.app import create_app
+
+    app = create_app(tmp_path)
+    client = TestClient(app)
+    endpoint = client.post("/api/endpoints", json={"name": "local", "base_url": "http://127.0.0.1:9/v1", "model": "stub"}).json()
+    bot = client.post("/api/bots", json={"name": "Ada", "endpoint_id": endpoint["id"]}).json()
+    store = app.state.store
+    chat = store.create_chat(bot["id"])
+    from easyagent import turn as turn_mod
+
+    from easyagent.workspace import bot_workspace
+
+    folder = bot_workspace(store, bot["id"], create=True)
+    slot = turn_mod.bind(store, chat["id"], bot_id=bot["id"])
+    slot.cwd = str(folder)
+    target = folder / "notes.txt"
+    target.write_text("keep", encoding="utf-8")
+
+    async def once(decision: str | None):
+        task = asyncio.create_task(guard(store, ToolRequest(kind="shell", command=f"rm {target}"), bot["id"]))
+        cards = []
+        for _ in range(40):
+            cards = list_pending(bot["id"])
+            if cards or task.done():
+                break
+            await asyncio.sleep(0.02)
+        if decision == "deny" and cards:
+            resolve_card(cards[0]["id"], "deny")
+        try:
+            await task
+        except ToolError:
+            return "stopped"
+        return "ran"
+
+    try:
+        assert asyncio.run(once(None)) == "stopped"
+        saved = store.get_bot(bot["id"])
+        assert not saved.get("safety_denied")
+        again = safety_classify_again(store, bot["id"], f"rm {target}")
+        assert again.tier == "ask", (again.tier, again.rule, again.why)
+        assert again.rule != "already-denied"
+        assert asyncio.run(once("deny")) == "stopped"
+        assert not store.get_bot(bot["id"]).get("safety_denied")
+        third = safety_classify_again(store, bot["id"], f"rm {target}")
+        assert third.tier == "ask"
+        store.get_bot(bot["id"])
+        from easyagent.safety import _remember_denial, clear_remembered
+
+        _remember_denial(store, bot["id"], third.fingerprint)
+        assert store.get_bot(bot["id"]).get("safety_denied")
+        cleared = client.post(f"/api/bots/{bot['id']}/approvals/clear")
+        assert cleared.status_code == 200, cleared.text
+        assert not store.get_bot(bot["id"]).get("safety_denied")
+        fourth = safety_classify_again(store, bot["id"], f"rm {target}")
+        assert fourth.tier == "ask"
+    finally:
+        turn_mod._cancel.set(None)
+        turn_mod._slot.set(None)
+        client.close()
+
+
+def safety_classify_again(store, bot_id, command):
+    from easyagent.safety import classify
+
+    return classify(store, ToolRequest(kind="shell", command=command), bot_id)
 
 
 def test_approved_delete_goes_to_trash(tmp_path, monkeypatch):

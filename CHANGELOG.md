@@ -1,6 +1,7 @@
 # Changelog
 
 ## 0.3.46
+- A denied card applies to that turn only. A card that expires is not a denial, and neither one is saved on the bot. Settings has Clear remembered decisions, which drops Always approvals and any older denial.
 - While /yolo is on for this bot, every approval gate allows the action and shows no card. That includes Strict, the shell allow-list, a file outside the bot folder, a secret, a download, a web fetch, an MCP call, asking another bot, and saving a routine. The bot's own notes, including MEMORY.md and USER.md, can be read in every mode. The audit log still records what ran. YOLO is stored on the bot, so it survives a restart and covers every chat of that bot. Settings can turn YOLO on for every bot. A routine's own later run and a child agent stay gated. Hermes's catastrophic floor still blocks unless EASYAGENT_YOLO_FLOOR is off: a root, system, or home wipe, mkfs, dd or a redirect onto a raw disk, a fork bomb, kill -1, and shutdown or reboot. The refusal says it is a catastrophic command blocked even in YOLO. It does not say a card is waiting. Strict and the default mode are unchanged.
 - A reply that has just finished shows its code highlighted, in the same row. While the reply is still arriving, code stays plain. Existing rows do not move.
 - One live status line per turn, updated in place. Finished steps, including a tool step and "Asked … → got reply", stay above it. A second Writing timer does not appear.

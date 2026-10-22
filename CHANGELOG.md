@@ -1,7 +1,7 @@
 # Changelog
 
 ## 0.3.46
-- While /yolo is on for this chat, every approval gate allows the action and shows no card. That includes Strict, the shell allow-list, a file outside the bot folder, MEMORY.md and other saved data, a secret, a download, a web fetch, an MCP call, and asking another bot. The audit log still records what ran. A routine, another chat, and a child agent stay gated. Strict and the default mode are unchanged.
+- While /yolo is on for this chat, every approval gate allows the action and shows no card. That includes Strict, the shell allow-list, a file outside the bot folder, MEMORY.md and other saved data, a secret, a download, a web fetch, an MCP call, asking another bot, and saving a routine. The audit log still records what ran. A routine's own later run, another chat, and a child agent stay gated. Hermes's catastrophic floor still blocks: a root, system, or home wipe, mkfs, dd or a redirect onto a raw disk, a fork bomb, kill -1, and shutdown or reboot. The refusal says it is a catastrophic command blocked even in YOLO. Strict and the default mode are unchanged.
 - A reply that has just finished shows its code highlighted, in the same row. While the reply is still arriving, code stays plain. Existing rows do not move.
 - One live status line per turn, updated in place. Finished steps, including a tool step and "Asked … → got reply", stay above it. A second Writing timer does not appear.
 - Reasoning from each model call is kept once, and the first word of the answer does not land in the thinking box. The thinking box closes when the answer starts. A finished turn clears Writing, and the view stays at the bottom unless you scroll up.

@@ -3235,6 +3235,27 @@ async def _routine_proposal(store: Store, request: ToolRequest, bot_id: str | No
         "resume": "Resume this routine?",
     }.get(action, "Confirm this routine?")
     detail = "\n".join(part for part in (name, shown, prompt) if part)
+    from easyagent.yolo import passes
+
+    if bot_id and passes(store, bot_id):
+        # This card is built before guard. The same YOLO check allows it.
+        # The routine's own later run is unattended, so it stays gated.
+        _audit(
+            store,
+            bot_id,
+            {
+                "at": now_iso(),
+                "decision": "approve",
+                "tag": "yolo",
+                "rule": "routine",
+                "why": why,
+                "detail": name,
+            },
+        )
+        try:
+            return apply_confirmed(store, bot_id or "", spec)
+        except (ScheduleError, StoreError) as exc:
+            raise ToolError(str(exc)) from exc
     card = _make_card(
         bot_id,
         Verdict("ask", "routine", why, detail, ""),

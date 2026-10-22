@@ -2,11 +2,12 @@
 
 A person turns it on with ``/yolo`` or the header control. While it is on,
 ``passes`` is the only bypass: the approval decision, and the checks that
-would otherwise refuse a decision that already allowed, all call it. It
-expires when the chat sits idle, on a hard deadline, and when the app starts
-again. It never covers another chat, a routine, a helper, a schedule, or a
-resumed run. The access layer is what decides the actor. This module does not
-trust a source string that the access check refused.
+would otherwise refuse a decision that already allowed, all call it. Hermes's
+catastrophic floor still blocks. It expires when the chat sits idle, on a hard
+deadline, and when the app starts again. It never covers another chat, a
+routine, a helper, a schedule, or a resumed run. The access layer is what
+decides the actor. This module does not trust a source string that the access
+check refused.
 """
 
 from __future__ import annotations
@@ -269,7 +270,8 @@ def passes(store: Store, bot_id: str, *, now: datetime | None = None) -> bool:
 
     This is the only YOLO bypass. ``guard`` returns allow without a card, and
     a later check that repeats the same decision calls this instead of
-    inventing its own exception. A routine, a helper, another chat, and a
+    inventing its own exception. ``guard`` still blocks Hermes's catastrophic
+    floor before that allow. A routine, a helper, another chat, and a
     resumed run are not this chat, so they stay gated. What ran is still audited.
     """
     return active(store, bot_id, now=now)
@@ -400,6 +402,7 @@ def _on_sentence(hard: int, idle_minutes: int, notes: list[str]) -> str:
         f"YOLO is on for this chat.{extra} "
         f"Every approval gate in this chat allows the action for {_span(hard)}, "
         f"or after {idle} with nothing running. "
+        "A catastrophic command, such as wiping the disk or powering the machine off, is still blocked. "
         "What ran is still written to the audit log. "
         "A routine, another chat, and a child agent stay gated."
     )
@@ -1062,6 +1065,251 @@ def _stamp(moment: datetime) -> str:
     if moment.tzinfo is None:
         moment = moment.replace(tzinfo=timezone.utc)
     return moment.astimezone(timezone.utc).replace(microsecond=0).isoformat()
+
+
+# Hermes tools/approval_detection.py HARDLINE_PATTERNS. Nothing is added.
+# A floor below YOLO: these commands never run, even when every other gate allows.
+# Recoverable commands (git reset --hard, rm of one folder, curl|sh) are not on this list.
+_CMDPOS = (
+    r"(?:^|[\n`]|\$\()"
+    r"\s*"
+    r"(?:sudo\s+(?:-[^\s]+\s+)*)?"
+    r"(?:env\s+(?:\w+=\S*\s+)*)?"
+    r"(?:(?:exec|nohup|setsid|time)\s+)*"
+    r"\s*"
+)
+
+
+def _hardline_rm_path(path_alt: str, tail: str = r"(?:\s|$|[)`;|&])") -> str:
+    return rf'(?:["\'](?:{path_alt})["\']|(?:{path_alt}){tail})'
+
+
+_HARDLINE_SYSTEM_DIRS = (
+    r"/home|/home/\*|/root|/root/\*|/etc|/etc/\*|/usr|/usr/\*|"
+    r"/var|/var/\*|/bin|/bin/\*|/sbin|/sbin/\*|/boot|/boot/\*|/lib|/lib/\*"
+)
+_RM_FLAG_PREFIX = _CMDPOS + r"rm\s+(-[^\s]*\s+)*"
+_FLOOR_PATTERNS: tuple[tuple[str, str, bool], ...] = (
+    (_RM_FLAG_PREFIX + _hardline_rm_path(r"/(?:(?:\.\.?)?/)*(?:\.\.?)?\**|/ \*"), "recursive delete of root filesystem", False),
+    (_RM_FLAG_PREFIX + _hardline_rm_path(_HARDLINE_SYSTEM_DIRS), "recursive delete of system directory", False),
+    (_RM_FLAG_PREFIX + _hardline_rm_path(r"(?:~|\$\{?HOME\}?)(?:/?|/\*)?"), "recursive delete of home directory", False),
+    (_CMDPOS + r"mkfs(\.[a-z0-9]+)?\b", "format filesystem (mkfs)", False),
+    (_CMDPOS + r"dd\b[^\n]*\bof=/dev/(sd|nvme|hd|mmcblk|vd|xvd)[a-z0-9]*", "dd to raw block device", False),
+    (r">\s*/dev/(sd|nvme|hd|mmcblk|vd|xvd)[a-z0-9]*\b", "redirect to raw block device", True),
+    (r":\(\)\s*\{\s*:\s*\|\s*:\s*&\s*\}\s*;\s*:", "fork bomb", True),
+    (_CMDPOS + r"kill\s+(-[^\s]+\s+)*-1\b", "kill all processes", False),
+    (_CMDPOS + r"(shutdown|reboot|halt|poweroff)\b", "system shutdown/reboot", False),
+    (_CMDPOS + r"init\s+[06]\b", "init 0/6 (shutdown/reboot)", False),
+    (_CMDPOS + r"systemctl\s+(poweroff|reboot|halt|kexec)\b", "systemctl poweroff/reboot", False),
+    (_CMDPOS + r"telinit\s+[06]\b", "telinit 0/6 (shutdown/reboot)", False),
+)
+_FLOOR_COMPILED = tuple(
+    (re.compile(pattern, re.IGNORECASE | re.DOTALL), description, masked)
+    for pattern, description, masked in _FLOOR_PATTERNS
+)
+_SHELL_CARRIERS = {"bash", "sh", "zsh", "ksh", "dash"}
+FLOOR_MESSAGE = "This is a catastrophic command blocked even in YOLO."
+# One command per Hermes pattern. The test blocks each of these and nothing else on the list.
+FLOOR_COMMANDS = (
+    "rm -rf /",
+    "rm -rf /etc",
+    "rm -rf ~",
+    "mkfs.ext4 /dev/sda1",
+    "dd if=/dev/zero of=/dev/sda",
+    "echo x > /dev/sda",
+    ":(){ :|:& };:",
+    "kill -9 -1",
+    "shutdown -h now",
+    "init 0",
+    "systemctl reboot",
+    "telinit 6",
+)
+
+
+def _mark_separators(command: str) -> str:
+    """Turn real separators into newlines so a later command is at a start.
+
+    Quoted text is left alone. Hermes does the same before the anchored patterns,
+    so ``echo "reboot"`` is not a shutdown and ``ls; reboot`` is.
+    """
+    out: list[str] = []
+    quote: str | None = None
+    i = 0
+    n = len(command)
+    while i < n:
+        ch = command[i]
+        if quote is None and ch == "\\" and i + 1 < n:
+            out.append(ch)
+            out.append(command[i + 1])
+            i += 2
+            continue
+        if quote is not None:
+            if ch == quote:
+                quote = None
+            out.append(ch)
+            i += 1
+            continue
+        if ch in "'\"":
+            quote = ch
+            out.append(ch)
+            i += 1
+            continue
+        if ch in ";\n":
+            out.append("\n")
+            i += 1
+            continue
+        if ch in "&|":
+            if i + 1 < n and command[i + 1] == ch:
+                out.append("\n")
+                i += 2
+                continue
+            out.append("\n")
+            i += 1
+            continue
+        out.append(ch)
+        i += 1
+    return "".join(out)
+
+
+def _mask_quoted(command: str) -> str:
+    """Blank quoted prose. ``$(...)`` and backticks inside double quotes stay, as Hermes does."""
+    out: list[str] = []
+    quote: str | None = None
+    i = 0
+    n = len(command)
+    while i < n:
+        ch = command[i]
+        if quote is None:
+            if ch in "'\"":
+                quote = ch
+            out.append(ch)
+            i += 1
+            continue
+        if ch == quote:
+            quote = None
+            out.append(ch)
+            i += 1
+            continue
+        if quote == '"' and command.startswith("$(", i):
+            close = command.find(")", i + 2)
+            end = n if close < 0 else close + 1
+            out.append(command[i:end])
+            i = end
+            continue
+        if quote == '"' and ch == "`":
+            close = command.find("`", i + 1)
+            end = n if close < 0 else close + 1
+            out.append(command[i:end])
+            i = end
+            continue
+        out.append(" ")
+        i += 1
+    return "".join(out)
+
+
+def _shell_words(line: str) -> list[str]:
+    words: list[str] = []
+    buf: list[str] = []
+    quote: str | None = None
+    i = 0
+    n = len(line)
+    while i < n:
+        ch = line[i]
+        if quote is None and ch == "\\" and i + 1 < n:
+            buf.append(line[i + 1])
+            i += 2
+            continue
+        if quote is not None:
+            if ch == quote:
+                quote = None
+            else:
+                buf.append(ch)
+            i += 1
+            continue
+        if ch in "'\"":
+            quote = ch
+            i += 1
+            continue
+        if ch.isspace():
+            if buf:
+                words.append("".join(buf))
+                buf = []
+            i += 1
+            continue
+        buf.append(ch)
+        i += 1
+    if buf:
+        words.append("".join(buf))
+    return words
+
+
+def _payloads(command: str) -> list[str]:
+    """Arguments that bash -c, sh -c, and eval will execute. Hermes scans those too."""
+    found: list[str] = []
+    for line in _mark_separators(command).split("\n"):
+        words = _shell_words(line)
+        index = 0
+        while index < len(words):
+            name = words[index].rsplit("/", 1)[-1].lower()
+            if name == "sudo":
+                index += 1
+                while index < len(words) and words[index].startswith("-"):
+                    index += 1
+                continue
+            if name == "env":
+                index += 1
+                while index < len(words) and "=" in words[index]:
+                    index += 1
+                continue
+            if name in {"exec", "nohup", "setsid", "time"}:
+                index += 1
+                continue
+            break
+        if index >= len(words):
+            continue
+        name = words[index].rsplit("/", 1)[-1].lower()
+        rest = words[index + 1 :]
+        if name in _SHELL_CARRIERS:
+            flag_at = next((pos for pos, word in enumerate(rest) if word in {"-c", "-lc"}), None)
+            if flag_at is not None and flag_at + 1 < len(rest):
+                found.append(rest[flag_at + 1])
+        elif name == "eval" and rest:
+            found.append(rest[0])
+    return found
+
+
+def _floor_hit(command: str) -> str | None:
+    marked = _mark_separators(command)
+    masked = _mask_quoted(command)
+    for pattern, description, quote_masked in _FLOOR_COMPILED:
+        if quote_masked:
+            if pattern.search(masked):
+                return description
+            continue
+        if pattern.search(command) or pattern.search(marked):
+            return description
+    return None
+
+
+def catastrophic(command: str, *, _depth: int = 0) -> str | None:
+    """The Hermes floor description when this command is on that list, else None.
+
+    The patterns are Hermes's HARDLINE_PATTERNS. A shell ``-c`` or ``eval`` payload
+    is scanned because that is the command that would run. No other command is added.
+    """
+    text = command or ""
+    if not text.strip():
+        return None
+    hit = _floor_hit(text)
+    if hit:
+        return hit
+    if _depth >= 3:
+        return None
+    for payload in _payloads(text):
+        nested = catastrophic(payload, _depth=_depth + 1)
+        if nested:
+            return nested
+    return None
 
 
 def _parse_time(value) -> datetime | None:

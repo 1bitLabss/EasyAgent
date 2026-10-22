@@ -95,7 +95,7 @@ _INLINE_DELETE_CORPUS = (
 )
 
 # One list. A new blocked command added here is disguised automatically below.
-# yolo: allow — every command in this corpus is allowed while this chat's YOLO is on.
+# yolo: allow — allowed while this chat's YOLO is on, except Hermes's catastrophic floor.
 BLOCKED_SHELL_CORPUS = (
     _ROOT_DELETE_CORPUS
     + _WIPE_CORPUS
@@ -104,7 +104,7 @@ BLOCKED_SHELL_CORPUS = (
     + _INLINE_DELETE_CORPUS
 )
 
-# yolo: allow — every disguise below is allowed while this chat's YOLO is on.
+# yolo: allow — allowed while this chat's YOLO is on, except Hermes's catastrophic floor.
 _REQUIRED_DISGUISES = (
     'r""m -rf /',
     "'r'm -rf /",
@@ -1152,7 +1152,7 @@ def test_random_wrapper_compositions_are_not_allowed(tmp_path):
 
 
 # Effect rules. Root, drive, home, and device targets are block. A narrower delete asks.
-# yolo: allow — an ask or a block here is allowed while this chat's YOLO is on.
+# yolo: allow — an ask or a block here is allowed while this chat's YOLO is on, except Hermes's catastrophic floor.
 _EFFECT_CASES = (
     ("Clear-Disk -Number 0 -RemoveData", "block"),
     ("Format-Volume -DriveLetter C", "block"),
@@ -1340,7 +1340,7 @@ def test_wrapped_disk_and_delete_effects_are_not_allowed(tmp_path):
 
 
 # Commands from the fresh and new-attack rounds. The printf line only prints bytes.
-# yolo: allow — every command below is allowed while this chat's YOLO is on.
+# yolo: allow — allowed while this chat's YOLO is on, except Hermes's catastrophic floor.
 _FRESH_ATTACKS = (
     "gci C:\\ | ri -r",
     "Get-ChildItem -Recurse | Remove-Item",
@@ -1397,7 +1397,7 @@ _FRESH_ATTACKS = (
     "dd if=/dev/zero of=/dev/disk0",
 )
 
-# yolo: allow — every command below is allowed while this chat's YOLO is on.
+# yolo: allow — allowed while this chat's YOLO is on, except Hermes's catastrophic floor.
 _NEW_ATTACKS = (
     "ri -r -fo C:\\",
     "rd -r -fo C:\\",
@@ -1455,7 +1455,7 @@ _NEW_ATTACKS = (
 )
 
 # The same 40 commands, with the Strict tier of each one pinned.
-# yolo: allow — the tier column is Strict. YOLO allows every row, including ask.
+# yolo: allow — the tier column is Strict. YOLO allows every row, except Hermes's catastrophic floor.
 _STRICT_40 = (
     ("git status", "allow"),
     ("git log --oneline -5", "allow"),
@@ -1530,7 +1530,7 @@ def test_new_bot_defaults_to_strict(tmp_path):
 
 
 # Process substitution, env prefixes, and flags that launch a program. Strict must not allow these.
-# yolo: allow — every hole below is allowed while this chat's YOLO is on.
+# yolo: allow — allowed while this chat's YOLO is on, except Hermes's catastrophic floor.
 _STRICT_HOLES = (
     "head <(rm -rf ~)",
     "head >(rm -rf ~)",
@@ -2911,7 +2911,7 @@ def _yolo_corpus() -> list[str]:
 
 
 def test_yolo_allows_the_everyday_corpus_and_the_attack_corpus(tmp_path):
-    """YOLO shows no card and raises no block for everyday commands or attacks.
+    """YOLO shows no card and raises no block, except Hermes's catastrophic floor.
 
     Strict and the default mode still ask or block. This test only runs the
     approval gate. It does not execute the commands.
@@ -2920,7 +2920,7 @@ def test_yolo_allows_the_everyday_corpus_and_the_attack_corpus(tmp_path):
 
     from easyagent import turn as turn_mod
     from easyagent.safety import guard, list_pending, reset_for_tests
-    from easyagent.yolo import _enable
+    from easyagent.yolo import FLOOR_COMMANDS, FLOOR_MESSAGE, _enable, catastrophic
 
     reset_for_tests()
     store, bot = _bot(tmp_path, mode="strict")
@@ -2951,9 +2951,21 @@ def test_yolo_allows_the_everyday_corpus_and_the_attack_corpus(tmp_path):
         return "allow", None
 
     try:
-        for command in _yolo_corpus():
+        allowed = [command for command in _yolo_corpus() if catastrophic(command) is None]
+        floored = [command for command in _yolo_corpus() if catastrophic(command)]
+        for command in FLOOR_COMMANDS:
+            assert catastrophic(command), command
+            if command not in floored:
+                floored.append(command)
+        assert allowed, "the everyday and attack corpus was empty"
+        for command in allowed:
             outcome, detail = asyncio.run(settle(ToolRequest(kind="shell", command=command)))
             assert outcome == "allow", (command, outcome, detail)
+            assert list_pending(bot["id"]) == []
+        for command in floored:
+            outcome, detail = asyncio.run(settle(ToolRequest(kind="shell", command=command)))
+            assert outcome == "block", (command, outcome, detail)
+            assert detail and FLOOR_MESSAGE in detail, (command, detail)
             assert list_pending(bot["id"]) == []
         extras = [
             ToolRequest(kind="files", action="read", path=str(notes / "MEMORY.md")),

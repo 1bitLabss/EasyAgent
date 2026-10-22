@@ -4127,27 +4127,45 @@ async def guard(store: Store, request, bot_id: str | None):
     if proposal is None and verdict.rule in {"bot-changed", "git-hooks"}:
         slot = turn_mod.current_slot()
         proposal = getattr(slot, "safety_script_proposal", None) if slot is not None else None
-    if _yolo_passes(store, bot_id) and verdict.tier in {BLOCK, ASK}:
-        # One check. Hermes does the same in check_all_command_guards: YOLO
-        # and approvals-off return approved before any card. The rule is kept
-        # on the audit row. A routine or a helper never reaches this, because
-        # passes() is false there.
-        _audit(
-            store,
-            bot_id,
-            {
-                "at": now_iso(),
-                "decision": "approve",
-                "tag": "yolo",
-                "rule": verdict.rule,
-                "why": verdict.why,
-                "detail": verdict.detail,
-            },
-        )
-        if verdict.tier == ASK:
-            return _release_ask(store, request, bot_id, verdict)
-        _remember_created(request)
-        return request, None
+    if _yolo_passes(store, bot_id):
+        # One check. Hermes returns approved before any card, after the hardline
+        # floor. That floor is the only block left. A routine or a helper never
+        # reaches this, because passes() is false there.
+        from easyagent.yolo import FLOOR_MESSAGE, catastrophic
+
+        kind = getattr(request, "kind", "")
+        floor = catastrophic(getattr(request, "command", "") or "") if kind in {"shell", "ssh", "windows"} else None
+        if floor:
+            _audit(
+                store,
+                bot_id,
+                {
+                    "at": now_iso(),
+                    "decision": "block",
+                    "tag": "yolo",
+                    "rule": "catastrophic",
+                    "why": FLOOR_MESSAGE,
+                    "detail": floor,
+                },
+            )
+            raise ToolError(FLOOR_MESSAGE + " It was not run.")
+        if verdict.tier in {BLOCK, ASK}:
+            _audit(
+                store,
+                bot_id,
+                {
+                    "at": now_iso(),
+                    "decision": "approve",
+                    "tag": "yolo",
+                    "rule": verdict.rule,
+                    "why": verdict.why,
+                    "detail": verdict.detail,
+                },
+            )
+            if verdict.tier == ASK:
+                return _release_ask(store, request, bot_id, verdict)
+            _remember_created(request)
+            return request, None
     if verdict.rule == "browser-secret":
         return await _hand_browser(store, request, bot_id, verdict, proposal)
     if verdict.tier == BLOCK:

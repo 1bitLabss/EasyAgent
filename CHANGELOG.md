@@ -1,5 +1,8 @@
 # Changelog
 
+## 0.3.46
+- A reply that has just finished shows its code highlighted, in the same row. While the reply is still arriving, code stays plain. Existing rows do not move.
+
 ## 0.3.45
 - Streamed tokens paint in batches, about thirty times a second, and slow down when a paint is expensive. The rest of the window does not redraw on every token.
 - A reply that is still arriving skips syntax highlighting. Only the open tail is parsed again.

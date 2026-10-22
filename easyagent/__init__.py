@@ -2,7 +2,7 @@
 
 import os as _os
 
-__version__ = "0.3.45"
+__version__ = "0.3.46"
 
 
 def _drop_inherited_tls_keylog() -> None:

@@ -4,11 +4,13 @@ import type { Root, RootContent } from "hast";
 import { Fragment, type ReactNode } from "react";
 import { jsx, jsxs } from "react/jsx-runtime";
 import { defaultUrlTransform } from "react-markdown";
+import rehypeHighlight from "rehype-highlight";
 import remarkGfm from "remark-gfm";
 import remarkParse from "remark-parse";
 import remarkRehype from "remark-rehype";
 import { unified } from "unified";
 import { visit } from "unist-util-visit";
+import { VFile } from "vfile";
 
 /**
  * One parser for the session. Streaming never loads the highlighter.
@@ -18,6 +20,10 @@ import { visit } from "unist-util-visit";
 const processor = unified().use(remarkParse).use(remarkGfm).use(remarkRehype, { allowDangerousHtml: true });
 const parsed = new Map<string, Root>();
 let parses = 0;
+// Same highlighter the finished transcript uses. Applied only after the reply
+// settles, and only on a copy, so a cached paragraph is not tokenized again.
+const applyHighlight = rehypeHighlight() as unknown as (tree: Root, file: VFile) => void;
+const highlightFile = new VFile();
 
 function treeFor(source: string, settle: boolean): Root {
   if (settle) {
@@ -57,10 +63,17 @@ export function streamingParseCount(): number {
   return parses;
 }
 
+function paintHighlight(tree: Root): Root {
+  const copy = structuredClone(tree);
+  applyHighlight(copy, highlightFile);
+  return copy;
+}
+
 /** React for one markdown block. `settle` keeps the sanitized tree for the next token. */
-export function renderStreamingBlock(source: string, settle = false): ReactNode {
+export function renderStreamingBlock(source: string, settle = false, highlight = false): ReactNode {
   if (!source) return null;
-  return toJsxRuntime(treeFor(source, settle), {
+  const tree = treeFor(source, settle);
+  return toJsxRuntime(highlight ? paintHighlight(tree) : tree, {
     Fragment,
     ignoreInvalidStyle: true,
     jsx,

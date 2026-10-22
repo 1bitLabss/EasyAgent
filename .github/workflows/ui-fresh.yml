@@ -16,6 +16,6 @@ jobs:
           node-version: "22"
       - name: Run the UI tests
         working-directory: web
-        run: npm ci --no-audit --no-fund && npx vitest run
+        run: npm ci --no-audit --no-fund && npx playwright install chromium && npx vitest run
       - name: Shipped UI matches web/src
         run: bash scripts/check_ui_fresh.sh

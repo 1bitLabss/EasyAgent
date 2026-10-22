@@ -102,7 +102,6 @@ const MessageRow = memo(function MessageRow({
   botName,
   sending,
   streaming = false,
-  lite = false,
   freeze = false,
   pauseNote = false,
   onChoose,
@@ -112,7 +111,6 @@ const MessageRow = memo(function MessageRow({
   botName: string;
   sending: boolean;
   streaming?: boolean;
-  lite?: boolean;
   freeze?: boolean;
   pauseNote?: boolean;
   onChoose: (choice: string) => void;
@@ -165,7 +163,7 @@ const MessageRow = memo(function MessageRow({
         {message.routine_name ? <p className="mb-1 text-xs opacity-70">Routine · {message.routine_name}</p> : null}
         {message.speaker_name ? <p className="mb-1 text-xs opacity-70">{message.speaker_name}</p> : null}
         <div className={mine ? "whitespace-pre-wrap" : ""}>
-          {mine ? (message.content || "") : <Markdown text={message.content || ""} streaming={streaming || lite || freeze} freeze={freeze} />}
+          {mine ? (message.content || "") : <Markdown text={message.content || ""} streaming={streaming || freeze} freeze={freeze} />}
         </div>
         {chip ? <p className="mt-2 block truncate text-xs" data-testid={`chip-${message.chip}`} title={chipTitle(message)}>{chip}</p> : null}
         {message.chip === "held" && message.id && botId && chatId ? (
@@ -316,7 +314,6 @@ const MessageRow = memo(function MessageRow({
   prev.last === next.last &&
   prev.sending === next.sending &&
   prev.streaming === next.streaming &&
-  prev.lite === next.lite &&
   prev.freeze === next.freeze &&
   prev.pauseNote === next.pauseNote &&
   prev.botName === next.botName &&
@@ -332,18 +329,12 @@ function rowFrozen(message: ChatMessage, frozen?: FrozenReply): boolean {
   return message.id === frozen.replyId || message.client_id === `live-${frozen.replyId}`;
 }
 
-function keptLite(message: ChatMessage, ids: Set<string>): boolean {
-  if (message.role !== "assistant") return false;
-  return ids.has(message.client_id || "") || ids.has(message.id || "") || ids.has(`live-${message.id || ""}`);
-}
-
 const Transcript = memo(function Transcript({
   rows,
   botName,
   sending,
   liveKey,
   frozen,
-  liteIds,
   onChoose,
 }: {
   rows: ChatMessage[];
@@ -351,7 +342,6 @@ const Transcript = memo(function Transcript({
   sending: boolean;
   liveKey: string;
   frozen?: FrozenReply;
-  liteIds: Set<string>;
   onChoose: (choice: string) => void;
 }) {
   return (
@@ -368,7 +358,6 @@ const Transcript = memo(function Transcript({
             botName={botName}
             sending={sending}
             streaming={live}
-            lite={!freeze && keptLite(message, liteIds)}
             freeze={freeze}
             pauseNote={pauseOnUser}
             onChoose={onChoose}
@@ -409,7 +398,6 @@ export function ChatPane() {
   const composerRef = useRef<ComposerHandle>(null);
   const heldSteps = useRef<ActivityStep[]>([]);
   const seenRun = useRef("");
-  const streamedLite = useRef(new Set<string>());
   const pinnedBusy = useRef(new Set<string>());
   const historyRef = useRef<ChatMessage[]>([]);
   const getHistory = useCallback(() => deriveUserHistory(historyRef.current), []);
@@ -589,11 +577,6 @@ export function ChatPane() {
   const stamp = replyId ? `live-${replyId}` : runId ? `live-${runId}` : "";
   const frozen = flight?.frozen;
   const streamingReply = Boolean(liveTurn && ((live?.text || "").trim() || (live?.reasoning || "").trim()));
-  if (streamingReply && stamp) streamedLite.current.add(stamp);
-  if (replyId) {
-    streamedLite.current.add(replyId);
-    streamedLite.current.add(`live-${replyId}`);
-  }
   const placed = arrangeBusy(rows, pinnedBusy.current);
   let head = placed.head;
   const showFrozen = Boolean(frozen && frozenHasBody(frozen));
@@ -781,7 +764,6 @@ export function ChatPane() {
                 sending={Boolean(flight?.sending)}
                 liveKey={streamingReply ? stamp : ""}
                 frozen={frozen}
-                liteIds={streamedLite.current}
                 onChoose={onChoose}
               />
               {liveTurn && steps.length ? steps.map((item) => (

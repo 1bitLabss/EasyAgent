@@ -28,8 +28,8 @@ function bot(): Bot {
   return {
     id: "bot-1",
     name: "Ada",
-    endpoint_id: "llm3",
-    endpoint_name: "LLM3",
+    endpoint_id: "cedar",
+    endpoint_name: "Cedar",
     endpoint_base_url: null,
     model: null,
     context_tokens: 8192,
@@ -64,14 +64,14 @@ function chat(messages: ChatMessage[], status: "idle" | "running" = "idle"): Cha
 const asked: ChatMessage = {
   id: "u1",
   role: "user",
-  content: "Check the page, then ask LLM3.",
+  content: "Check the page, then ask Cedar.",
   created_at: "2026-10-22T18:00:00Z",
 };
 
 const reply: ChatMessage = {
   id: "a1",
   role: "assistant",
-  content: "LLM3 finished the lookup.",
+  content: "Cedar finished the lookup.",
   created_at: "2026-10-22T18:00:33Z",
 };
 
@@ -163,7 +163,7 @@ describe("one live status", () => {
     expectSameStatus(status!);
     const looking = document.querySelector("[data-testid=activity-step]");
     const askedLine = document.querySelector("[data-testid=asked-line]");
-    expect(askedLine?.textContent).toBe("Asked LLM3 → got reply (33s)");
+    expect(askedLine?.textContent).toBe("Asked Cedar → got reply (33s)");
     expect(looking!.compareDocumentPosition(askedLine!) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
     expect(askedLine!.compareDocumentPosition(status!) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
     expect(status!.textContent).toMatch(/Writing/);

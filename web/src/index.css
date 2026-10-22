@@ -278,11 +278,8 @@ body {
 }
 
 .jump-latest {
-  position: absolute;
-  left: 50%;
-  bottom: calc(var(--dock-h, 9rem) + 12px);
-  z-index: 21;
-  transform: translateX(-50%);
+  display: block;
+  margin: 0 auto 8px;
   border: 0;
   border-radius: 999px;
   background: #111111;

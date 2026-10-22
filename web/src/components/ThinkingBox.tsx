@@ -13,28 +13,34 @@ export function thoughtLabel(seconds: number | undefined) {
 export function ThinkingBox({
   text,
   streaming = false,
+  answering = false,
   seconds,
   startedAt,
   now,
 }: {
   text?: string;
   streaming?: boolean;
+  /** Hermes closes a finished reasoning group once the answer text starts. */
+  answering?: boolean;
   seconds?: number;
   startedAt?: number;
   now?: number;
 }) {
   const body = (text || "").trim();
-  const [opened, setOpened] = useState<boolean | null>(streaming ? true : null);
+  const [opened, setOpened] = useState<boolean | null>(null);
   const stick = useRef(true);
   const scroller = useRef<HTMLDivElement>(null);
   const [tick, setTick] = useState(() => Date.now());
+  // A reasoning-only turn stays open after it settles. The answer closes it.
+  const keepOpen = useRef(false);
+  if (streaming && !answering) keepOpen.current = true;
+  if (answering) keepOpen.current = false;
   useEffect(() => {
     if (!streaming) return;
     const timer = window.setInterval(() => setTick(Date.now()), 1000);
     return () => window.clearInterval(timer);
   }, [streaming]);
-  // Stay as it was when reasoning finished. Collapsing here shifts the transcript.
-  const expanded = opened === null ? streaming : opened;
+  const expanded = opened !== null ? opened : (streaming ? !answering : keepOpen.current);
   const elapsed = seconds ?? (startedAt ? Math.max(0, Math.round(((now || tick) - startedAt) / 1000)) : undefined);
   const clock = thoughtLabel(elapsed);
   useLayoutEffect(() => {

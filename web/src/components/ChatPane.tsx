@@ -194,7 +194,7 @@ const MessageRow = memo(function MessageRow({
       data-role={message.role}
       data-message-id={message.id || message.client_id || ""}
     >
-      {message.role === "assistant" && !failed && shownThinking(message.thinking) ? <ThinkingBox text={shownThinking(message.thinking)} streaming={streaming && !freeze} seconds={message.thought_seconds} /> : null}
+      {message.role === "assistant" && !failed && shownThinking(message.thinking) ? <ThinkingBox text={shownThinking(message.thinking)} streaming={streaming && !freeze} answering={Boolean((message.content || "").trim())} seconds={message.thought_seconds} /> : null}
       {showBubble ? (
       <div className={cn(mine ? "bubble-user" : "bubble-bot", failed && "bg-danger/10 text-danger")}>
         {message.routine_name ? <p className="mb-1 text-xs opacity-70">Routine · {message.routine_name}</p> : null}
@@ -429,7 +429,10 @@ export function ChatPane() {
   const [error, setError] = useState("");
   const [askId, setAskId] = useState("");
   const [menu, setMenu] = useState(false);
-  const { scrollRef, contentRef, isAtBottom, scrollToBottom } = useStickToBottom({ initial: "instant", resize: "instant" });
+  const { scrollRef, contentRef, scrollToBottom } = useStickToBottom({ initial: "instant", resize: "instant" });
+  const [following, setFollowing] = useState(true);
+  const followLock = useRef(false);
+  const userMoved = useRef(false);
   const sectionRef = useRef<HTMLElement>(null);
   const dockRef = useRef<HTMLDivElement>(null);
   const composerRef = useRef<ComposerHandle>(null);
@@ -502,6 +505,18 @@ export function ChatPane() {
     const el = scrollRef.current;
     if (!el) return;
     if (el.scrollTop < 64) void loadOlder();
+    if (followLock.current) return;
+    const atBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 48;
+    if (atBottom) {
+      userMoved.current = false;
+      setFollowing(true);
+      return;
+    }
+    if (userMoved.current) setFollowing(false);
+  }
+
+  function onWheel(event: { deltaY: number }) {
+    if (event.deltaY < 0) userMoved.current = true;
   }
 
   async function loadOlder() {
@@ -538,8 +553,25 @@ export function ChatPane() {
       anchor.current = null;
       return;
     }
-    if (isAtBottom) el.scrollTop = el.scrollHeight;
-  }, [messageCount, live?.text, isAtBottom, scrollRef]);
+    if (!following) return;
+    followLock.current = true;
+    el.scrollTop = el.scrollHeight;
+    followLock.current = false;
+  }, [messageCount, live?.text, live?.reasoning, following, scrollRef]);
+
+  useEffect(() => {
+    const node = contentRef.current;
+    if (!node || !following) return;
+    const observer = new ResizeObserver(() => {
+      const el = scrollRef.current;
+      if (!el || !following) return;
+      followLock.current = true;
+      el.scrollTop = el.scrollHeight;
+      followLock.current = false;
+    });
+    observer.observe(node);
+    return () => observer.disconnect();
+  }, [contentRef, following, scrollRef]);
 
   useEffect(() => {
     const el = scrollRef.current;
@@ -759,7 +791,7 @@ export function ChatPane() {
         </div>
       ) : null}
 
-      <div ref={scrollRef} onScroll={onScroll} className="chat-scroll min-h-0 flex-1 overflow-y-auto px-4 pt-2" style={{ overflowAnchor: "none" }}>
+      <div ref={scrollRef} onScroll={onScroll} onWheel={onWheel} className="chat-scroll min-h-0 flex-1 overflow-y-auto px-4 pt-2" style={{ overflowAnchor: "none" }}>
         <div ref={contentRef} className="mx-auto flex w-full max-w-[760px] flex-col gap-4">
           {!chatId || !open ? (
             <div className="flex flex-1 flex-col items-center justify-center px-6 py-24 text-center">
@@ -830,12 +862,21 @@ export function ChatPane() {
         </div>
       </div>
 
-      {open && !isAtBottom ? (
-        <button type="button" className="jump-latest" data-testid="jump-latest" onClick={() => void scrollToBottom("instant")}>
-          Jump to latest
-        </button>
-      ) : null}
       <div ref={dockRef} className="composer-dock">
+        {open && !following ? (
+          <button
+            type="button"
+            className="jump-latest"
+            data-testid="jump-latest"
+            onClick={() => {
+              userMoved.current = false;
+              setFollowing(true);
+              void scrollToBottom("instant");
+            }}
+          >
+            Jump to latest
+          </button>
+        ) : null}
         <div className="px-4">
           {botId && bot ? <ApprovalCard botId={botId} botName={bot.name} active={running} /> : null}
         </div>

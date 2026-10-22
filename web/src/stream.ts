@@ -57,6 +57,8 @@ export type Flight = {
   watchGen?: number;
   /** The partial as it looked when the user row was inserted. It does not grow after that. */
   frozen?: FrozenReply;
+  /** This flight has seen the server call the run running. An idle cache after that is the end. */
+  sawRunning?: boolean;
 };
 
 export const PAUSE_TEXT = "Paused, reading your message";
@@ -187,6 +189,14 @@ export function setFlightForTests(botId: string, chatId: string, live: Live | nu
     settled: false,
   };
   flights.set(key, flight);
+  flushNow(flight);
+  if (sending) armStreamWatch(flight);
+}
+
+export function pushEventForTests(botId: string, chatId: string, event: Record<string, unknown>) {
+  const flight = flightFor(botId, chatId);
+  if (!flight) return;
+  apply(event, flight);
   flushNow(flight);
 }
 
@@ -326,6 +336,48 @@ function carry(live: Live, patch: Partial<Live>): Live {
   };
 }
 
+/** One reasoning segment per model call. The same offset is not appended again. */
+export function mergeReasoning(current: string, chunk: string, offset?: number): string {
+  if (!chunk) return current;
+  if (typeof offset === "number" && offset >= 0 && !Number.isNaN(offset)) {
+    if (current.slice(offset, offset + chunk.length) === chunk) return current;
+    if (offset === current.length) return current + chunk;
+    if (offset < current.length && chunk.startsWith(current.slice(offset))) return current.slice(0, offset) + chunk;
+    if (offset > current.length) return current.endsWith(chunk) ? current : current + chunk;
+    return current.slice(0, offset) + chunk + current.slice(offset + chunk.length);
+  }
+  if (current.endsWith(chunk)) return current;
+  if (current && chunk.startsWith(current)) return chunk;
+  if (chunk.length > 24 && current.includes(chunk)) return current;
+  return current + chunk;
+}
+
+/** The reasoning channel sometimes ends with the first word of the answer. */
+export function stripAnswerLeak(reasoning: string, answer: string): string {
+  const thought = reasoning.replace(/\s+$/u, "");
+  const body = answer.replace(/^\s+/u, "");
+  if (!thought || !body) return reasoning;
+  const limit = Math.min(thought.length, body.length, 80);
+  for (let size = limit; size >= 2; size -= 1) {
+    const tail = thought.slice(-size);
+    if (!body.startsWith(tail)) continue;
+    const at = thought.length - size;
+    if (at <= 0 || !/\s/u.test(thought[at - 1] || "")) continue;
+    return thought.slice(0, at).replace(/\s+$/u, "");
+  }
+  return reasoning;
+}
+
+/** Later model calls append. A replay of text already on screen does not. */
+export function mergeAnswer(current: string, chunk: string, reset = false): string {
+  if (reset) return chunk;
+  if (!chunk) return current;
+  if (!current) return chunk;
+  if (chunk.startsWith(current)) return chunk;
+  if (current.endsWith(chunk)) return current;
+  return current + chunk;
+}
+
 function freezeThought(live: Live): number | undefined {
   if (live.thoughtSeconds) return live.thoughtSeconds;
   if (!live.thoughtAt) return undefined;
@@ -386,6 +438,7 @@ function finish(flight: Flight, chat?: Chat) {
   noteSettled(flight.botId, flight.chatId, runId);
   flight.settled = true;
   flight.sending = false;
+  disarmStreamWatch(flight);
   // The reply finished whole. Keep the height that was on screen when the
   // user message landed, so the rest of the text does not push that message.
   let shown = chat;
@@ -432,6 +485,7 @@ function apply(event: Record<string, unknown>, flight: Flight) {
   const live = flight.live || { phase: "thinking" as const, label: "Waiting on model", text: "", reasoning: "", run: null, heardAt: Date.now() };
   if (event.type === "run" && event.run) {
     const run = event.run as Run;
+    if (run.status === "running") flight.sawRunning = true;
     const statusChanged = (live.run?.status || "") !== (run.status || "");
     const replyId = run.reply_id || live.replyId || "";
     const switched = Boolean(live.replyId && replyId && live.replyId !== replyId);
@@ -457,6 +511,7 @@ function apply(event: Record<string, unknown>, flight: Flight) {
     const chat = event.chat as Chat;
     const prev = queryClient.getQueryData<Chat>(["chat", flight.botId, flight.chatId]);
     queryClient.setQueryData(["chat", flight.botId, flight.chatId], mergeChat(prev, chat));
+    if (chat.run?.status === "running") flight.sawRunning = true;
     const saved = [...(chat.messages || [])].reverse().find((item) => item.role === "assistant" && item.live);
     const replyId = chat.run?.reply_id || saved?.id || "";
     const keepPause = Boolean(flight.frozen && (live.label || "").startsWith("Paused") && !(chat.run?.current_step || "").startsWith("Paused"));
@@ -570,6 +625,8 @@ function apply(event: Record<string, unknown>, flight: Flight) {
   }
   if (event.type === "thinking") {
     const chunk = String(event.text || "");
+    const offset = typeof event.offset === "number" ? event.offset : undefined;
+    const nextReasoning = flight.frozen ? flight.frozen.reasoning : mergeReasoning(live.reasoning, chunk, offset);
     const chars = (live.chars || 0) + chunk.length;
     const waitAt = live.waitAt || Date.now();
     const label = flight.frozen && (live.label || "").startsWith("Paused")
@@ -583,7 +640,7 @@ function apply(event: Record<string, unknown>, flight: Flight) {
     remember(flight, carry(live, {
       phase: live.phase === "reply" ? "reply" : "thinking",
       label,
-      reasoning: flight.frozen ? flight.frozen.reasoning : live.reasoning + chunk,
+      reasoning: nextReasoning,
       reasoningLive: true,
       thoughtAt: live.thoughtAt || Date.now(),
       chars,
@@ -604,12 +661,12 @@ function apply(event: Record<string, unknown>, flight: Flight) {
         tokens: Math.floor(chars / 4),
       });
     const reset = Boolean(event.reset);
-    const nextText = reset ? chunk : chunk && live.text && chunk.startsWith(live.text) ? chunk : live.text + chunk;
+    const nextText = flight.frozen ? flight.frozen.text : mergeAnswer(live.text, chunk, reset);
     remember(flight, carry(live, {
       phase: "reply",
       label,
-      text: flight.frozen ? flight.frozen.text : nextText,
-      reasoning: flight.frozen ? flight.frozen.reasoning : live.reasoning,
+      text: nextText,
+      reasoning: flight.frozen ? flight.frozen.reasoning : stripAnswerLeak(live.reasoning, nextText),
       reasoningLive: false,
       thoughtSeconds: freezeThought(live),
       chars,
@@ -671,7 +728,18 @@ function disarmStreamWatch(flight: Flight) {
 }
 
 async function recoverQuietStream(flight: Flight) {
-  if (flight.replaced || flight.settled || !flight.sending || flight.resyncing) return;
+  if (flight.replaced || flight.settled || !flight.sending) {
+    disarmStreamWatch(flight);
+    return;
+  }
+  if (flight.resyncing) return;
+  if (flight.live?.run?.status === "running") flight.sawRunning = true;
+  const cached = queryClient.getQueryData<Chat>(["chat", flight.botId, flight.chatId]);
+  // The turn already ended on the server. The Writing line is leftover.
+  if (flight.sawRunning && !flight.frozen && cached?.run && cached.run.status !== "running") {
+    finish(flight, cached);
+    return;
+  }
   const heard = flight.live?.heardAt || 0;
   const quiet = Date.now() - heard;
   if (!heard || quiet < STREAM_QUIET_MS) return;
@@ -784,6 +852,7 @@ function begin(botId: string, chatId: string, seed?: { label?: string; run?: Run
   };
   flights.set(key, flight);
   flushNow(flight);
+  armStreamWatch(flight);
   return flight;
 }
 
@@ -993,9 +1062,12 @@ async function afterStream(flight: Flight, botId: string, chatId: string, ended:
   try {
     const chat = await api<Chat>(`/api/bots/${botId}/chats/${chatId}?window=80`);
     if (chat.run?.status === "running") {
+      flight.sawRunning = true;
       flight.live = flight.live || { phase: "thinking", label: chat.run.current_step || "Thinking", text: "", reasoning: "", run: chat.run, heardAt: Date.now() };
       flight.live.run = chat.run;
       flushNow(flight);
+      // The socket closed while the server still said running. Keep checking so a finished turn clears Writing.
+      armStreamWatch(flight);
     } else {
       finish(flight, chat);
     }

@@ -1,8 +1,9 @@
-import { fireEvent, render, screen } from "@testing-library/react";
-import { describe, expect, it } from "vitest";
+import { cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { afterEach, describe, expect, it } from "vitest";
 import { ThinkingBox, stickToBottom, thoughtLabel } from "./ThinkingBox";
 
 describe("thinking panel", () => {
+  afterEach(() => cleanup());
   it("stays open after reasoning finishes so the transcript does not jump", () => {
     const view = render(<ThinkingBox text={"Looking at the question.\nThe check found nothing."} streaming seconds={12} />);
     expect(screen.getByTestId("thinking-body").textContent).toContain("Looking at the question.");
@@ -16,6 +17,16 @@ describe("thinking panel", () => {
     expect(screen.queryByTestId("thinking-body")).toBeNull();
     fireEvent.click(screen.getByRole("button", { name: /Thinking/ }));
     expect(screen.getByTestId("thinking-body").textContent).toContain("The check found nothing.");
+  });
+
+  it("closes when the answer starts and stays closed after that reply settles", () => {
+    const view = render(<ThinkingBox text={"Plan the check."} streaming />);
+    expect(view.getByTestId("thinking-body").textContent).toContain("Plan the check.");
+    view.rerender(<ThinkingBox text={"Plan the check."} streaming answering />);
+    expect(view.queryByTestId("thinking-body")).toBeNull();
+    expect(view.getByRole("button", { name: /Thinking/ }).getAttribute("aria-expanded")).toBe("false");
+    view.rerender(<ThinkingBox text={"Plan the check."} streaming={false} answering />);
+    expect(view.queryByTestId("thinking-body")).toBeNull();
   });
 
   it("starts collapsed when the thought was not streaming", () => {

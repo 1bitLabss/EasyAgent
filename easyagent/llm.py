@@ -1120,6 +1120,30 @@ class _ThinkSplitter:
         return [(kind, piece)]
 
 
+def drop_answer_leak(thought: str, answer: str) -> str:
+    """Drop a reasoning tail that is the start of the answer.
+
+    The reasoning channel sometimes emits the first answer word before the
+    text channel starts. That word belongs to the reply, not the thought.
+    """
+    if not thought or not answer:
+        return thought
+    trimmed = thought.rstrip()
+    body = answer.lstrip()
+    if not trimmed or not body:
+        return thought
+    limit = min(len(trimmed), len(body), 80)
+    for size in range(limit, 1, -1):
+        tail = trimmed[-size:]
+        if not body.startswith(tail):
+            continue
+        at = len(trimmed) - size
+        if at <= 0 or not trimmed[at - 1].isspace():
+            continue
+        return trimmed[:at].rstrip()
+    return thought
+
+
 def peel_thinking(text: str) -> tuple[str, str]:
     """Return (reasoning, answer). The answer does not contain the think block."""
     splitter = _ThinkSplitter()

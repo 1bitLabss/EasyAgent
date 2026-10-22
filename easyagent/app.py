@@ -6043,6 +6043,7 @@ async def _stream_reply(
     yield _sse({"type": "status", "text": "Waiting on model"})
     conn = gate.bind_connection(endpoint, bot.get("name") or "", store=store)
     from easyagent.generation import GenerationLimit, bind_limits, reset_limits
+    from easyagent.llm import drop_answer_leak
 
     length = bind_limits(endpoint)
     try:
@@ -6122,6 +6123,7 @@ async def _stream_reply(
             if kind == "thinking":
                 if text:
                     note_thought()
+                    offset = len(thought)
                     thought += text
                     saved_run = _write_live(
                         store,
@@ -6132,7 +6134,7 @@ async def _stream_reply(
                         force=not thought_saved,
                     )
                     thought_saved = True
-                    yield _sse({"type": "thinking", "text": text})
+                    yield _sse({"type": "thinking", "text": text, "offset": offset})
                     if saved_run:
                         yield _sse({"type": "run", "run": saved_run})
                 continue
@@ -6187,6 +6189,11 @@ async def _stream_reply(
             elif kind == "delta":
                 extra = text or ""
                 sent += extra
+                cleaned = drop_answer_leak(thought, sent)
+                if cleaned != thought:
+                    thought = cleaned
+                    _replace_live_thinking(store, bot_id, chat_id, thought)
+                    yield _sse({"type": "replay", "text": thought})
                 if extra:
                     force = saved_chars == 0 or len(sent) - saved_chars >= 24
                     saved_run = _write_live(

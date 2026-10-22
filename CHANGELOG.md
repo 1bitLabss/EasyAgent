@@ -3,6 +3,7 @@
 ## 0.3.46
 - A reply that has just finished shows its code highlighted, in the same row. While the reply is still arriving, code stays plain. Existing rows do not move.
 - One live status line per turn, updated in place. Finished steps, including a tool step and "Asked … → got reply", stay above it. A second Writing timer does not appear.
+- Reasoning from each model call is kept once, and the first word of the answer does not land in the thinking box. The thinking box closes when the answer starts. A finished turn clears Writing, and the view stays at the bottom unless you scroll up.
 
 ## 0.3.45
 - Streamed tokens paint in batches, about thirty times a second, and slow down when a paint is expensive. The rest of the window does not redraw on every token.

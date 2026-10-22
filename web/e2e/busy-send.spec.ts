@@ -41,9 +41,15 @@ async function send(page: Page, text: string) {
   await page.getByRole("button", { name: "Send", exact: true }).click();
 }
 
+async function expectOneLiveStatus(page: Page) {
+  await expect(page.getByTestId("live-status")).toHaveCount(1);
+  await expect(page.getByTestId("run-state")).toHaveCount(1);
+}
+
 async function seePause(page: Page): Promise<boolean> {
   const deadline = Date.now() + 8_000;
   while (Date.now() < deadline) {
+    await expectOneLiveStatus(page);
     const text = await page.getByTestId("run-state").textContent().catch(() => "");
     if ((text || "").includes("Paused, reading")) return true;
     await page.waitForTimeout(20);
@@ -83,6 +89,7 @@ test("a message during a reply pauses, stays put, and is answered in order", asy
   await page.goto("/");
   await page.getByRole("button", { name, exact: true }).click();
   await expect(page.getByTestId("run-state")).toHaveText("Idle");
+  await expectOneLiveStatus(page);
 
   const trials = [
     { tag: "e1", word: "e1-03", extra: 0, pivot: "pivot-1" },
@@ -96,6 +103,7 @@ test("a message during a reply pauses, stays put, and is answered in order", asy
     await send(page, `long essay ${trial.tag}`);
     await expect(page.getByText(trial.word, { exact: false }).first()).toBeVisible();
     await expect(page.getByTestId("run-state")).toContainText("Writing");
+    await expectOneLiveStatus(page);
     if (trial.extra) await page.waitForTimeout(trial.extra);
     const before = await screenRows(page);
     const partialAt = before.findIndex((row) => row.role === "assistant" && row.text.includes(trial.word));
@@ -116,6 +124,7 @@ test("a message during a reply pauses, stays put, and is answered in order", asy
     expect(await pause).toBe(true);
     await expect(page.getByText(`Noted ${trial.pivot}.`)).toBeVisible();
     await expect(page.getByTestId("run-state")).toHaveText("Idle");
+    await expectOneLiveStatus(page);
     await page.locator("#draft").fill("ready");
     await expect(page.getByRole("button", { name: "Send", exact: true })).toBeEnabled();
     await page.locator("#draft").fill("");
@@ -143,10 +152,12 @@ test("a message during a reply pauses, stays put, and is answered in order", asy
   await expect(page.getByText("e9-04", { exact: false }).first()).toBeVisible();
   await expect(page.getByRole("button", { name: "Stop", exact: true })).toBeVisible();
   await expect(page.getByTestId("run-state")).not.toHaveText("Idle");
+  await expectOneLiveStatus(page);
   await expect(page.getByText("e9-08", { exact: false }).first()).toBeVisible();
   await expect(page.getByText("nothing was in flight")).toHaveCount(0);
   await page.getByRole("button", { name: "Stop", exact: true }).click();
   await expect(page.getByTestId("run-state")).toHaveText("Idle");
+  await expectOneLiveStatus(page);
   await expect(page.getByText("e9-04", { exact: false }).first()).toBeVisible();
   await page.locator("#draft").fill("ready");
   await expect(page.getByRole("button", { name: "Send", exact: true })).toBeEnabled();
@@ -167,6 +178,7 @@ test("a message during a reply pauses, stays put, and is answered in order", asy
   expect(await burstPause).toBe(true);
   await expect(page.getByText("Answered burst-one, burst-two, and burst-three together.")).toBeVisible();
   await expect(page.getByTestId("run-state")).toHaveText("Idle");
+  await expectOneLiveStatus(page);
   const burst = await screenRows(page);
   const essay = burst.findIndex((row) => row.role === "assistant" && row.text.includes("e8-03"));
   const one = burst.findIndex((row) => row.role === "user" && row.text.includes("burst-one"));

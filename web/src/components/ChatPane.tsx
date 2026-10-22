@@ -15,7 +15,7 @@ import { chipText, chipTitle } from "@/lib/chips";
 import { yoloClock, yoloRemaining } from "@/lib/yolo";
 import { activityLabel, askedLine, type ActivityStep } from "@/lib/activity";
 import { deriveUserHistory } from "@/lib/composer-history";
-import { activityLine, describeRun, faceStateFor, runPresence, runTone, shownStep, workingLine } from "@/lib/run";
+import { describeRun, faceStateFor, runPresence, runTone, shownStep, workingLine } from "@/lib/run";
 import { arrangeBusy, hideWhileSending, messageHasBubble, placeLiveReply, reactionWho, rowKey, shownThinking } from "@/lib/transcript";
 import type { FrozenReply } from "@/stream";
 import { cn } from "@/lib/utils";
@@ -74,6 +74,43 @@ function Receipts({ message }: { message: ChatMessage }) {
     </div>
   );
 }
+
+/**
+ * One live status for the open turn. Hermes keeps a single status row,
+ * memoized and keyed by id, and rewrites its text in place. A finished tool
+ * step is a static row above this line, never a second clock.
+ */
+const LiveStatus = memo(function LiveStatus({
+  active,
+  step,
+  startedAt,
+  stuck,
+  queued,
+  halted,
+}: {
+  active: boolean;
+  step: string;
+  startedAt?: string | null;
+  stuck: boolean;
+  queued: boolean;
+  halted: boolean;
+}) {
+  return (
+    <div id="live-status" data-testid="live-status" data-live={active ? "true" : "false"} className="sys-line" role="status">
+      <p>
+        <span className={cn("h-1.5 w-1.5 rounded-full", active ? "" : "invisible", halted ? "bg-danger" : "bg-current")} />
+        <Elapsed>
+          {(clock) => {
+            const line = runPresence({ active, step, startedAt, now: clock });
+            return <span data-testid="run-state" data-state={line.kind}>{line.text}</span>;
+          }}
+        </Elapsed>
+        {active && stuck ? <span>No activity for a while</span> : null}
+        {active && queued ? <span data-testid="queued-badge">Queued</span> : null}
+      </p>
+    </div>
+  );
+});
 
 function Quiet({ icon, text, detail }: { icon?: ReactNode; text: string; detail?: string }) {
   const [open, setOpen] = useState(false);
@@ -609,14 +646,7 @@ export function ChatPane() {
   const active = Boolean(open && (running || (flight?.sending && live && live.phase !== "error" && live.phase !== "stopped")));
   const presenceStep = named;
   const runStarted = live?.run?.started_at || open?.run?.started_at || live?.run?.activity_started_at || open?.run?.activity_started_at;
-  const status = (
-    <Elapsed>
-      {(clock) => {
-        const line = runPresence({ active, step: presenceStep, startedAt: runStarted, now: clock });
-        return <span data-testid="run-state" data-state={line.kind}>{line.text}</span>;
-      }}
-    </Elapsed>
-  );
+  const finishedSteps = steps.filter((item) => item.state !== "running");
 
   chooseRef.current = (choice) => {
     void submit(choice).catch((reason: unknown) => {
@@ -766,7 +796,7 @@ export function ChatPane() {
                 frozen={frozen}
                 onChoose={onChoose}
               />
-              {liveTurn && steps.length ? steps.map((item) => (
+              {liveTurn && steps.length ? finishedSteps.map((item) => (
                 <div key={item.id} data-testid="activity-step" data-state={item.state} data-step-id={item.id}>
                   <Quiet
                     icon={runTone(item.text, "running") === "tool" ? <Terminal className="h-3 w-3" /> : <MessageSquare className="h-3 w-3" />}
@@ -778,40 +808,23 @@ export function ChatPane() {
                   <Quiet text={`Used ${heldSteps.current.length} steps`} detail={heldSteps.current.map((item) => activityLabel(item)).join("\n")} />
                 </div>
               ) : null}
-              {(open.messages || []).length || running ? (
-                <div className="sys-line" role="status" data-testid="chat-working-pill" aria-hidden={running && view ? undefined : true}>
-                  {running && view ? (
-                    <p>
-                      <span className={cn("h-1.5 w-1.5 rounded-full", tone === "halted" ? "bg-danger" : "bg-current")} />
-                      <Elapsed>
-                        {(clock) => (
-                          <span data-testid="activity-line">
-                            {activityLine({
-                              step: named,
-                              jobStartedAt: runStarted,
-                              activityStartedAt: runStarted,
-                              now: clock,
-                              tokens: Math.floor((live?.chars || 0) / 4),
-                            }) || workingLine(live?.run || open?.run, clock).text || view?.words}
-                          </span>
-                        )}
-                      </Elapsed>
-                      {pill.stuck ? <span>No activity for a while</span> : null}
-                      {pill.queued ? <span data-testid="queued-badge">Queued</span> : null}
-                    </p>
-                  ) : (
-                    <p className="sys-line-hold">Waiting on model, 0s</p>
-                  )}
+              {open.messages?.length ? (
+                <div key="asked-line" data-testid="asked-line">
+                  <Quiet icon={<MessageSquare className="h-3 w-3" />} text={asked} />
                 </div>
               ) : null}
               {live && (live.phase === "stopped" || live.phase === "error") ? (
                 <div className="sys-line" role="status"><p className="text-danger">{live.text.startsWith("Stopped") ? live.text : `Stopped: ${live.text}`}</p></div>
               ) : null}
-              {open.messages?.length ? (
-                <div data-testid="asked-line">
-                  <Quiet icon={<MessageSquare className="h-3 w-3" />} text={asked} />
-                </div>
-              ) : null}
+              <LiveStatus
+                key="live-status"
+                active={active}
+                step={presenceStep}
+                startedAt={runStarted}
+                stuck={pill.stuck}
+                queued={pill.queued}
+                halted={tone === "halted"}
+              />
             </>
           )}
         </div>
@@ -832,7 +845,6 @@ export function ChatPane() {
         running={running}
         asking={Boolean(asking && asking.length > 1)}
         error={error || (live?.phase === "error" ? live.text : "")}
-        presence={status}
         resumeRetry={resume.retry}
         resumeCont={resume.cont}
         onSend={submit}

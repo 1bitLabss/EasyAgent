@@ -14,7 +14,7 @@ type ComposerProps = {
   running: boolean;
   asking: boolean;
   error: string;
-  presence: ReactNode;
+  presence?: ReactNode;
   resumeRetry: boolean;
   resumeCont: boolean;
   onSend: (text: string, file: File | null) => Promise<void> | void;
@@ -219,11 +219,13 @@ export const Composer = memo(forwardRef<ComposerHandle, ComposerProps>(function 
       <div className="mx-auto w-full max-w-[760px]">
         {error ? <p className="mb-2 text-center text-sm text-danger" role="alert">{error}</p> : null}
         {fileName ? <p className="mb-1 text-center text-xs text-muted">{fileName}</p> : null}
-        <p className="composer-status mb-1 text-xs text-muted" role="status">
-          {presence}
-          {resumeRetry ? <button type="button" className="ml-2" onMouseDown={(event) => event.preventDefault()} onClick={() => { onRetry(); focusSoon(); }}>Retry</button> : null}
-          {resumeCont ? <button type="button" className="ml-2" onMouseDown={(event) => event.preventDefault()} onClick={() => { onContinue(); focusSoon(); }}>Continue</button> : null}
-        </p>
+        {presence || resumeRetry || resumeCont ? (
+          <p className="composer-status mb-1 text-xs text-muted" role="status">
+            {presence}
+            {resumeRetry ? <button type="button" className="ml-2" onMouseDown={(event) => event.preventDefault()} onClick={() => { onRetry(); focusSoon(); }}>Retry</button> : null}
+            {resumeCont ? <button type="button" className="ml-2" onMouseDown={(event) => event.preventDefault()} onClick={() => { onContinue(); focusSoon(); }}>Continue</button> : null}
+          </p>
+        ) : null}
         <div className="composer">
           <button type="button" className="mb-1 flex h-8 w-8 items-center justify-center rounded-full text-foreground" aria-label="Attach" onMouseDown={(event) => event.preventDefault()} onClick={() => fileRef.current?.click()}>
             <Plus className="h-5 w-5" />

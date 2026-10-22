@@ -170,7 +170,7 @@ export function resetStreamForTests() {
   botEpoch.clear();
 }
 
-export function setFlightForTests(botId: string, chatId: string, live: Live | null) {
+export function setFlightForTests(botId: string, chatId: string, live: Live | null, sending = false) {
   const key = flightKey(botId, chatId);
   if (!live) {
     flights.delete(key);
@@ -182,7 +182,7 @@ export function setFlightForTests(botId: string, chatId: string, live: Live | nu
     runId: live.run?.id || "",
     control: new AbortController(),
     live,
-    sending: false,
+    sending,
     replaced: false,
     settled: false,
   };

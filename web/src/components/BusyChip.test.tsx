@@ -110,7 +110,8 @@ describe("busy chips", () => {
     expect(screen.getByTestId("pickup-marker").textContent).toBe("Picked up your message");
     expect(screen.getByTestId("send-now").textContent).toBe("Send now");
     expect(screen.getByTestId("stop-and-send-message").textContent).toBe("Stop and send");
-    expect(screen.getByTestId("activity-line").textContent).toContain("Writing index.html");
+    expect(screen.getAllByTestId("live-status")).toHaveLength(1);
+    expect(screen.queryByTestId("activity-line")).toBeNull();
     expect(screen.getByTestId("run-state").getAttribute("data-state")).toBe("working");
     expect(screen.getByTestId("run-state").textContent).toContain("Working");
     expect(screen.getByTestId("run-state").textContent).toContain("Writing index.html");

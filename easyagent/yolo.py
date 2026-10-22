@@ -1,17 +1,20 @@
-"""Chat-scoped YOLO. One chat skips every approval gate.
+"""Per-bot YOLO. Every chat of that bot skips every approval gate.
 
 A person turns it on with ``/yolo`` or the header control. While it is on,
 ``passes`` is the only bypass: the approval decision, and the checks that
-would otherwise refuse a decision that already allowed, all call it. Hermes's
-catastrophic floor still blocks. It expires when the chat sits idle, on a hard
-deadline, and when the app starts again. It never covers another chat, a
-routine, a helper, a schedule, or a resumed run. The access layer is what
-decides the actor. This module does not trust a source string that the access
-check refused.
+would otherwise refuse a decision that already allowed, all call it. The
+state is stored on the bot, so a restart keeps it and another chat of the
+same bot is covered. A host setting, or ``EASYAGENT_YOLO``, turns it on for
+every bot. Hermes's catastrophic floor still blocks unless
+``EASYAGENT_YOLO_FLOOR`` is off. It expires when the bot sits idle and on a
+hard deadline. It never covers a routine, a helper, a schedule, or a resumed
+run. The access layer is what decides the actor. This module does not trust
+a source string that the access check refused.
 """
 
 from __future__ import annotations
 
+import os
 import re
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
@@ -147,7 +150,7 @@ def apply_command(store: Store, bot_id: str, chat_id: str, text: str, *, source:
         return YoloResult(False, "Only you can turn YOLO on.")
     if parsed["off"]:
         clear(store, bot_id, chat_id)
-        return YoloResult(True, "YOLO is off for this chat.")
+        return YoloResult(True, "YOLO is off for this bot.")
     return _enable(
         store,
         bot_id,
@@ -172,14 +175,26 @@ def apply_toggle(
         return YoloResult(False, "Only you can turn YOLO on.")
     if not on:
         clear(store, bot_id, chat_id)
-        return YoloResult(True, "YOLO is off for this chat.")
+        return YoloResult(True, "YOLO is off for this bot.")
     seconds = None if hours is None else int(float(hours) * 3600)
     idle_seconds = None if idle_minutes is None else int(idle_minutes) * 60
     return _enable(store, bot_id, chat_id, seconds=seconds, idle_seconds=idle_seconds)
 
 
 def clear(store: Store, bot_id: str, chat_id: str) -> None:
-    """Drop YOLO for this chat. A resumed run calls this before it starts."""
+    """Drop YOLO for this bot. A resumed run calls this before it starts."""
+    _store_state(store, bot_id, None)
+    ids = {str(chat_id or "")}
+    try:
+        ids.update(str(item.get("id") or "") for item in store.list_chats(bot_id))
+    except Exception:
+        pass
+    for item_id in ids:
+        if item_id:
+            _clear_chat(store, bot_id, item_id)
+
+
+def _clear_chat(store: Store, bot_id: str, chat_id: str) -> None:
     try:
         chat = store.get_chat(bot_id, chat_id)
     except Exception:
@@ -189,6 +204,50 @@ def clear(store: Store, bot_id: str, chat_id: str) -> None:
     chat.pop("yolo", None)
     chat["updated_at"] = now_iso()
     store.save_chat(chat)
+
+
+def _bot_state(store: Store, bot_id: str) -> dict | None:
+    if not bot_id:
+        return None
+    try:
+        bot = store.get_bot(bot_id)
+    except Exception:
+        return None
+    state = bot.get("yolo")
+    return state if isinstance(state, dict) else None
+
+
+def _store_state(store: Store, bot_id: str, state: dict | None) -> None:
+    if not bot_id:
+        return
+    try:
+        bot = store.get_bot(bot_id)
+    except Exception:
+        return
+    if state is None:
+        if "yolo" not in bot:
+            return
+        bot.pop("yolo", None)
+    else:
+        bot["yolo"] = dict(state)
+    from easyagent.store import atomic_write_json
+
+    atomic_write_json(store._bot_dir(bot_id) / "bot.json", bot)
+
+
+def _mirror_bot(chat: dict) -> None:
+    """Copy this chat's clock onto the bot when a turn is open."""
+    bot_id = str(chat.get("bot_id") or "")
+    state = chat.get("yolo")
+    if not bot_id or not isinstance(state, dict):
+        return
+    from easyagent import turn as turn_mod
+
+    slot = turn_mod.current_slot()
+    store = getattr(slot, "store", None) if slot is not None else None
+    if store is None:
+        return
+    _store_state(store, bot_id, state)
 
 
 def note_run(chat: dict, status: str) -> None:
@@ -203,10 +262,12 @@ def note_run(chat: dict, status: str) -> None:
         if state.get("idle_from"):
             state["idle_from"] = None
             chat["yolo"] = state
+            _mirror_bot(chat)
         return
     if not state.get("idle_from"):
         state["idle_from"] = now_iso()
         chat["yolo"] = state
+    _mirror_bot(chat)
 
 
 def public_view(chat: dict, now: datetime | None = None) -> dict:
@@ -247,8 +308,43 @@ def public_view(chat: dict, now: datetime | None = None) -> dict:
     }
 
 
+def global_on(store: Store) -> bool:
+    """True when YOLO is switched on for every bot.
+
+    The host file is the setting. ``EASYAGENT_YOLO=1`` is the same switch
+    without writing that file. Routines and helpers still do not inherit it.
+    """
+    raw = (os.environ.get("EASYAGENT_YOLO") or "").strip().lower()
+    if raw in {"1", "true", "on", "yes"}:
+        return True
+    try:
+        return bool(store.read_host().get("yolo"))
+    except Exception:
+        return False
+
+
+def floor_on() -> bool:
+    """The catastrophic floor. On unless ``EASYAGENT_YOLO_FLOOR`` is turned off."""
+    raw = os.environ.get("EASYAGENT_YOLO_FLOOR")
+    if raw is None or not str(raw).strip():
+        return True
+    return str(raw).strip().lower() not in {"0", "false", "off", "no"}
+
+
+def view_for(store: Store, chat: dict, now: datetime | None = None) -> dict:
+    """Header state for this chat. Another chat of the same bot shows the bot's YOLO."""
+    if global_on(store):
+        return {"on": True, "until": None, "idle_until": None, "remaining_seconds": 0}
+    if isinstance(chat.get("yolo"), dict):
+        return public_view(chat, now=now)
+    state = _bot_state(store, str(chat.get("bot_id") or ""))
+    if not isinstance(state, dict):
+        return public_view(chat, now=now)
+    return public_view({"yolo": state, "run": chat.get("run")}, now=now)
+
+
 def active(store: Store, bot_id: str, *, now: datetime | None = None) -> bool:
-    """True when this turn's chat is the one YOLO was turned on for, and it is still on."""
+    """True when this bot's YOLO is on, or the global switch is on."""
     from easyagent.helpers import in_helper
     from easyagent.safety import is_unattended
     from easyagent import turn as turn_mod
@@ -258,21 +354,28 @@ def active(store: Store, bot_id: str, *, now: datetime | None = None) -> bool:
     slot = turn_mod.current_slot()
     if slot is None or slot.bot_id != bot_id or not slot.chat_id:
         return False
+    if global_on(store):
+        return True
     try:
         chat = store.get_chat(bot_id, slot.chat_id)
     except Exception:
+        chat = {}
+    if isinstance(chat.get("yolo"), dict):
+        return bool(public_view(chat, now=now)["on"])
+    state = _bot_state(store, bot_id)
+    if not isinstance(state, dict):
         return False
-    return bool(public_view(chat, now=now)["on"])
+    return bool(public_view({"yolo": state, "run": chat.get("run") if isinstance(chat, dict) else None}, now=now)["on"])
 
 
 def passes(store: Store, bot_id: str, *, now: datetime | None = None) -> bool:
-    """True when this chat's YOLO is on, so every approval gate allows.
+    """True when this bot's YOLO is on, so every approval gate allows.
 
     This is the only YOLO bypass. ``guard`` returns allow without a card, and
     a later check that repeats the same decision calls this instead of
     inventing its own exception. ``guard`` still blocks Hermes's catastrophic
-    floor before that allow. A routine, a helper, another chat, and a
-    resumed run are not this chat, so they stay gated. What ran is still audited.
+    floor before that allow, unless the floor flag is off. A routine, a
+    helper, another bot, and a resumed run stay gated. What ran is still audited.
     """
     return active(store, bot_id, now=now)
 
@@ -329,23 +432,8 @@ def covers(store: Store, bot_id: str, request, verdict, *, now: datetime | None 
 
 
 def forget_process(store: Store) -> None:
-    """A restart does not keep YOLO. Each chat loses it when the app starts."""
-    try:
-        bots = store.list_bots()
-    except Exception:
-        return
-    for bot in bots:
-        bot_id = str(bot.get("id") or "")
-        if not bot_id:
-            continue
-        try:
-            chats = store.list_chats(bot_id)
-        except Exception:
-            continue
-        for item in chats:
-            chat_id = str(item.get("id") or "")
-            if chat_id:
-                clear(store, bot_id, chat_id)
+    """Kept so older callers still import. A restart does not clear YOLO."""
+    del store
 
 
 def _enable(
@@ -388,6 +476,7 @@ def _enable(
     }
     chat["updated_at"] = now_iso()
     store.save_chat(chat)
+    _store_state(store, bot_id, chat["yolo"])
     return YoloResult(True, _on_sentence(hard, idle_minutes, notes))
 
 
@@ -398,13 +487,19 @@ def _on_sentence(hard: int, idle_minutes: int, notes: list[str]) -> str:
         clause = clause[:1].upper() + clause[1:]
         extra = " " + clause + "."
     idle = "1 minute" if idle_minutes == 1 else f"{idle_minutes} minutes"
-    return (
-        f"YOLO is on for this chat.{extra} "
-        f"Every approval gate in this chat allows the action for {_span(hard)}, "
-        f"or after {idle} with nothing running. "
+    floor = (
         "A catastrophic command, such as wiping the disk or powering the machine off, is still blocked. "
+        if floor_on()
+        else "The catastrophic floor is off, so those commands are allowed too. "
+    )
+    return (
+        f"YOLO is on for this bot.{extra} "
+        f"Every approval gate in this bot's chats allows the action for {_span(hard)}, "
+        f"or after {idle} with nothing running. "
+        f"{floor}"
         "What ran is still written to the audit log. "
-        "A routine, another chat, and a child agent stay gated."
+        "It stays on after a restart. "
+        "A routine and a child agent stay gated."
     )
 
 

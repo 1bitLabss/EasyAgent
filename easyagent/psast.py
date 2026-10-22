@@ -73,7 +73,7 @@ def data_decision(store, command: str, cwd: Path, bot_id: str | None) -> str:
 
     ``ask`` when a path cannot be resolved and might name that folder.
     ``allow`` when every path stays outside it, or inside this bot's own
-    workspace, workbench, or tmp.
+    workspace, workbench, tmp, or notes.
     """
     from easyagent.safety import decode_shell, _unglue
 

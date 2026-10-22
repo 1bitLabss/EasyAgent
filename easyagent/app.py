@@ -654,6 +654,13 @@ class PhoneIn(BaseModel):
     enabled: bool
 
 
+class HostIn(BaseModel):
+    """Host switches. Only the fields that are sent are saved."""
+
+    model_config = ConfigDict(extra="ignore")
+    yolo: bool | None = None
+
+
 class FirewallIn(BaseModel):
     consent: bool = False
 
@@ -745,9 +752,7 @@ def create_app(data_dir: str | Path | None = None) -> FastAPI:
     store = Store(Path(data_dir) if data_dir is not None else default_data_dir())
     store.ensure()
     from easyagent.hermes_busy import recover_pending_spool
-    from easyagent.yolo import forget_process
 
-    forget_process(store)
     recover_pending_spool(store)
     _settle_abandoned_runs(store)
     app = FastAPI(title="EasyAgent", lifespan=_lifespan)
@@ -880,6 +885,17 @@ def create_app(data_dir: str | Path | None = None) -> FastAPI:
             media_type="text/javascript; charset=utf-8",
             headers={"Cache-Control": "no-cache"},
         )
+
+    @app.get("/api/host")
+    def host_status():
+        return store.read_host()
+
+    @app.post("/api/host")
+    def host_set(body: HostIn):
+        patch = {}
+        if body.yolo is not None:
+            patch["yolo"] = body.yolo
+        return store.save_host(patch)
 
     @app.get("/api/phone")
     def phone_status(request: Request):
@@ -1629,7 +1645,7 @@ def create_app(data_dir: str | Path | None = None) -> FastAPI:
 
     @app.post("/api/bots/{bot_id}/chats/{chat_id}/yolo")
     def set_yolo(bot_id: str, chat_id: str, body: YoloIn):
-        """Turn YOLO on or off for this chat. Only the header control reaches this route."""
+        """Turn YOLO on or off for this bot. Only the header control reaches this route."""
         from easyagent.yolo import apply_toggle
 
         store.get_chat(bot_id, chat_id)
@@ -2890,7 +2906,7 @@ def _public_chat(store: Store, chat: dict, window: int | None = None) -> dict:
         "context": _metered_stats(store, chat, prepared.stats),
         "run": public_run(chat, store),
         "plan": _public_plan(store, chat),
-        "yolo": _public_yolo(chat),
+        "yolo": _public_yolo(store, chat),
         "class_grants": _public_class_grants(chat),
     }
     _overlay_queue(store, chat, public)
@@ -2939,10 +2955,10 @@ def _can_retry(messages: list) -> bool:
     return False
 
 
-def _public_yolo(chat: dict) -> dict:
-    from easyagent.yolo import public_view
+def _public_yolo(store: Store, chat: dict) -> dict:
+    from easyagent.yolo import view_for
 
-    return public_view(chat)
+    return view_for(store, chat)
 
 
 def _public_class_grants(chat: dict) -> list[dict]:

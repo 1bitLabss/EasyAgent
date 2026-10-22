@@ -14,6 +14,39 @@ import { PhoneAccess } from "@/screens/Phone";
 import { useApp } from "@/store";
 import type { Bot, Chat, ChatSummary, Endpoint, Job, Learning, MemoryLine, MemoryTopic, Project, Schedule, Skill } from "@/types";
 
+function GlobalYolo() {
+  const host = useQuery({ queryKey: ["host"], queryFn: () => api<{ yolo?: boolean }>("/api/host") });
+  const [error, setError] = useState("");
+
+  async function setYolo(on: boolean) {
+    setError("");
+    await api("/api/host", { method: "POST", json: { yolo: on } });
+    await queryClient.invalidateQueries({ queryKey: ["host"] });
+    await queryClient.invalidateQueries({ queryKey: ["chat"] });
+  }
+
+  return (
+    <section id="yolo-global" className="space-y-3 rounded-lg border border-border bg-card p-4">
+      <h2 className="text-base font-semibold">YOLO for every bot</h2>
+      <p className="text-sm text-muted">
+        Off until you turn it on. While it is on, every chat skips approval cards. A routine and a child agent stay gated. The catastrophic floor still blocks a disk wipe.
+      </p>
+      {host.isError ? <p className="text-sm text-danger" role="alert">{(host.error as Error).message}</p> : null}
+      <label className="flex min-h-11 items-center justify-between gap-3 text-sm">
+        <span>YOLO for every bot</span>
+        <Switch
+          checked={Boolean(host.data?.yolo)}
+          aria-label="YOLO for every bot"
+          onCheckedChange={(on) => {
+            void setYolo(on).catch((reason: Error) => setError(reason.message));
+          }}
+        />
+      </label>
+      {error ? <p className="text-sm text-danger" role="alert">{error}</p> : null}
+    </section>
+  );
+}
+
 function Note({ children }: { children: ReactNode }) {
   return <p className="text-xs text-muted">{children}</p>;
 }
@@ -478,6 +511,7 @@ export function SettingsScreen() {
     return (
       <div className="h-full space-y-4 overflow-y-auto p-6">
         <PhoneAccess />
+        <GlobalYolo />
         <section>
           <h1 className="text-2xl font-semibold">Pick a bot first.</h1>
           <p className="mt-2 text-sm text-muted">The rest of Settings belongs to one bot. Chats are not changed here.</p>
@@ -512,8 +546,9 @@ export function SettingsScreen() {
 
   return (
     <div className="h-full overflow-y-auto">
-      <div className="px-6 pt-5">
+      <div className="space-y-4 px-6 pt-5">
         <PhoneAccess />
+        <GlobalYolo />
       </div>
       <header className="px-6 py-5">
         <p className="text-xs uppercase tracking-wide text-muted">Bot settings</p>

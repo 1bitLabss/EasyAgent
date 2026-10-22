@@ -3146,18 +3146,23 @@ def _under_data(root: Path, target: Path) -> bool:
 
 
 def _work_exempt(store: Store, resolved: Path, bot_id: str | None) -> bool:
-    """Only this bot's workspace, workbench, and tmp sit outside the data-dir block."""
+    """This bot's workspace, workbench, tmp, and notes sit outside the data-dir block.
+
+    ``secrets.db`` stays blocked wherever it sits. Another bot's notes do not match.
+    """
     if not bot_id:
         return False
     try:
         parts = resolved.resolve().relative_to(store.root.resolve()).parts
     except (OSError, ValueError):
         return False
+    if resolved.name.lower() in {"secrets.db", "secrets.passphrase"}:
+        return False
     return (
         len(parts) >= 3
         and parts[0] == "bots"
         and parts[1] == bot_id
-        and parts[2] in {"workspace", "workbench", "tmp"}
+        and parts[2] in {"workspace", "workbench", "tmp", "notes"}
     )
 
 
@@ -4131,11 +4136,11 @@ async def guard(store: Store, request, bot_id: str | None):
         # One check. Hermes returns approved before any card, after the hardline
         # floor. That floor is the only block left. A routine or a helper never
         # reaches this, because passes() is false there.
-        from easyagent.yolo import FLOOR_MESSAGE, catastrophic
+        from easyagent.yolo import FLOOR_MESSAGE, catastrophic, floor_on
 
         kind = getattr(request, "kind", "")
         floor = catastrophic(getattr(request, "command", "") or "") if kind in {"shell", "ssh", "windows"} else None
-        if floor:
+        if floor and floor_on():
             _audit(
                 store,
                 bot_id,

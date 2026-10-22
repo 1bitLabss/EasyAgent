@@ -1375,7 +1375,13 @@ class Store:
 
     def read_host(self) -> dict:
         path = self.root / "host.json"
-        blank = {"background": False, "start_at_login": False, "explained": False, "paused_all": False}
+        blank = {
+            "background": False,
+            "start_at_login": False,
+            "explained": False,
+            "paused_all": False,
+            "yolo": False,
+        }
         if not path.is_file():
             return dict(blank)
         data = read_json(path)
@@ -1385,7 +1391,7 @@ class Store:
 
     def save_host(self, host: dict) -> dict:
         current = self.read_host()
-        for key in ("background", "start_at_login", "explained", "paused_all"):
+        for key in ("background", "start_at_login", "explained", "paused_all", "yolo"):
             if key in host:
                 current[key] = bool(host[key])
         with self._lock:

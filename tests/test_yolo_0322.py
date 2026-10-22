@@ -1,4 +1,4 @@
-"""YOLO is one chat, turned on by a person. While it is on, every gate allows."""
+"""YOLO is one bot, turned on by a person. While it is on, every gate allows."""
 
 from __future__ import annotations
 
@@ -274,12 +274,13 @@ def test_yolo_allows_a_key_read(tmp_path):
     assert secret.exists()
 
 
-def test_yolo_does_not_leak_into_another_chat_or_bot(tmp_path):
+def test_yolo_covers_another_chat_of_the_same_bot_and_not_another_bot(tmp_path):
     reset_for_tests()
     app, client, bot, chat = _client(tmp_path)
     store = app.state.store
     _say(client, bot, chat, "/yolo")
     other = client.post(f"/api/bots/{bot['id']}/chats").json()
+    assert other["yolo"]["on"] is True
     folder = bot_workspace(store, bot["id"], create=True)
     target = folder / "notes.txt"
     target.write_text("keep", encoding="utf-8")
@@ -289,9 +290,10 @@ def test_yolo_does_not_leak_into_another_chat_or_bot(tmp_path):
         bot["id"],
         ToolRequest(kind="shell", command="rm notes.txt"),
     ))
-    assert outcome == "ask"
-    assert card["rule"] == "delete"
-    assert target.exists()
+    assert outcome == "allow"
+    assert card is None
+    assert not target.exists()
+    assert "yolo" in _tags(store, bot["id"])
 
     endpoint = client.post(
         "/api/endpoints",
@@ -310,7 +312,7 @@ def test_yolo_does_not_leak_into_another_chat_or_bot(tmp_path):
     ))
     assert outcome == "ask"
     assert their_notes.exists()
-    assert "yolo" not in _tags(store, bot["id"])
+    assert "yolo" in _tags(store, bot["id"])
     assert "yolo" not in _tags(store, second["id"])
 
 

@@ -136,7 +136,9 @@ def test_excerpt_breaks_on_a_word_and_names_the_retry():
 def test_the_location_follows_the_summary_and_a_dot_folder_is_named():
     assert _file_sentence("./note.txt") == "The file is note.txt in the project folder."
     assert "in ." not in _file_sentence("./note.txt")
-    summary = "I wrote the agenda into note.txt and that is the whole summary of this change for the record."
+    named = "I wrote the agenda into note.txt and that is the whole summary of this change for the record."
+    assert _with_file_place(named, ["Wrote /work/note.txt."]) == named
+    summary = "I wrote the agenda and that is the whole summary of this change for the record."
     shown = _with_file_place(summary, ["Wrote /work/note.txt."])
     assert summary in shown
     assert "The file is note.txt in /work." in shown

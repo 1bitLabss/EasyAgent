@@ -482,6 +482,8 @@ function inDesktop() {
 
 function apply(event: Record<string, unknown>, flight: Flight) {
   if (!eventMatches(event, flight)) return;
+  // A terminal event already ended this turn. A late status must not bring Writing back.
+  if (flight.settled) return;
   const live = flight.live || { phase: "thinking" as const, label: "Waiting on model", text: "", reasoning: "", run: null, heardAt: Date.now() };
   if (event.type === "run" && event.run) {
     const run = event.run as Run;

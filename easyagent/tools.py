@@ -1662,6 +1662,25 @@ class _ActivityNote:
 
 _activity_note: ContextVar[_ActivityNote | None] = ContextVar("easyagent_activity_note", default=None)
 _activity_seq = 0
+# After the person can already read an answer, silence is not another minute of Writing.
+ANSWER_IDLE_SECONDS = 20.0
+_answer_visible: ContextVar[bool] = ContextVar("easyagent_answer_visible", default=False)
+
+
+def mark_answer_visible() -> None:
+    _answer_visible.set(True)
+
+
+def answer_is_visible() -> bool:
+    return bool(_answer_visible.get())
+
+
+def reset_answer_visible() -> None:
+    _answer_visible.set(False)
+
+
+def answer_idle_seconds() -> float:
+    return ANSWER_IDLE_SECONDS
 
 
 def open_tool_step(label: str) -> str:
@@ -4493,11 +4512,12 @@ def _last_write_path(lines: list[str]) -> str:
 
 
 def _answer_names_file(answer: str, path: str) -> bool:
-    name, folder = _split_stored_path(path)
+    """The filename is enough. The folder does not have to be repeated."""
+    name, _folder = _split_stored_path(path)
     text = answer or ""
-    if not name or name not in text:
+    if not name:
         return False
-    return (not folder) or folder in text or path in text
+    return name in text or path in text
 
 
 def _looks_like_creation(text: str) -> bool:
@@ -6869,10 +6889,21 @@ async def _iter_streamed_model(
             return
         await pending.put(("end", ""))
 
+    async def _take_model_event():
+        """The next model chunk. After an answer is on screen, silence ends the turn."""
+        if not answer_is_visible():
+            return await pending.get()
+        try:
+            return await asyncio.wait_for(pending.get(), answer_idle_seconds())
+        except TimeoutError as exc:
+            from easyagent.generation import GenerationLimit
+
+            raise GenerationLimit("stall") from exc
+
     task = asyncio.create_task(run())
     try:
         while True:
-            kind, payload = await pending.get()
+            kind, payload = await _take_model_event()
             if kind == "end":
                 llm.restore_native_calls(found)
                 return
@@ -6884,6 +6915,10 @@ async def _iter_streamed_model(
     finally:
         if not task.done():
             task.cancel()
+            try:
+                await task
+            except (asyncio.CancelledError, Exception):
+                pass
 
 
 def _abandon_model_error(exc: llm.ProviderError) -> None:
@@ -7072,6 +7107,7 @@ async def run_turn(
 ):
     """Keep one send alive across tools until the work is checked, or the loop is stuck."""
     from easyagent import honesty
+    from easyagent.generation import GenerationLimit
 
     begin_turn_checks()
     search_mod.bind_store(store)
@@ -7123,8 +7159,19 @@ async def run_turn(
     notes_text = ""
     streamed = ""
     said: list[str] = []
+    shown_answer = ""
     thought = ""
     new_thought = True
+    reset_answer_visible()
+
+    def _remember_shown(chunk: str) -> None:
+        """Text the person can already read. A tool fence is not that text."""
+        nonlocal shown_answer
+        if not chunk:
+            return
+        shown_answer += chunk
+        if _drop_known_logs(_spoken(shown_answer), lines).strip():
+            mark_answer_visible()
 
     def _remember_thought(chunk: str) -> str:
         """Keep reasoning next to the reply, including spaces and newlines."""
@@ -7919,6 +7966,7 @@ async def run_turn(
                             continue
                         ready = _take_answer(bit)
                         if ready:
+                            _remember_shown(ready)
                             yield "delta", ready
             for split_kind, bit in splitter.finish():
                 if split_kind == "reasoning":
@@ -7928,6 +7976,7 @@ async def run_turn(
                     continue
                 ready = _take_answer(bit)
                 if ready:
+                    _remember_shown(ready)
                     yield "delta", ready
         except asyncio.CancelledError:
             # The process is stopping. Store the tokens already in hand before the
@@ -7944,6 +7993,15 @@ async def run_turn(
                 continue
             for event in _partial_stream(text_bits):
                 yield event
+            raise
+        except GenerationLimit as exc:
+            # The answer is already on screen and the model went quiet.
+            # Ending here is the turn, not a pause for running too long.
+            kept = _drop_known_logs(_spoken(shown_answer or ""), lines).strip()
+            if exc.reason == "stall" and kept:
+                for event in close(kept):
+                    yield event
+                return
             raise
         except llm.ProviderError as exc:
             if str(exc) == "Endpoint returned an empty message." and not "".join(text_bits).strip():
@@ -8365,7 +8423,20 @@ async def run_turn(
             written = _drop_known_logs(_spoken(text or ""), lines).strip()
             if written and _repeats_result(written, raws):
                 written = ""
-            if not written and not said and answer_holds < 2:
+            visible = _drop_known_logs(_spoken(shown_answer or ""), lines).strip()
+            # The own-words check may reject a finish once. An answer the person
+            # can already read ends the turn. A second rejection does not run.
+            if not written and not said and visible:
+                if answer_holds < 1:
+                    answer_holds += 1
+                    _note_heuristic(
+                        "_finish",
+                        "a finish was rejected once because the answer has to be in the model's own words, and the answer already on screen ends the turn",
+                    )
+                for event in close(visible):
+                    yield event
+                return
+            if not written and not said and answer_holds < 1:
                 answer_holds += 1
                 _note_heuristic(
                     "_finish",

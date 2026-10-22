@@ -156,7 +156,15 @@ describe("one turn of reasoning, a tool, and the answer", () => {
     await waitFor(() => {
       expect(screen.getByTestId("run-state").textContent).toBe("Idle");
       expect(screen.getByTestId("live-status").getAttribute("data-live")).toBe("false");
+      expect(document.querySelectorAll('[data-live="true"]')).toHaveLength(0);
+      expect(document.querySelectorAll("[data-testid=activity-step][data-state=running]")).toHaveLength(0);
     }, { timeout: 1000 });
+    act(() => {
+      pushEventForTests("bot-1", "chat-1", { type: "status", text: "Writing", step_id: "again", state: "running" });
+    });
+    expect(document.querySelectorAll('[data-live="true"]')).toHaveLength(0);
+    expect(document.querySelectorAll("[data-testid=activity-step][data-state=running]")).toHaveLength(0);
+    expect(screen.getByTestId("run-state").textContent).toBe("Idle");
     expect(screen.queryByTestId("jump-latest")).toBeNull();
 
     const scroller = document.querySelector(".chat-scroll") as HTMLElement;

@@ -71,15 +71,30 @@ def parse_helpers(reply: str) -> list[HelperSpec]:
     return found
 
 
+def _tidy_removed_fence(text: str) -> str:
+    """Close the gap a removed fence left. A remaining ``` fence stays as written."""
+    parts = re.split(r"(```[\s\S]*?```)", text or "")
+    out: list[str] = []
+    for index, part in enumerate(parts):
+        if index % 2 == 1:
+            out.append(part)
+        else:
+            out.append(re.sub(r"\n{3,}", "\n\n", part))
+    return "".join(out).strip()
+
+
 def strip_helper_fences(reply: str, *, keep_shape: bool = False) -> str:
     """Remove a helper fence. A reply with none is returned as written.
 
-    keep_shape also leaves indentation and blank lines when a fence is removed.
+    keep_shape leaves a remaining code fence as written, and closes the gap
+    where the helper fence was.
     """
     source = reply or ""
     text = FENCE_RE.sub("", source)
-    if keep_shape or text == source:
+    if text == source:
         return text
+    if keep_shape:
+        return _tidy_removed_fence(text)
     return re.sub(r"\n{3,}", "\n\n", text).strip()
 
 

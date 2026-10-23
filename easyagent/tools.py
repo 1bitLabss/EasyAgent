@@ -5748,8 +5748,17 @@ def _strip_lesson_fences(text: str, *, keep_shape: bool = False) -> str:
 
     source = text or ""
     cleaned = _MEMORY_FENCE.sub(replacer, source)
-    if keep_shape or cleaned == source:
+    if cleaned == source:
         return cleaned
+    if keep_shape:
+        parts = re.split(r"(```[\s\S]*?```)", cleaned)
+        out: list[str] = []
+        for index, part in enumerate(parts):
+            if index % 2 == 1:
+                out.append(part)
+            else:
+                out.append(re.sub(r"\n{3,}", "\n\n", part))
+        return "".join(out).strip()
     return re.sub(r"\n{3,}", "\n\n", cleaned).strip()
 
 
@@ -6764,6 +6773,43 @@ def _drop_page_dump(text: str) -> str:
     return protected
 
 
+_SHORT_DONE = re.compile(r"(?i)^done[.!]?$")
+
+
+def _is_spoken_noise(line: str) -> bool:
+    """A harness line. A blank line and a short "Done." are not noise.
+
+    "The page is ready." is still noise. "Done." is the model's own ending.
+    The check is one line outside a fence. It does not rewrite that line.
+    """
+    if not (line or "").strip():
+        return False
+    if _SHORT_DONE.match(" ".join(line.split())):
+        return False
+    return not _keep_spoken_line(line)
+
+
+def _drop_spoken_noise(text: str) -> str:
+    """Drop harness lines outside ``` fences. Indent and blank lines stay."""
+    source = text or ""
+    if not source:
+        return ""
+    kept: list[str] = []
+    in_fence = False
+    for row in source.splitlines():
+        if _FENCE_LINE.match(row):
+            kept.append(row)
+            in_fence = not in_fence
+            continue
+        if in_fence or not _is_spoken_noise(row):
+            kept.append(row)
+            continue
+    result = "\n".join(kept)
+    if source.endswith("\n") and result and not result.endswith("\n"):
+        result += "\n"
+    return result
+
+
 def _spoken(text: str) -> str:
     """The model's own account. An exact tool-log line is not the chat.
 
@@ -6776,7 +6822,7 @@ def _spoken(text: str) -> str:
     cleaned = strip_tool_markup(cleaned, keep_shape=True)
     cleaned = _drop_page_dump(cleaned)
     cleaned = _strip_lesson_fences(cleaned, keep_shape=True)
-    return _drop_known_logs(cleaned)
+    return _drop_spoken_noise(_drop_known_logs(cleaned))
 
 
 def _visible_answer(text: str, raws: list[str]) -> str:

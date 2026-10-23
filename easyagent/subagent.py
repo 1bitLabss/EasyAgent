@@ -37,12 +37,26 @@ def parse_subagent(reply: str) -> tuple[str, str] | None:
     return name, task
 
 
+def _tidy_removed_fence(text: str) -> str:
+    """Close the gap a removed fence left. A remaining ``` fence stays as written."""
+    parts = re.split(r"(```[\s\S]*?```)", text or "")
+    out: list[str] = []
+    for index, part in enumerate(parts):
+        if index % 2 == 1:
+            out.append(part)
+        else:
+            out.append(re.sub(r"\n{3,}", "\n\n", part))
+    return "".join(out).strip()
+
+
 def strip_subagent_fences(reply: str, *, keep_shape: bool = False) -> str:
     """Remove an ask-another-bot fence. A reply with none is returned as written."""
     source = reply or ""
     text = FENCE_RE.sub("", source)
-    if keep_shape or text == source:
+    if text == source:
         return text
+    if keep_shape:
+        return _tidy_removed_fence(text)
     return re.sub(r"\n{3,}", "\n\n", text).strip()
 
 

@@ -360,9 +360,9 @@ describe("rc8 busy-send row tops", () => {
       await act(async () => {
         queryClient.setQueryData<Chat>(["chat", "bot-1", "chat-1"], (prev) => (prev ? mergeChat(prev, idle) : idle));
       });
-      expect(screen.getByText("Finished before pausing")).toBeTruthy();
-      expect(screen.queryByText("Paused, say continue to resume")).toBeNull();
       const texts = screenRows();
+      expect(texts).toContain("Finished before pausing");
+      expect(screen.queryByText("Paused, say continue to resume")).toBeNull();
       expect(texts.indexOf("and the kiln")).toBe(texts.indexOf("Finished before pausing") + 1);
       frames.push(transcriptHtml());
     }

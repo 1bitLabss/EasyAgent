@@ -175,7 +175,9 @@ export function resetStreamForTests() {
 export function setFlightForTests(botId: string, chatId: string, live: Live | null, sending = false, frozen?: FrozenReply) {
   const key = flightKey(botId, chatId);
   if (!live) {
+    const existing = flights.get(key);
     flights.delete(key);
+    if (existing) notifyFlight(existing);
     return;
   }
   const flight: Flight = {

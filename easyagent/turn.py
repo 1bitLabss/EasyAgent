@@ -212,6 +212,38 @@ def current_slot() -> Slot | None:
     return _slot.get()
 
 
+def push_payload(payload: dict) -> None:
+    """Publish one SSE event on the open turn. A missing listener is a no-op."""
+    slot = _slot.get()
+    if slot is None:
+        return
+    notify = getattr(slot, "notify", None)
+    if notify is None:
+        return
+    body = dict(payload)
+    if slot.run_id:
+        body.setdefault("run_id", slot.run_id)
+    if slot.bot_id:
+        body.setdefault("bot_id", slot.bot_id)
+    if slot.chat_id:
+        body.setdefault("chat_id", slot.chat_id)
+    import json
+
+    chunk = "data: " + json.dumps(body, ensure_ascii=False) + "\n\n"
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        return
+
+    async def send() -> None:
+        try:
+            await notify(chunk)
+        except Exception:
+            return
+
+    loop.create_task(send())
+
+
 def tool_cwd() -> str:
     """The working folder for this run. Another run does not share the string."""
     slot = _slot.get()

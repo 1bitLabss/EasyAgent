@@ -13,7 +13,7 @@ import { WindowControls } from "@/components/WindowControls";
 import { moodForReaction, pokeFace } from "@/lib/mood";
 import { chipText, chipTitle } from "@/lib/chips";
 import { yoloClock, yoloRemaining } from "@/lib/yolo";
-import { activityLabel, askedLine, type ActivityStep } from "@/lib/activity";
+import { activityLabel, askedLine } from "@/lib/activity";
 import { deriveUserHistory } from "@/lib/composer-history";
 import { describeRun, faceStateFor, runPresence, runTone, shownStep, workingLine } from "@/lib/run";
 import { arrangeBusy, hideWhileSending, messageHasBubble, placeLiveReply, reactionWho, rowKey, shownThinking } from "@/lib/transcript";
@@ -217,7 +217,7 @@ const MessageRow = memo(function MessageRow({
         {message.missed ? <p className="mb-1 text-xs" data-testid="missed-run">Missed run</p> : null}
         {message.routine_name ? <p className="mb-1 text-xs opacity-70">Routine · {message.routine_name}</p> : null}
         {message.speaker_name ? <p className="mb-1 text-xs opacity-70">{message.speaker_name}</p> : null}
-        <div className={mine ? "whitespace-pre-wrap" : ""}>
+        <div className={mine ? "whitespace-pre-wrap" : ""} data-testid="message-text">
           {mine ? (message.content || "") : <Markdown text={message.content || ""} streaming={streaming || freeze} freeze={freeze} />}
         </div>
         {chip ? <p className="mt-2 block truncate text-xs" data-testid={`chip-${message.chip}`} title={chipTitle(message)}>{chip}</p> : null}
@@ -454,8 +454,6 @@ export function ChatPane() {
   const sectionRef = useRef<HTMLElement>(null);
   const dockRef = useRef<HTMLDivElement>(null);
   const composerRef = useRef<ComposerHandle>(null);
-  const heldSteps = useRef<ActivityStep[]>([]);
-  const seenRun = useRef("");
   const pinnedBusy = useRef(new Set<string>());
   const historyRef = useRef<ChatMessage[]>([]);
   const getHistory = useCallback(() => deriveUserHistory(historyRef.current), []);
@@ -653,16 +651,11 @@ export function ChatPane() {
   const rows = open?.messages || [];
   historyRef.current = rows;
   const runId = live?.run?.id || flight?.runId || "";
-  if (runId && runId !== seenRun.current) {
-    if (seenRun.current) heldSteps.current = [];
-    seenRun.current = runId;
-  }
-  if (live?.steps?.length) heldSteps.current = live.steps;
   const steps = live?.steps || [];
   const liveTurn = Boolean(live && live.phase !== "error" && live.phase !== "stopped");
   const replyId = live?.replyId || live?.run?.reply_id || "";
   const stamp = replyId ? `live-${replyId}` : runId ? `live-${runId}` : "";
-  const frozen = flight?.frozen;
+  const frozen = serverSettled ? undefined : flight?.frozen;
   const streamingReply = Boolean(liveTurn && ((live?.text || "").trim() || (live?.reasoning || "").trim()));
   const placed = arrangeBusy(rows, pinnedBusy.current);
   let head = placed.head;
@@ -853,11 +846,7 @@ export function ChatPane() {
                     text={activityLabel(item)}
                   />
                 </div>
-              )) : heldSteps.current.length ? (
-                <div data-testid="activity-summary">
-                  <Quiet text={`Used ${heldSteps.current.length} steps`} detail={heldSteps.current.map((item) => activityLabel(item)).join("\n")} />
-                </div>
-              ) : null}
+              )) : null}
               {open.messages?.length ? (
                 <div key="asked-line" data-testid="asked-line">
                   <Quiet icon={<MessageSquare className="h-3 w-3" />} text={asked} />

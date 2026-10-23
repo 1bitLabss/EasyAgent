@@ -10,12 +10,105 @@ from __future__ import annotations
 
 import importlib
 import re
+import threading
 from contextvars import ContextVar
 from dataclasses import dataclass
 
 CAPABILITY_RULE = "Never say you can't do something on this list; propose it."
 _MARK = "# What you can do"
 _OFFER: ContextVar[dict | None] = ContextVar("easyagent_routine_offer", default=None)
+
+
+class _RoutineTurn:
+    """One user request. The first routine card is the only one.
+
+    Tool calls from one reply run together, in tasks that do not share a
+    ContextVar write. The object lives on the chat's turn slot so those tasks
+    still see the same card.
+    """
+
+    def __init__(self) -> None:
+        self.opened = False
+        self.refused = ""
+        self.seen: set[tuple[str, str]] = set()
+        self.lock = threading.Lock()
+
+
+_TURN: ContextVar[_RoutineTurn | None] = ContextVar("easyagent_routine_turn", default=None)
+
+
+def reset_routine_turn() -> None:
+    """A new model run starts with no routine card and no refusal."""
+    fresh = _RoutineTurn()
+    _TURN.set(fresh)
+    slot = _current_slot()
+    if slot is not None:
+        slot.routine_turn = fresh
+
+
+def _current_slot():
+    try:
+        from easyagent.turn import current_slot
+    except Exception:
+        return None
+    return current_slot()
+
+
+def _turn() -> _RoutineTurn:
+    slot = _current_slot()
+    if slot is not None:
+        current = getattr(slot, "routine_turn", None)
+        if not isinstance(current, _RoutineTurn):
+            current = _RoutineTurn()
+            slot.routine_turn = current
+        return current
+    current = _TURN.get()
+    if current is None:
+        current = _RoutineTurn()
+        _TURN.set(current)
+    return current
+
+
+def _signature(schedule: str, prompt: str) -> tuple[str, str]:
+    return (" ".join((schedule or "").split()), " ".join((prompt or "").split()))
+
+
+def claim_routine_card(schedule: str, prompt: str) -> bool:
+    """True when this proposal may open a card.
+
+    A later proposal in the same request does not, and neither does a second
+    copy of the same schedule and prompt.
+    """
+    turn = _turn()
+    key = _signature(schedule, prompt)
+    with turn.lock:
+        duplicate = key in turn.seen
+        turn.seen.add(key)
+        if turn.refused or turn.opened or duplicate:
+            return False
+        turn.opened = True
+        return True
+
+
+def note_routine_refused(reason: str) -> None:
+    """The routine was not saved. This request does not get a card."""
+    turn = _turn()
+    text = " ".join((reason or "").split())
+    with turn.lock:
+        if text and not turn.refused:
+            turn.refused = text
+
+
+def routine_refusal() -> str:
+    turn = _turn()
+    with turn.lock:
+        return turn.refused
+
+
+def routine_opened() -> bool:
+    turn = _turn()
+    with turn.lock:
+        return turn.opened
 
 _ROUTINE_ASK = re.compile(
     r"(?i)(\bcron\b|\bschedules?\b|\bscheduled\b|\bscheduling\b|\brecurring\b|"
@@ -219,6 +312,8 @@ def _offer_routine(store, bot_id: str, user_text: str) -> str:
 
     if in_helper() or is_unattended():
         return ""
+    if routine_refusal() or routine_opened():
+        return ""
     if any((card.get("proposal") or {}).get("kind") == "routine" for card in list_pending(bot_id or "")):
         return ""
     spec = _routine_spec(user_text)
@@ -234,6 +329,8 @@ def _offer_routine(store, bot_id: str, user_text: str) -> str:
         **{key: drafted.get(key) for key in ("name", "prompt", "kind", "cron", "every_minutes", "at", "timezone", "quiet") if drafted.get(key) is not None},
     }
     spec["action"] = "create"
+    if not claim_routine_card(shown, prompt):
+        return ""
     if bot_id and passes(store, bot_id):
         try:
             apply_confirmed(store, bot_id, spec)
@@ -257,6 +354,9 @@ def _offer_routine(store, bot_id: str, user_text: str) -> str:
     )
     _PENDING[card.id] = card
     _notify("Save this routine?")
+    from easyagent.safety import announce_approvals
+
+    announce_approvals(bot_id)
     _OFFER.set(
         {
             "kind": "routine",
@@ -276,7 +376,12 @@ def steer_reply(store, bot_id: str | None, user_text: str, reply: str) -> str:
     if feature is None:
         return text
     if feature.key == "routines":
-        note = _offer_routine(store, bot_id or "", user_text)
+        reason = routine_refusal()
+        if reason:
+            if reason.lower() not in text.lower():
+                text = f"{text.rstrip()}\n\n{reason}".strip() if text.strip() else reason
+            return text
+        note = "" if routine_opened() else _offer_routine(store, bot_id or "", user_text)
         sentence = note or _proposal_sentence(feature, user_text)
         if _OS_SCHEDULER.search(text) or _denies(text) or not re.search(r"(?i)\broutine", text):
             if _OS_SCHEDULER.search(text) or _denies(text):

@@ -277,6 +277,12 @@ def reset_for_tests() -> None:
     _UNTRUSTED.clear()
     _SNIFF_CACHE.clear()
     try:
+        from easyagent.features import reset_routine_turn
+
+        reset_routine_turn()
+    except Exception:
+        pass
+    try:
         from easyagent.connectors import reset_for_tests as reset_connectors
 
         reset_connectors()
@@ -3831,6 +3837,13 @@ def list_pending(bot_id: str) -> list[dict]:
         if card.bot_id == bot_id and not card.event.is_set():
             rows.append(_public_card(card))
     return rows
+
+
+def announce_approvals(bot_id: str) -> None:
+    """Push the open cards on this turn's event stream. The page does not wait for a poll."""
+    if not bot_id:
+        return
+    turn_mod.push_payload({"type": "approval", "cards": list_pending(bot_id), "bot_id": bot_id})
 
 
 def _public_card(card: Pending) -> dict:

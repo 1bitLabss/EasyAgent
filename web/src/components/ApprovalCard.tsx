@@ -51,6 +51,8 @@ export function ApprovalCard({ botId, botName, active }: { botId: string; botNam
   const cards = useQuery({
     queryKey: ["approvals", botId],
     enabled: Boolean(botId),
+    staleTime: 0,
+    refetchOnMount: "always",
     refetchInterval: approvalPollMs(active, hidden),
     queryFn: () => api<Approval[]>(`/api/bots/${botId}/approvals`),
   });

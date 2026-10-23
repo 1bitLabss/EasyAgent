@@ -172,7 +172,7 @@ export function resetStreamForTests() {
   botEpoch.clear();
 }
 
-export function setFlightForTests(botId: string, chatId: string, live: Live | null, sending = false) {
+export function setFlightForTests(botId: string, chatId: string, live: Live | null, sending = false, frozen?: FrozenReply) {
   const key = flightKey(botId, chatId);
   if (!live) {
     flights.delete(key);
@@ -187,6 +187,7 @@ export function setFlightForTests(botId: string, chatId: string, live: Live | nu
     sending,
     replaced: false,
     settled: false,
+    frozen,
   };
   flights.set(key, flight);
   flushNow(flight);
@@ -439,16 +440,13 @@ function finish(flight: Flight, chat?: Chat) {
   flight.settled = true;
   flight.sending = false;
   disarmStreamWatch(flight);
-  // The reply finished whole. Keep the height that was on screen when the
-  // user message landed, so the rest of the text does not push that message.
+  // The saved reply is the transcript. A longer draft from the moment a
+  // message arrived mid-chain is not written over that row.
   let shown = chat;
-  if (shown && flight.frozen?.replyId && flight.frozen.text) {
-    shown = keepLongerReply(shown, flight.frozen.replyId, flight.frozen.text, flight.frozen.reasoning || "");
-  }
   if (replyFinishedWhole(shown, flight.frozen)) {
     if (shown && flight.frozen) shown = holdShownReply(shown, flight.frozen);
-    flight.frozen = undefined;
   }
+  flight.frozen = undefined;
   flight.live = null;
   const key = ["chat", flight.botId, flight.chatId] as const;
   const prev = queryClient.getQueryData<Chat>(key);
@@ -480,8 +478,16 @@ function inDesktop() {
   return typeof window !== "undefined" && Boolean((window as Window & { __TAURI_INTERNALS__?: unknown }).__TAURI_INTERNALS__);
 }
 
+function takeApprovals(event: Record<string, unknown>, flight: Flight) {
+  const cards = event.type === "approval" ? event.cards : event.approvals;
+  if (!Array.isArray(cards)) return;
+  queryClient.setQueryData(["approvals", flight.botId], cards);
+}
+
 function apply(event: Record<string, unknown>, flight: Flight) {
   if (!eventMatches(event, flight)) return;
+  // A card can arrive with the plain answer, or just after the turn is marked done.
+  takeApprovals(event, flight);
   // A terminal event already ended this turn. A late status must not bring Writing back.
   if (flight.settled) return;
   const live = flight.live || { phase: "thinking" as const, label: "Waiting on model", text: "", reasoning: "", run: null, heardAt: Date.now() };

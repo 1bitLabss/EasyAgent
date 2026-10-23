@@ -1,6 +1,10 @@
 # Changelog
 
 ## 0.3.46
+- One request raises one routine card. If the model already proposed a routine, the steer does not add another, and the same schedule and prompt are not offered twice.
+- A routine that is refused, including a time that does not exist, raises no card. The reply says why.
+- A routine card is pushed on the event stream when it is raised, including a card that arrives with a plain answer. It is still there after a reload.
+- After a message sent during a tool chain, the saved transcript and the rows on screen show the same text.
 - The capability list and the Routines section sit at the top of the prompt. The list names files, shell, web search, browser, routines (cron, reminders, recurring tasks, and every morning), helper bots, other bots, MCP, skills, memory, bridges, YOLO, and nightly learning. It is built from the registry. The rule is still: never say you can't do something on this list. A native routine tool can create, edit, delete, or list a routine, beside the routine fence. The fields are name, prompt, cron, daily, weekdays, weekly, once, every_minutes, timezone, and quiet. A routine runs only while EasyAgent is open.
 - A one-time reminder is read in the routine's timezone. 9:00 with America/Chicago is 9:00 AM CT on the card, not 9:00 UTC. The same reading is used for UTC and for a daylight-saving date. A time that does not exist on the spring-forward morning is refused.
 - When timezone data is missing, EasyAgent says so in the routines list and uses this computer's local clock. It does not quietly call that clock UTC.

@@ -6474,7 +6474,13 @@ async def _stream_reply(
             except StoreError:
                 pass
         if emit_done:
-            yield _sse({"type": "done", "chat": result["chat"]})
+            from easyagent.safety import list_pending
+
+            payload = {"type": "done", "chat": result["chat"]}
+            pending = list_pending(bot_id)
+            if pending:
+                payload["approvals"] = pending
+            yield _sse(payload)
     except GenerationLimit as exc:
         closed = _stale_stop_closed(store.get_chat(bot_id, chat_id).get("messages") or [])
         if getattr(exc, "reason", "") == "first_token" or closed:

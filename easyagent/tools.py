@@ -3480,7 +3480,17 @@ async def _routine_proposal(store: Store, request: ToolRequest, bot_id: str | No
             spec = {**spec, **{key: drafted.get(key) for key in ("name", "prompt", "kind", "cron", "every_minutes", "at", "timezone", "quiet") if drafted.get(key) is not None}}
             spec["action"] = action
     except ScheduleError as exc:
+        from easyagent.features import note_routine_refused
+
+        note_routine_refused(str(exc))
         raise ToolError(str(exc)) from exc
+    from easyagent.features import claim_routine_card, routine_refusal
+
+    if not claim_routine_card(shown, prompt):
+        reason = routine_refusal()
+        if reason:
+            raise ToolError(reason)
+        return "One routine card is already open for this request. It was not saved again."
     why = {
         "create": "Save this routine?",
         "edit": "Update this routine?",
@@ -3518,6 +3528,9 @@ async def _routine_proposal(store: Store, request: ToolRequest, bot_id: str | No
     )
     _PENDING[card.id] = card
     _notify(why)
+    from easyagent.safety import announce_approvals
+
+    announce_approvals(bot_id or "")
     decision = await _wait(card)
     _PENDING.pop(card.id, None)
     _audit(store, bot_id, {"at": now_iso(), "decision": decision or "deny", "rule": "routine", "why": why, "detail": name})
@@ -7508,8 +7521,10 @@ async def run_turn(
 ):
     """Keep one send alive across tools until the work is checked, or the loop is stuck."""
     from easyagent import honesty
+    from easyagent.features import reset_routine_turn
     from easyagent.generation import GenerationLimit
 
+    reset_routine_turn()
     begin_turn_checks()
     search_mod.bind_store(store)
     working = list(messages)

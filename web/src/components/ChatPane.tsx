@@ -182,6 +182,7 @@ const MessageRow = memo(function MessageRow({
   if (
     message.role === "assistant" &&
     !message.live &&
+    !streaming &&
     !failed &&
     !showBubble &&
     !message.reaction &&

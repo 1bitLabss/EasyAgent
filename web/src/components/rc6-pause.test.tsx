@@ -92,10 +92,16 @@ const EMPTY_JOB: ChatMessage[] = [
 const PARTIAL_JOB: ChatMessage[] = [
   { id: "u1", role: "user", content: "check the east pier", created_at: "2026-10-22T18:00:00Z" },
   { id: "a1", role: "assistant", content: "The east pier is half listed.", created_at: "2026-10-22T18:00:20Z" },
-  { id: "note", role: "assistant", kind: "status", content: "Paused, you sent a message", created_at: "2026-10-22T18:00:21Z" },
+  { id: "note", role: "assistant", kind: "status", content: "Paused, say continue to resume", created_at: "2026-10-22T18:00:21Z" },
   { id: "u2", role: "user", content: "and the kiln", chip: "answered", created_at: "2026-10-22T18:00:40Z" },
   { id: "a2", role: "assistant", content: "The kiln is warm.", created_at: "2026-10-22T18:00:50Z" },
-  { id: "paused", role: "assistant", kind: "status", content: "Paused, say continue to resume", created_at: "2026-10-22T18:00:51Z" },
+];
+
+const PENDING_JOB: ChatMessage[] = [
+  { id: "u1", role: "user", content: "check the east pier", created_at: "2026-10-22T18:00:00Z" },
+  { id: "a1", role: "assistant", content: "The east pier is half listed.", created_at: "2026-10-22T18:00:20Z" },
+  { id: "note", role: "assistant", kind: "status", content: "Paused, you sent a message", created_at: "2026-10-22T18:00:21Z" },
+  { id: "u2", role: "user", content: "and the kiln", chip: "queued", created_at: "2026-10-22T18:00:40Z" },
 ];
 
 describe("rc6 mid-chain pause", () => {
@@ -114,10 +120,18 @@ describe("rc6 mid-chain pause", () => {
     expect(screen.getByText("Paused, say continue to resume")).toBeTruthy();
   });
 
-  it("keeps partial text and the pause status as the same rows on screen", () => {
+  it("keeps partial text and one continue row after the side message is answered", () => {
     paint(chat(PARTIAL_JOB));
     expect(screenRows()).toEqual(PARTIAL_JOB.map((row) => row.content));
     expect(screen.queryByText("Interrupted, resuming")).toBeNull();
+    expect(screen.queryByText("Paused, you sent a message")).toBeNull();
+    expect(screen.getByText("Paused, say continue to resume")).toBeTruthy();
+  });
+
+  it("shows one you-sent row while the side message is still queued", () => {
+    paint(chat(PENDING_JOB, "running"));
+    expect(screenRows()).toEqual(PENDING_JOB.map((row) => row.content));
+    expect(screen.queryByText("Paused, say continue to resume")).toBeNull();
     expect(screen.getByText("Paused, you sent a message")).toBeTruthy();
   });
 

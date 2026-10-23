@@ -2,6 +2,9 @@
 
 ## 0.3.46
 - Typing continue after a paused job saves and shows that word. The model still receives "Resume the checklist where it stopped. Do not start over." The continue row stays above the resumed answer, and a reload shows the same rows.
+- A message sent while text is streaming inserts the partial answer and "Paused, you sent a message" in the same frame as the new bubble, so no row already on screen moves.
+- One pause row at a time. While the side message is waiting the row says "Paused, you sent a message". After it is answered, that same row says "Paused, say continue to resume" only when the job can be resumed. Otherwise the row is removed. Continue, resume, and Stop clear it. It is not copied onto a tool step.
+- A message in the last moment of a reply is answered before the turn goes idle. The answer stays on screen, and the saved rows match the screen. The turn does not show Idle while a message still says Queued.
 - A message during a tool chain does not save or show an empty assistant row. Text already written stays, with the status "Paused, you sent a message". When nothing was written yet, that row is left out. "Interrupted, resuming" appears only when a resume is actually running. After the new message is answered, the original job stays paused and the row says "Paused, say continue to resume". Saying continue resumes it. The in-flight tool calls are not started again on their own, because those results are not in the transcript. The saved rows and the rows on screen are the same text.
 - One request raises one routine card. If the model already proposed a routine, the steer does not add another, and the same schedule and prompt are not offered twice.
 - A routine that is refused, including a time that does not exist, raises no card. The reply says why.

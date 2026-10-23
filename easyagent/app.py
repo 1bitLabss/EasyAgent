@@ -1832,6 +1832,8 @@ def create_app(data_dir: str | Path | None = None) -> FastAPI:
         _force_clear_running(store, bot_id, chat_id, "you pressed Stop")
         slot = turn_mod.slot_for(store, chat_id)
         slot.user_stop = False
+        slot.side_answer = False
+        _drop_pause_rows(store, bot_id, chat_id)
         if worker is None or worker.done():
             turn_mod.clear_busy(store, chat_id)
             if queued_items(store, bot_id, chat_id) and turn_mod.try_begin(store, chat_id):
@@ -1957,6 +1959,7 @@ def create_app(data_dir: str | Path | None = None) -> FastAPI:
         else:
             echoed = _replace_continue_prompt(store, bot_id, chat_id, RESUME_LINE)
             spoken = "" if echoed else RESUME_LINE
+        _drop_pause_rows(store, bot_id, chat_id)
         slot = turn_mod.slot_for(store, chat_id)
         slot.user_stop = False
         slot.drain_chains = 0
@@ -2019,8 +2022,10 @@ def create_app(data_dir: str | Path | None = None) -> FastAPI:
         slot = turn_mod.slot_for(store, chat_id)
         slot.sealed = False
         slot.user_stop = False
+        slot.side_answer = False
         slot.deliver_queue = False
         slot.cancel = asyncio.Event()
+        _drop_pause_rows(store, bot_id, chat_id)
         if not turn_mod.request_in_flight(store, chat_id):
             turn_mod.clear_busy(store, chat_id)
         return _public_chat(store, chat)
@@ -3117,6 +3122,10 @@ def _save_user_turn(
     message_id: str | None = None,
     client_id: str = "",
 ) -> dict:
+    # A new line means an old pause sentence is no longer the state of this chat.
+    # The side answer's own row is queued, not saved here, so its pause line stays.
+    if not getattr(turn_mod.slot_for(store, chat_id), "side_answer", False):
+        _drop_pause_rows(store, bot_id, chat_id)
     chat = store.get_chat(bot_id, chat_id)
     if client_id:
         existing = _message_by_client(chat, client_id)
@@ -4211,7 +4220,7 @@ def _live_slot(chat: dict) -> dict:
 def _upsert_activity(chat: dict, step: str) -> None:
     """One status note for the running step. A later step updates that note."""
     text = " ".join((step or "").split())
-    if not text:
+    if not text or text in {PAUSED_YOU_SENT, PAUSED_SAY_CONTINUE}:
         return
     messages = chat.setdefault("messages", [])
     for message in messages:
@@ -4336,17 +4345,151 @@ def _close_partial_for_pause(store: Store, bot_id: str, chat_id: str) -> None:
         _log.warning("Could not save the paused reply.")
 
 
+def _pause_status(message: dict) -> bool:
+    return (
+        isinstance(message, dict)
+        and message.get("kind") == "status"
+        and message.get("content") in {PAUSED_YOU_SENT, PAUSED_SAY_CONTINUE}
+    )
+
+
+def _transcript_has_queued(chat: dict | None) -> bool:
+    if not isinstance(chat, dict):
+        return False
+    return any(
+        isinstance(item, dict) and item.get("role") == "user" and item.get("chip") == "queued"
+        for item in chat.get("messages") or []
+    )
+
+
+def _settle_idle_when_nothing_is_queued(store: Store, bot_id: str, chat_id: str) -> None:
+    """A finished turn that is not answering a queued line is idle. Held is not queued."""
+    try:
+        chat = store.get_chat(bot_id, chat_id)
+    except StoreError:
+        return
+    run = chat.get("run") if isinstance(chat.get("run"), dict) else {}
+    if run.get("status") != "running":
+        return
+    if _transcript_has_queued(chat):
+        return
+    try:
+        from easyagent.plan import queued_items
+
+        if queued_items(store, bot_id, chat_id):
+            return
+    except Exception:
+        return
+    _apply_run(chat, status="idle")
+    chat["updated_at"] = now_iso()
+    try:
+        store.save_chat(chat)
+    except (StoreError, OSError, HTTPException):
+        _log.warning("Could not mark the finished turn idle.")
+
+
+def _turn_still_owes_a_message(store: Store, bot_id: str, chat_id: str, chat: dict) -> bool:
+    """A queued line has not been answered. This turn must not go idle yet."""
+    if _transcript_has_queued(chat):
+        return True
+    slot = turn_mod.slot_for(store, chat_id)
+    if slot.late_arrival:
+        return True
+    try:
+        from easyagent.plan import queued_items
+
+        return bool(queued_items(store, bot_id, chat_id))
+    except Exception:
+        return False
+
+
+def _mark_pause_resumed(store: Store, bot_id: str, chat_id: str, ids: list[str]) -> None:
+    """Deleting the row failed. A quiet Resumed is true. An empty live row is not."""
+    try:
+        chat = store.get_chat(bot_id, chat_id)
+    except StoreError:
+        return
+    wanted = set(ids)
+    for message in chat.get("messages") or []:
+        if not isinstance(message, dict) or message.get("id") not in wanted:
+            continue
+        message.pop("kind", None)
+        message.pop("live", None)
+        message.pop("interrupted", None)
+        message["role"] = "assistant"
+        message["content"] = "Resumed"
+    chat["updated_at"] = now_iso()
+    try:
+        store.save_chat(chat)
+    except (StoreError, OSError, HTTPException):
+        _log.warning("Could not clear a pause row.")
+
+
+def _omit_live_ids(store: Store, bot_id: str, chat_id: str, ids: list[str]) -> dict | None:
+    """Drop rows that were just turned into empty live replies. A status row cannot be deleted in one write."""
+    try:
+        chat = store.get_chat(bot_id, chat_id)
+    except StoreError:
+        return None
+    wanted = set(ids)
+    chat["messages"] = [
+        item
+        for item in chat.get("messages") or []
+        if not (isinstance(item, dict) and item.get("id") in wanted)
+    ]
+    try:
+        store.save_chat(chat)
+    except (StoreError, OSError, HTTPException):
+        _mark_pause_resumed(store, bot_id, chat_id, ids)
+        try:
+            return store.get_chat(bot_id, chat_id)
+        except StoreError:
+            return None
+    return chat
+
+
+def _drop_pause_rows(store: Store, bot_id: str, chat_id: str) -> None:
+    """Remove pause sentences that are no longer true. Nothing is yielded between the two saves."""
+    try:
+        chat = store.get_chat(bot_id, chat_id)
+    except StoreError:
+        return
+    messages = [item for item in chat.get("messages") or [] if isinstance(item, dict)]
+    ids: list[str] = []
+    for message in messages:
+        if not _pause_status(message) or not message.get("id"):
+            continue
+        ids.append(str(message["id"]))
+        message.pop("kind", None)
+        message.pop("interrupted", None)
+        message["role"] = "assistant"
+        message["content"] = ""
+        message["live"] = True
+    if not ids:
+        return
+    chat["messages"] = messages
+    chat["updated_at"] = now_iso()
+    try:
+        store.save_chat(chat)
+    except (StoreError, OSError, HTTPException):
+        _mark_pause_resumed(store, bot_id, chat_id, ids)
+        return
+    _omit_live_ids(store, bot_id, chat_id, ids)
+
+
 def _park_side_answer(store: Store, bot_id: str, chat_id: str) -> dict | None:
     """The first job stopped so this message could be answered. Say so, once.
 
-    The tool calls that were in flight are not in the transcript, so this does
-    not restart them. Saying continue does. The row is the same words on screen.
+    The same row changes from 'you sent a message' to 'say continue' when the
+    job can be resumed. A second pause row is not added. Nothing to resume
+    removes the row. The tool calls that were in flight are not in the transcript.
     """
     slot = turn_mod.slot_for(store, chat_id)
     if not getattr(slot, "side_answer", False):
         return None
     if slot.user_stop:
         slot.side_answer = False
+        _drop_pause_rows(store, bot_id, chat_id)
         return None
     try:
         chat = store.get_chat(bot_id, chat_id)
@@ -4354,9 +4497,36 @@ def _park_side_answer(store: Store, bot_id: str, chat_id: str) -> dict | None:
         slot.side_answer = False
         return None
     messages = [item for item in chat.get("messages") or [] if isinstance(item, dict)]
-    if not any(item.get("kind") == "status" and item.get("content") == PAUSED_SAY_CONTINUE for item in messages):
+    replaced = False
+    for message in messages:
+        if message.get("kind") == "status" and message.get("content") == PAUSED_YOU_SENT:
+            message["content"] = PAUSED_SAY_CONTINUE
+            replaced = True
+            break
+    if not replaced and not any(
+        item.get("kind") == "status" and item.get("content") == PAUSED_SAY_CONTINUE for item in messages
+    ):
         messages.append(_status_line(PAUSED_SAY_CONTINUE))
-        chat["messages"] = messages
+    kept_continue = False
+    collapsed: list = []
+    extra_ids: list[str] = []
+    for message in messages:
+        if not _pause_status(message):
+            collapsed.append(message)
+            continue
+        if message.get("content") == PAUSED_SAY_CONTINUE and not kept_continue:
+            collapsed.append(message)
+            kept_continue = True
+            continue
+        if message.get("id"):
+            extra_ids.append(str(message["id"]))
+            message.pop("kind", None)
+            message.pop("interrupted", None)
+            message["role"] = "assistant"
+            message["content"] = ""
+            message["live"] = True
+            collapsed.append(message)
+    chat["messages"] = collapsed
     _apply_run(chat, status="paused", step="")
     chat["updated_at"] = now_iso()
     try:
@@ -4364,6 +4534,8 @@ def _park_side_answer(store: Store, bot_id: str, chat_id: str) -> dict | None:
     except (StoreError, OSError, HTTPException):
         _log.warning("Could not save the paused job.")
         return None
+    if extra_ids:
+        _omit_live_ids(store, bot_id, chat_id, extra_ids)
     slot.side_answer = False
     try:
         return _public_chat(store, store.get_chat(bot_id, chat_id))
@@ -4985,6 +5157,7 @@ async def _finish_turn(store: Store, bot_id: str, chat_id: str) -> None:
 
         if slot.drain_chains >= DRAIN_CHAIN_CAP and queued_items(store, bot_id, chat_id):
             park_queued_visible(store, bot_id, chat_id, HELD_FOLLOW_REASON)
+            _settle_idle_when_nothing_is_queued(store, bot_id, chat_id)
             turn_mod.clear_busy(store, chat_id)
             return
         if _run_paused(store, bot_id, chat_id) and not slot.deliver_queue:
@@ -4998,6 +5171,7 @@ async def _finish_turn(store: Store, bot_id: str, chat_id: str) -> None:
             return
         turn_mod.slot_for(store, chat_id).deliver_queue = False
         turn_mod.clear_busy(store, chat_id)
+        _settle_idle_when_nothing_is_queued(store, bot_id, chat_id)
         _seal_wedged_run(store, bot_id, chat_id, force=True)
         if _run_paused(store, bot_id, chat_id):
             return
@@ -6197,11 +6371,17 @@ def _finish_reply(
                 blank.pop("error", None)
             else:
                 messages.pop()
-        _apply_run(chat, status="idle")
+        if _turn_still_owes_a_message(store, bot_id, chat_id, chat):
+            _apply_run(chat, status="running", step="Waiting on model")
+        else:
+            _apply_run(chat, status="idle")
         _record_turn_meter(chat, clear_overflow=True)
         _settle_chips(chat)
         _stick_turn_notes(store, chat)
         store.save_chat(chat)
+        if not getattr(turn_mod.slot_for(store, chat_id), "side_answer", False):
+            _drop_pause_rows(store, bot_id, chat_id)
+            chat = store.get_chat(bot_id, chat_id)
         public = _public_chat(store, chat)
         return {"reply": "", "skills_saved": saved, "chat": public, "context": public["context"]}
     had_words = bool(visible.strip())
@@ -6332,11 +6512,16 @@ def _finish_reply(
         _apply_run(chat, status="paused", reason=LOOP_TEXT, step="")
     elif blank_reply:
         _apply_run(chat, status="error", reason=message.get("content") or "", step="")
+    elif _turn_still_owes_a_message(store, bot_id, chat_id, chat):
+        _apply_run(chat, status="running", step="Waiting on model")
     else:
         _apply_run(chat, status="idle")
     _settle_chips(chat)
     _stick_turn_notes(store, chat)
     _save_chat_final(store, chat)
+    if not getattr(turn_mod.slot_for(store, chat_id), "side_answer", False):
+        _drop_pause_rows(store, bot_id, chat_id)
+        chat = store.get_chat(bot_id, chat_id)
     poke(store, "message")
     public = _public_chat(store, chat)
     public["context"] = stats
@@ -6662,13 +6847,29 @@ async def _stream_reply(
         if drain and not turn_mod.cancelled():
             async for extra in _continue_queued(store, bot_id, chat_id):
                 yield extra
-            try:
-                result = {"chat": _public_chat(store, store.get_chat(bot_id, chat_id)), "reply": result.get("reply")}
-            except StoreError:
-                pass
         parked = _park_side_answer(store, bot_id, chat_id)
-        if parked is not None:
-            result = {**result, "chat": parked}
+        # The queue can gain a line in the last moment, after the first drain looked.
+        if drain and not turn_mod.cancelled() and parked is None:
+            from easyagent.plan import queued_items
+
+            if queued_items(store, bot_id, chat_id):
+                async for extra in _continue_queued(store, bot_id, chat_id):
+                    yield extra
+        try:
+            result = {"chat": _public_chat(store, store.get_chat(bot_id, chat_id)), "reply": result.get("reply")}
+        except StoreError:
+            if parked is not None:
+                result = {**result, "chat": parked}
+        owed = result.get("chat") if isinstance(result.get("chat"), dict) else None
+        if owed and _transcript_has_queued(owed) and (owed.get("run") or {}).get("status") == "idle":
+            try:
+                chat = store.get_chat(bot_id, chat_id)
+                _apply_run(chat, status="running", step="Waiting on model")
+                chat["updated_at"] = now_iso()
+                store.save_chat(chat)
+                result = {**result, "chat": _public_chat(store, chat)}
+            except (StoreError, OSError, HTTPException):
+                _log.warning("Could not keep a queued message off Idle.")
         if emit_done:
             from easyagent.safety import list_pending
 

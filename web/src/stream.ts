@@ -673,7 +673,9 @@ function apply(event: Record<string, unknown>, flight: Flight) {
           tokens: Math.floor(chars / 4),
         });
     const reset = Boolean(event.reset);
-    const nextText = flight.frozen ? flight.frozen.text : mergeAnswer(live.text, chunk, reset);
+    const nextText = flight.frozen && (flight.frozen.text || "").length
+      ? flight.frozen.text
+      : mergeAnswer(live.text, chunk, reset);
     remember(flight, carry(live, {
       phase: "reply",
       label,
@@ -748,7 +750,17 @@ async function recoverQuietStream(flight: Flight) {
   if (flight.live?.run?.status === "running") flight.sawRunning = true;
   const cached = queryClient.getQueryData<Chat>(["chat", flight.botId, flight.chatId]);
   // The turn already ended on the server. The Writing line is leftover.
-  if (flight.sawRunning && !flight.frozen && cached?.run && cached.run.status !== "running") {
+  if (flight.sawRunning && cached?.run && cached.run.status !== "running") {
+    // A frozen draft must not hide the saved answer, or leave Queued on screen under Idle.
+    if (flight.frozen) {
+      try {
+        const chat = await api<Chat>(`/api/bots/${flight.botId}/chats/${flight.chatId}?window=80`);
+        finish(flight, chat);
+      } catch {
+        finish(flight, cached);
+      }
+      return;
+    }
     finish(flight, cached);
     return;
   }
@@ -918,7 +930,81 @@ function placeMessage(flight: Flight, message: ChatMessage, options: { append?: 
 
 export const RETRY_REASON = "Not sent. Retry to send it again.";
 
+const PAUSED_YOU_SENT = "Paused, you sent a message";
 const PAUSED_SAY_CONTINUE = "Paused, say continue to resume";
+
+function skippableBusyRow(row: ChatMessage): boolean {
+  return row.kind === "status" || row.kind === "pickup" || row.kind === "activity" || row.about === "activity" || row.about === "queue";
+}
+
+function queuedTailRow(row: ChatMessage): boolean {
+  if (row.role !== "user" || row.before_id) return false;
+  return row.chip === "queued" || row.chip === "seen" || row.chip === "held";
+}
+
+/** The partial, the pause row, and the new bubble land in one write. A later snapshot must not push the bubble down. */
+function paintBusySend(botId: string, chatId: string, text: string, clientId: string | undefined, live: Live | null): string {
+  const client_id = clientId || (typeof crypto !== "undefined" && crypto.randomUUID ? crypto.randomUUID() : `c-${Date.now()}`);
+  const partialText = (live?.text || "").trim();
+  queryClient.setQueryData<Chat>(["chat", botId, chatId], (chat) => {
+    if (!chat) return chat;
+    const messages = [...(chat.messages || [])];
+    if (partialText && live) {
+      const replyId = live.replyId || live.run?.reply_id || "";
+      const runId = live.run?.id || "";
+      const stamp = replyId ? `live-${replyId}` : runId ? `live-${runId}` : "";
+      let at = messages.findIndex((row) => {
+        if (row.role !== "assistant" || skippableBusyRow(row)) return false;
+        if (stamp && row.client_id === stamp) return true;
+        if (replyId && row.id === replyId) return true;
+        return false;
+      });
+      if (at < 0 && stamp) {
+        const painted: ChatMessage = {
+          role: "assistant",
+          content: live.text || "",
+          thinking: live.reasoning || "",
+          client_id: stamp,
+        };
+        const anyAssistant = messages.some((row) => row.role === "assistant" && !skippableBusyRow(row));
+        if (anyAssistant) {
+          messages.push(painted);
+          at = messages.length - 1;
+        } else {
+          let insertAt = messages.length;
+          while (insertAt > 0) {
+            const row = messages[insertAt - 1];
+            if (!row || (!skippableBusyRow(row) && !queuedTailRow(row))) break;
+            insertAt -= 1;
+          }
+          messages.splice(insertAt, 0, painted);
+          at = insertAt;
+        }
+      }
+      const hasPause = messages.some(
+        (row) => row.kind === "status" && (row.content === PAUSED_YOU_SENT || row.content === PAUSED_SAY_CONTINUE),
+      );
+      if (at >= 0 && !hasPause) {
+        messages.splice(at + 1, 0, {
+          role: "assistant",
+          kind: "status",
+          content: PAUSED_YOU_SENT,
+          client_id: "pause-you-sent",
+        });
+      }
+    }
+    const message: ChatMessage = { role: "user", content: text, client_id, chip: "queued" };
+    const known = messages.findIndex((item) => item.client_id === client_id);
+    if (known >= 0) messages[known] = { ...messages[known], ...message };
+    else messages.push(message);
+    return {
+      ...chat,
+      messages,
+      message_count: Math.max(chat.message_count ?? messages.length, messages.length),
+    };
+  });
+  return client_id;
+}
 
 function continueWord(text: string): boolean {
   return text.trim().toLowerCase().replace(/[.!]+$/u, "") === "continue";
@@ -996,7 +1082,7 @@ export async function sendMessage(botId: string, chatId: string, text: string, f
       const label = isToolLabel(step) ? PAUSE_TOOL_TEXT : PAUSE_TEXT;
       remember(flight, carry(flight.live, { label, text: flight.frozen.text, reasoning: flight.frozen.reasoning }), true);
     }
-    const id = optimisticUser(botId, chatId, text, "queued", clientId);
+    const id = paintBusySend(botId, chatId, text, clientId, flight?.live || null);
     try {
       let attachmentId: string | null = null;
       if (file) {

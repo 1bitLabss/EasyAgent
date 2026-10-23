@@ -108,15 +108,28 @@ export function dedupeMessages(messages: ChatMessage[]): ChatMessage[] {
   return dropped ? out : messages;
 }
 
+/** The optimistic pause row and the saved one are the same sentence. Keep the client key so the bubble under it does not remount. */
+function adoptPauseClient(prev: ChatMessage[] | undefined, incoming: ChatMessage[]): ChatMessage[] {
+  const local = prev?.find((message) => !message.id && message.client_id === "pause-you-sent" && message.kind === "status");
+  if (!local?.content) return incoming;
+  let used = false;
+  return incoming.map((message) => {
+    if (used || message.client_id || message.kind !== "status" || message.content !== local.content) return message;
+    used = true;
+    return { ...message, client_id: local.client_id };
+  });
+}
+
 /** Keep a just-sent row when a poll or refresh snapshot has not caught up. */
 export function retainLocalTail(prev: ChatMessage[] | undefined, incoming: ChatMessage[]): ChatMessage[] {
-  if (!prev?.length) return dedupeMessages(incoming);
-  const incomingIds = new Set(incoming.filter((message) => message.id).map((message) => message.id as string));
-  const incomingClients = new Set(incoming.filter((message) => message.client_id).map((message) => message.client_id as string));
+  const rows = adoptPauseClient(prev, incoming);
+  if (!prev?.length) return dedupeMessages(rows);
+  const incomingIds = new Set(rows.filter((message) => message.id).map((message) => message.id as string));
+  const incomingClients = new Set(rows.filter((message) => message.client_id).map((message) => message.client_id as string));
   const keepLocal = (message: ChatMessage | undefined) => {
     if (!message || message.role !== "user" || message.id) return false;
     if (message.client_id && incomingClients.has(message.client_id)) return false;
-    const echoed = incoming.some(
+    const echoed = rows.some(
       (item) => item.role === "user" && item.content === message.content && Boolean(item.id || item.client_id),
     );
     return !echoed;
@@ -133,15 +146,15 @@ export function retainLocalTail(prev: ChatMessage[] | undefined, incoming: ChatM
   }
   if (!shared) {
     const local = prev.filter((message) => keepLocal(message));
-    if (!local.length) return dedupeMessages(incoming);
-    return dedupeMessages([...incoming, ...local]);
+    if (!local.length) return dedupeMessages(rows);
+    return dedupeMessages([...rows, ...local]);
   }
   const tail = prev.slice(split).filter((message) => {
     if (!message) return false;
     if (message.client_id && incomingClients.has(message.client_id)) return false;
     if (message.id && incomingIds.has(message.id)) return false;
     if (!message.id && message.role === "user") {
-      const echoed = incoming.some(
+      const echoed = rows.some(
         (item) => item.role === "user" && item.content === message.content && Boolean(item.id || item.client_id),
       );
       return !echoed;
@@ -151,8 +164,8 @@ export function retainLocalTail(prev: ChatMessage[] | undefined, incoming: ChatM
     if (message.id) return true;
     return false;
   });
-  if (!tail.length) return dedupeMessages(incoming);
-  return dedupeMessages([...incoming, ...tail]);
+  if (!tail.length) return dedupeMessages(rows);
+  return dedupeMessages([...rows, ...tail]);
 }
 
 /** Keep the previous chat object when a poll repeats the transcript. */

@@ -635,8 +635,9 @@ export function ChatPane() {
 
   const open = chat.data;
   const resume = open ? canResume(open, flight) : { retry: false, cont: false };
+  const queuedWaiting = (open?.messages || []).some((row) => row.role === "user" && row.chip === "queued");
   const serverSettled = open?.run?.status === "idle" || open?.run?.status === "stopped" || open?.run?.status === "error";
-  const running = Boolean(open && (open.run?.status === "running" || (flight?.sending && live && !serverSettled && live.phase !== "error" && live.phase !== "stopped")));
+  const running = Boolean(open && (open.run?.status === "running" || queuedWaiting || (flight?.sending && live && !serverSettled && live.phase !== "error" && live.phase !== "stopped")));
   const named = shownStep(live?.label, open?.run?.current_step);
   const step = named || "Thinking";
   const now = Date.now();
@@ -656,13 +657,14 @@ export function ChatPane() {
   const placed = arrangeBusy(rows, pinnedBusy.current);
   let head = placed.head;
   const showFrozen = Boolean(frozen && frozenHasBody(frozen));
-  if ((frozen ? showFrozen : streamingReply) && live && stamp) {
+  const liveBody = Boolean((live?.text || "").trim() || (live?.reasoning || "").trim());
+  if (live && stamp && (showFrozen || (!frozen && streamingReply) || (Boolean(frozen) && !showFrozen && liveBody))) {
     head = placeLiveReply(
       head,
       {
         role: "assistant",
-        content: frozen ? frozen.text : live.text,
-        thinking: frozen ? frozen.reasoning : live.reasoning,
+        content: showFrozen && frozen ? frozen.text : live.text,
+        thinking: showFrozen && frozen ? frozen.reasoning : live.reasoning,
         thought_seconds: live.thoughtSeconds,
         client_id: stamp,
       },
@@ -670,12 +672,14 @@ export function ChatPane() {
       frozen?.replyId || replyId,
     );
   }
-  if (frozen?.replyId) {
+  if (frozen?.replyId && frozenHasBody(frozen)) {
     head = head.map((row) => {
       if (row.role !== "assistant") return row;
       if (row.id !== frozen.replyId && row.client_id !== `live-${frozen.replyId}`) return row;
-      if (row.content === frozen.text && (row.thinking || "") === frozen.reasoning) return row;
-      return { ...row, content: frozen.text, thinking: frozen.reasoning };
+      const content = (row.content || "").length >= frozen.text.length ? row.content || "" : frozen.text;
+      const thinking = (row.thinking || "").length >= (frozen.reasoning || "").length ? row.thinking || "" : frozen.reasoning;
+      if (content === (row.content || "") && thinking === (row.thinking || "")) return row;
+      return { ...row, content, thinking };
     });
   }
   const shown = placed.tail.length ? [...head, ...placed.tail] : head;

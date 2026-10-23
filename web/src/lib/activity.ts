@@ -11,6 +11,7 @@ export type ActivityStep = {
 };
 
 const SKIP = /^(thinking|waiting(?: on model)?|model not answering)\b/i;
+const PAUSE_NOTES = new Set(["Paused, you sent a message", "Paused, say continue to resume"]);
 
 function asState(value: string | undefined): ActivityState {
   if (value === "done" || value === "failed" || value === "running") return value;
@@ -24,7 +25,7 @@ export function noteActivity(
 ): ActivityStep[] {
   const text = (event.text || "").replace(/\s+/g, " ").trim();
   const current = steps || [];
-  if (!text || SKIP.test(text)) return current;
+  if (!text || SKIP.test(text) || PAUSE_NOTES.has(text)) return current;
   const state = asState(event.state);
   const id = (event.stepId || "").trim();
   if (id) {

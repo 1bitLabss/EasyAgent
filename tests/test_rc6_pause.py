@@ -100,15 +100,18 @@ def test_partial_text_stays_and_a_blank_row_is_not_saved(tmp_path):
         PAUSED_YOU_SENT,
         "and the kiln",
     ]
+    note_id = next(item["id"] for item in paused["messages"] if item.get("content") == PAUSED_YOU_SENT)
     public = _park_side_answer(store, bot["id"], chat["id"])
     assert public is not None
     assert _visible(public["messages"]) == [
         "check the east pier",
         "The east pier is half listed.",
-        PAUSED_YOU_SENT,
-        "and the kiln",
         PAUSED_SAY_CONTINUE,
+        "and the kiln",
     ]
+    assert PAUSED_YOU_SENT not in _visible(public["messages"])
+    kept_note = next(item for item in public["messages"] if item.get("content") == PAUSED_SAY_CONTINUE)
+    assert kept_note["id"] == note_id
     assert public["run"]["status"] == "paused"
     assert "Interrupted, resuming" not in _visible(public["messages"])
     client.close()

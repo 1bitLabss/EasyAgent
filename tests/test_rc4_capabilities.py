@@ -3,6 +3,8 @@
 import asyncio
 import inspect
 import sys
+import time
+import types
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from zoneinfo import ZoneInfoNotFoundError
@@ -223,6 +225,17 @@ def test_windows_without_tzdata_confirms_runs_and_catches_up(tmp_path, monkeypat
     monkeypatch.setattr(schedule, "ZoneInfo", missing)
     monkeypatch.setattr(schedule, "_local_tzinfo", lambda: central)
     monkeypatch.setattr(schedule, "_localtime_zone", lambda: "")
+    # The registry is closed, and the host's tzname is not a zone. A UTC
+    # Windows runner must not leak its own zone into this case.
+    closed = types.ModuleType("winreg")
+    closed.HKEY_LOCAL_MACHINE = None
+
+    def _registry_closed(*_args, **_kwargs):
+        raise OSError("registry closed")
+
+    closed.OpenKey = _registry_closed
+    monkeypatch.setitem(sys.modules, "winreg", closed)
+    monkeypatch.setattr(time, "tzname", ("", ""), raising=False)
     monkeypatch.setenv("EASYAGENT_SCHEDULE_TICK", "3600")
     assert schedule.windows_zone_name() == ""
     assert schedule.local_zone_name() == "America/Chicago"

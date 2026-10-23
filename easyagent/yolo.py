@@ -7,9 +7,9 @@ state is stored on the bot, so a restart keeps it and another chat of the
 same bot is covered. A host setting, or ``EASYAGENT_YOLO``, turns it on for
 every bot. Hermes's catastrophic floor still blocks unless
 ``EASYAGENT_YOLO_FLOOR`` is off. It expires when the bot sits idle and on a
-hard deadline. It never covers a routine, a helper, a schedule, or a resumed
-run. The access layer is what decides the actor. This module does not trust
-a source string that the access check refused.
+hard deadline. It never covers a routine, a helper, or a schedule. Resume
+leaves it on. The access layer is what decides the actor. This module does
+not trust a source string that the access check refused.
 """
 
 from __future__ import annotations
@@ -182,7 +182,7 @@ def apply_toggle(
 
 
 def clear(store: Store, bot_id: str, chat_id: str) -> None:
-    """Drop YOLO for this bot. A resumed run calls this before it starts."""
+    """Drop YOLO for this bot. The owner turns it off. Resume does not call this."""
     _store_state(store, bot_id, None)
     ids = {str(chat_id or "")}
     try:
@@ -375,7 +375,8 @@ def passes(store: Store, bot_id: str, *, now: datetime | None = None) -> bool:
     a later check that repeats the same decision calls this instead of
     inventing its own exception. ``guard`` still blocks Hermes's catastrophic
     floor before that allow, unless the floor flag is off. A routine, a
-    helper, another bot, and a resumed run stay gated. What ran is still audited.
+    helper, and another bot stay gated. Resume leaves this bot's YOLO on.
+    What ran is still audited.
     """
     return active(store, bot_id, now=now)
 

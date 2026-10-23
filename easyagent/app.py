@@ -79,6 +79,7 @@ from easyagent.subagent import (
     parse_subagent,
     short_result,
     strip_subagent_fences,
+    user_asked_to_consult,
 )
 from easyagent.tunnel import relay_loop
 from easyagent.unread import mark_chat_read, mark_room_read, unread_snapshot
@@ -1909,9 +1910,7 @@ def create_app(data_dir: str | Path | None = None) -> FastAPI:
         if claim == "owned":
             return _public_chat(store, store.get_chat(bot_id, chat_id))
         from easyagent.plan import undismiss_plan
-        from easyagent.yolo import clear as clear_yolo
 
-        clear_yolo(store, bot_id, chat_id)
         undismiss_plan(store, bot_id, chat_id)
         _close_resume_offer(store, bot_id, chat_id)
         line = "Resume the checklist where it stopped. Do not start over."
@@ -5261,9 +5260,6 @@ async def _supervise(store: Store, stop: asyncio.Event) -> None:
 
 async def _auto_resume_turn(store: Store, bot_id: str, chat_id: str) -> None:
     try:
-        from easyagent.yolo import clear as clear_yolo
-
-        clear_yolo(store, bot_id, chat_id)
         turn_mod.slot_for(store, chat_id).user_stop = False
         async with chat_lock(store, chat_id):
             turn_mod.bind(store, chat_id, bot_id=bot_id, resume=True)
@@ -5602,7 +5598,76 @@ async def _finish_and_maybe_ask(
             failed=True,
             child_chat_id=None,
         )
-    return await _ask_named(store, bot_id, chat_id, ask[0], ask[1])
+    finished = await _ask_named(store, bot_id, chat_id, ask[0], ask[1])
+    # The person asked for the other bot. Its reply is context, then this bot answers.
+    if not user_asked_to_consult(user_text):
+        return finished
+    rows = (finished.get("chat") or {}).get("messages") or []
+    last = rows[-1] if rows else {}
+    if not isinstance(last, dict) or last.get("error") or not last.get("child_chat_id"):
+        return finished
+    return await _answer_in_parent_words(store, bot_id, chat_id, str(finished.get("reply") or ""))
+
+
+async def _answer_in_parent_words(store: Store, bot_id: str, chat_id: str, child_text: str) -> dict:
+    """One no-tools call. The child's reply is context. The saved text is this bot's answer."""
+    from easyagent.check import ANSWER_NOW, NO_ANSWER
+    from easyagent.helpers import strip_helper_fences
+
+    bot = store.get_bot(bot_id)
+    spoken = ""
+    try:
+        endpoint = store.get_endpoint(bot["endpoint_id"])
+    except StoreError:
+        endpoint = None
+    if endpoint is not None:
+        chat = store.get_chat(bot_id, chat_id)
+        name = " ".join(str(bot.get("name") or "EasyAgent").split()) or "EasyAgent"
+        history: list[dict] = []
+        for item in chat.get("messages") or []:
+            if not isinstance(item, dict):
+                continue
+            role = item.get("role")
+            if role not in {"user", "assistant"}:
+                continue
+            if item.get("kind") in {
+                "status",
+                "activity",
+                "pickup",
+                "resume-offer",
+                "resume-note",
+                "resume-dismissed",
+                "connection",
+            }:
+                continue
+            content = str(item.get("content") or "").strip()
+            if content:
+                history.append({"role": role, "content": content})
+        messages = [
+            {
+                "role": "system",
+                "content": (
+                    f"You are {name}. "
+                    "Write the answer in your own words. Do not call a tool. Do not ask another bot."
+                ),
+            },
+            *history[-12:],
+            {"role": "user", "content": f"{ANSWER_NOW}\n\nThe other bot replied:\n{child_text}"},
+        ]
+        try:
+            raw = await llm.complete(
+                base_url=endpoint["base_url"],
+                api_key=endpoint.get("api_key") or None,
+                model=chosen_model(bot, endpoint),
+                messages=messages,
+                tools=False,
+            )
+        except llm.ProviderError:
+            raw = ""
+        spoken = strip_helper_fences(strip_subagent_fences(raw or ""))
+    if not spoken.strip():
+        spoken = NO_ANSWER
+    return _finish_reply(store, bot_id, chat_id, spoken, [])
 
 
 async def _ask_bot_id(store: Store, parent_id: str, parent_chat_id: str, child_id: str, task: str) -> dict:

@@ -18,7 +18,7 @@ class Recorder:
         self.error = None
         self.reply = None
 
-    async def __call__(self, *, base_url, api_key, model, messages, timeout=120):
+    async def __call__(self, *, base_url, api_key, model, messages, timeout=120, **_extra):
         self.calls.append(
             {"base_url": base_url, "api_key": api_key, "model": model, "messages": messages}
         )

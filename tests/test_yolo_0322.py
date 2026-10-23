@@ -19,7 +19,7 @@ from easyagent.safety import attend, guard, list_pending, read_audit, reset_for_
 from easyagent.store import Store, atomic_write_json
 from easyagent.tools import ToolError, ToolRequest, execute
 from easyagent.workspace import bot_workspace
-from easyagent.yolo import apply_command, covers, public_view
+from easyagent.yolo import apply_command, covers, passes, public_view, view_for
 from easyagent.safety import _verdict
 
 
@@ -348,7 +348,7 @@ def test_a_grant_folder_outside_the_workspace_can_be_approved(tmp_path):
         shutil.rmtree(folder, ignore_errors=True)
 
 
-def test_routines_helpers_and_resume_do_not_inherit_yolo(tmp_path, monkeypatch):
+def test_routines_and_helpers_do_not_inherit_yolo(tmp_path, monkeypatch):
     monkeypatch.setenv("EASYAGENT_APPROVAL_SECONDS", "2")
     reset_for_tests()
     app, client, bot, chat = _client(tmp_path)
@@ -389,7 +389,9 @@ def test_routines_helpers_and_resume_do_not_inherit_yolo(tmp_path, monkeypatch):
     verdict = _verdict("ask", "bridge-send", "wait", "send", "fp")
     assert covers(store, bot["id"], ToolRequest(kind="bridge", command="42", body="hi"), verdict) is False
 
-    doc = store.get_chat(bot["id"], chat["id"])
+
+def _offer_resume(store, bot_id, chat_id):
+    doc = store.get_chat(bot_id, chat_id)
     doc["run"] = {
         "id": "run-old",
         "status": "paused",
@@ -407,25 +409,37 @@ def test_routines_helpers_and_resume_do_not_inherit_yolo(tmp_path, monkeypatch):
     })
     store.save_chat(doc)
 
+
+def _yolo_still_on(store, bot, chat, other):
+    assert public_view(store.get_chat(bot["id"], chat["id"]))["on"] is True
+    assert view_for(store, store.get_chat(bot["id"], other["id"]))["on"] is True
+    assert store.get_bot(bot["id"]).get("yolo", {}).get("on") is True
+    _bind(store, bot["id"], other["id"])
+    assert passes(store, bot["id"]) is True
+    _bind(store, bot["id"], chat["id"])
+    assert passes(store, bot["id"]) is True
+
+
+def test_resume_leaves_yolo_on_for_the_whole_bot(tmp_path, monkeypatch):
+    """Manual resume and a restart's auto-resume clear nothing. The owner still can."""
+    reset_for_tests()
+    app, client, bot, chat = _client(tmp_path)
+    store = app.state.store
+    client.patch(f"/api/bots/{bot['id']}", json={"check_enabled": False, "auto_resume": True})
+    _say(client, bot, chat, "/yolo")
+    other = client.post(f"/api/bots/{bot['id']}/chats").json()
+    _yolo_still_on(store, bot, chat, other)
+    _offer_resume(store, bot["id"], chat["id"])
+
     async def reply(**_kwargs):
         return "Continuing the notes."
 
     monkeypatch.setattr("easyagent.llm.complete", reply)
     resumed = client.post(f"/api/bots/{bot['id']}/chats/{chat['id']}/resume")
     assert resumed.status_code == 200, resumed.text
-    assert public_view(store.get_chat(bot["id"], chat["id"]))["on"] is False
+    _yolo_still_on(store, bot, chat, other)
 
-    later = (datetime.now(timezone.utc) + timedelta(hours=2)).replace(microsecond=0).isoformat()
-    fresh = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
     again = store.get_chat(bot["id"], chat["id"])
-    again["yolo"] = {
-        "on": True,
-        "since": fresh,
-        "until": later,
-        "idle_minutes": 30,
-        "hours": 2,
-        "idle_from": fresh,
-    }
     again["resume_now"] = True
     again["run"] = {
         "id": "run-auto",
@@ -444,7 +458,13 @@ def test_routines_helpers_and_resume_do_not_inherit_yolo(tmp_path, monkeypatch):
             await asyncio.gather(*pending)
 
     asyncio.run(go())
+    _yolo_still_on(store, bot, chat, other)
+
+    off = _say(client, bot, chat, "/yolo off")
+    assert off["yolo"]["on"] is False
     assert public_view(store.get_chat(bot["id"], chat["id"]))["on"] is False
+    assert view_for(store, store.get_chat(bot["id"], other["id"]))["on"] is False
+    assert "yolo" not in store.get_bot(bot["id"])
 
 
 def test_yolo_expires_on_the_hard_deadline_and_when_idle(tmp_path):

@@ -193,4 +193,69 @@ def test_an_explicit_ask_still_sends(tmp_path, monkeypatch):
     assert sent.status_code == 200, sent.text
     blob = json.dumps(sent.json()["chat"]["messages"])
     assert "No single existing bot is named Child" in blob
+    assert "The other bot replied:" not in json.dumps(recorder.seen)
+    client.close()
+
+
+def test_an_explicit_ask_is_answered_in_the_parents_words(tmp_path, monkeypatch):
+    """The child's reply is context. One no-tools call writes the parent's answer."""
+    from fastapi.testclient import TestClient
+
+    from easyagent.app import create_app
+
+    class Tape:
+        def __init__(self):
+            self.calls = []
+
+        async def __call__(self, *, base_url, api_key, model, messages, timeout=120, tools=None, **_kwargs):
+            self.calls.append({"messages": messages, "tools": tools})
+            system = messages[0]["content"]
+            blob = "\n".join(item.get("content") or "" for item in messages)
+            if "You were given one task" in system:
+                return "Twelve boats are tied at the east pier."
+            if "The other bot replied:" in blob:
+                return "The east pier has twelve boats."
+            return (
+                "Checking with the helper now.\n\n"
+                "```subagent\n"
+                "bot: Child\n"
+                "count the boats at the east pier\n"
+                "```"
+            )
+
+    tape = Tape()
+    monkeypatch.setattr("easyagent.llm.complete", tape)
+    app = create_app(tmp_path)
+    client = TestClient(app)
+    endpoint = client.post(
+        "/api/endpoints",
+        json={"name": "local", "base_url": "http://127.0.0.1:9/v1"},
+    ).json()
+    parent = client.post("/api/bots", json={"name": "Ada", "endpoint_id": endpoint["id"]}).json()
+    client.post("/api/bots", json={"name": "Child", "endpoint_id": endpoint["id"]})
+    chat = client.post(f"/api/bots/{parent['id']}/chats").json()
+    sent = client.post(
+        f"/api/bots/{parent['id']}/chats/{chat['id']}/messages",
+        json={"content": "please ask Child to count the boats at the east pier"},
+    )
+    assert sent.status_code == 200, sent.text
+    messages = sent.json()["chat"]["messages"]
+    contents = [item.get("content") or "" for item in messages]
+    assert any("Checking with the helper now." in item for item in contents)
+    child_rows = [item for item in messages if item.get("subagent")]
+    assert child_rows and "Twelve boats are tied at the east pier." in child_rows[-1]["content"]
+    answer = messages[-1]
+    assert answer.get("subagent") is not True
+    assert answer["role"] == "assistant"
+    assert answer["content"] == "The east pier has twelve boats."
+    followups = [call for call in tape.calls if call["tools"] is False]
+    assert len(followups) == 1
+    fed = "\n".join(item.get("content") or "" for item in followups[0]["messages"])
+    assert "Twelve boats are tied at the east pier." in fed
+    assert "The other bot replied:" in fed
+    child_at = next(
+        index for index, call in enumerate(tape.calls) if "You were given one task" in call["messages"][0]["content"]
+    )
+    follow_at = next(index for index, call in enumerate(tape.calls) if call["tools"] is False)
+    assert follow_at > child_at
     client.close()

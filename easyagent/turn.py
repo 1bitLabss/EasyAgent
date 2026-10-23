@@ -71,6 +71,10 @@ class Slot:
         # A message in that window is the next turn. It does not pause a finished reply.
         self.sealing = False
         self.late_arrival = False
+        # A pause cut the model or a tool. Say-continue is only for that.
+        # A sealed final answer sets sealed_answer and leaves this false.
+        self.cut_unfinished = False
+        self.sealed_answer = False
         self.listeners: list = []
         self.notify = None
 
@@ -276,6 +280,8 @@ def bind(store, chat_id: str, bot_id: str = "", *, resume: bool = False) -> Slot
     slot.late_arrival = False
     slot.in_model_read = False
     slot.sealed = False
+    slot.cut_unfinished = False
+    slot.sealed_answer = False
     slot.cancel = asyncio.Event()
     slot.client = None
     slot.proc = None
@@ -493,6 +499,15 @@ def _announce_tool_pause(slot: Slot) -> None:
             return
 
     loop.create_task(send())
+
+
+def mark_pause_cut() -> None:
+    """This pause stopped a reply that still had text or a tool left to run."""
+    slot = _slot.get()
+    if slot is None:
+        return
+    slot.cut_unfinished = True
+    slot.sealed_answer = False
 
 
 def pause_requested() -> bool:

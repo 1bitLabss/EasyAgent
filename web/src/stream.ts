@@ -504,9 +504,11 @@ function apply(event: Record<string, unknown>, flight: Flight) {
       if (kept && oldId) pinLongerReply(flight.botId, flight.chatId, oldId, kept, reason);
       flight.frozen = undefined;
     }
-    const keepPause = Boolean(flight.frozen && (live.label || "").startsWith("Paused") && !(run.current_step || "").startsWith("Paused"));
+    const incoming = run.current_step || live.label || "";
+    const holdPause = Boolean(flight.frozen && (flight.frozen.text || "").trim() && ((live.label || "").startsWith("Paused") || incoming.startsWith("Paused")));
+    const keepPause = Boolean(!holdPause && flight.frozen && (live.label || "").startsWith("Paused") && !(run.current_step || "").startsWith("Paused"));
     remember(flight, carry(live, {
-      label: keepPause ? live.label : (run.current_step || live.label),
+      label: holdPause ? PAUSE_TEXT : keepPause ? live.label : (run.current_step || live.label),
       run,
       replyId,
       text: flight.frozen ? flight.frozen.text : switched ? "" : live.text,
@@ -522,10 +524,12 @@ function apply(event: Record<string, unknown>, flight: Flight) {
     if (chat.run?.status === "running") flight.sawRunning = true;
     const saved = [...(chat.messages || [])].reverse().find((item) => item.role === "assistant" && item.live);
     const replyId = chat.run?.reply_id || saved?.id || "";
-    const keepPause = Boolean(flight.frozen && (live.label || "").startsWith("Paused") && !(chat.run?.current_step || "").startsWith("Paused"));
+    const incoming = chat.run?.current_step || live.label || "";
+    const holdPause = Boolean(flight.frozen && (flight.frozen.text || "").trim() && ((live.label || "").startsWith("Paused") || incoming.startsWith("Paused")));
+    const keepPause = Boolean(!holdPause && flight.frozen && (live.label || "").startsWith("Paused") && !(chat.run?.current_step || "").startsWith("Paused"));
     remember(flight, carry(live, {
       phase: (saved?.content || "").trim() ? "reply" : "thinking",
-      label: keepPause ? live.label : (chat.run?.current_step || live.label || "Writing"),
+      label: holdPause ? PAUSE_TEXT : keepPause ? live.label : (chat.run?.current_step || live.label || "Writing"),
       text: flight.frozen ? flight.frozen.text : (saved?.content || ""),
       reasoning: flight.frozen ? flight.frozen.reasoning : (saved?.thinking || ""),
       run: chat.run || live.run,
@@ -541,7 +545,12 @@ function apply(event: Record<string, unknown>, flight: Flight) {
       queryClient.setQueryData(["chat", flight.botId, flight.chatId], mergeChat(prev, chat));
     }
     const run = (event.run as Run | undefined) || live.run;
-    const label = String(event.text || "Paused, reading your message");
+    const label = flight.frozen && (flight.frozen.text || "").trim()
+      ? PAUSE_TEXT
+      : String(event.text || "Paused, reading your message");
+    const pausedSteps = (flight.frozen && (flight.frozen.text || "").trim())
+      ? (live.steps || []).filter((item) => item.state !== "running" && !item.text.startsWith("Running "))
+      : settleActivity(live.steps);
     if (flight.frozen) {
       remember(flight, carry(live, {
         phase: "reply",
@@ -552,7 +561,7 @@ function apply(event: Record<string, unknown>, flight: Flight) {
         run,
         replyId: flight.frozen.replyId || live.replyId,
         chars: flight.frozen.text.length,
-        steps: settleActivity(live.steps),
+        steps: pausedSteps,
       }), true);
       return;
     }
@@ -595,16 +604,21 @@ function apply(event: Record<string, unknown>, flight: Flight) {
       run.current_step = label;
       if (label.startsWith("Model not answering")) run.last_activity = label;
     }
-    const steps = noteActivity(live.steps, {
+    let steps = noteActivity(live.steps, {
       text: label,
       stepId: String(event.step_id || ""),
       state: String(event.state || ""),
     });
+    const textPause = Boolean(flight.frozen && (flight.frozen.text || "").trim());
+    if (textPause) {
+      steps = steps.filter((item) => item.state !== "running" && !item.text.startsWith("Running "));
+    }
     const modelWait = label === "Thinking" || label.startsWith("Waiting on model");
-    const keepPause = Boolean(flight.frozen && (live.label || "").startsWith("Paused") && !label.startsWith("Paused"));
+    const holdPause = Boolean(textPause && ((live.label || "").startsWith("Paused") || label.startsWith("Paused")));
+    const keepPause = Boolean(!holdPause && flight.frozen && (live.label || "").startsWith("Paused") && !label.startsWith("Paused"));
     remember(flight, carry(live, {
       phase: "thinking",
-      label: keepPause ? live.label : label,
+      label: holdPause ? PAUSE_TEXT : keepPause ? live.label : label,
       run,
       steps,
       chars: modelWait ? live.chars : 0,
@@ -1079,8 +1093,12 @@ export async function sendMessage(botId: string, chatId: string, text: string, f
       const replyId = flight.live.replyId || flight.live.run?.reply_id || "";
       flight.frozen = { replyId, text: flight.live.text || "", reasoning: flight.live.reasoning || "" };
       const step = flight.live.label || flight.live.run?.current_step || "";
-      const label = isToolLabel(step) ? PAUSE_TOOL_TEXT : PAUSE_TEXT;
-      remember(flight, carry(flight.live, { label, text: flight.frozen.text, reasoning: flight.frozen.reasoning }), true);
+      const hasText = Boolean((flight.frozen.text || "").trim());
+      const label = hasText ? PAUSE_TEXT : (isToolLabel(step) ? PAUSE_TOOL_TEXT : PAUSE_TEXT);
+      const steps = hasText
+        ? (flight.live.steps || []).filter((item) => item.state !== "running" && !item.text.startsWith("Running "))
+        : flight.live.steps;
+      remember(flight, carry(flight.live, { label, steps, text: flight.frozen.text, reasoning: flight.frozen.reasoning }), true);
     }
     const id = paintBusySend(botId, chatId, text, clientId, flight?.live || null);
     try {

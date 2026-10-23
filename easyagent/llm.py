@@ -2121,6 +2121,7 @@ async def _pause_unless_the_reply_ended(body) -> AsyncIterator[str]:
         piece = await _one_piece(body, 0.08)
     except TimeoutError:
         turn_mod.raise_if_cancelled()
+        turn_mod.mark_pause_cut()
         raise turn_mod.TurnCancelled()
     except httpx.HTTPError:
         turn_mod.raise_if_cancelled()
@@ -2131,6 +2132,7 @@ async def _pause_unless_the_reply_ended(body) -> AsyncIterator[str]:
         nxt = await _one_piece(body, 0.08)
     except TimeoutError:
         turn_mod.raise_if_cancelled()
+        turn_mod.mark_pause_cut()
         raise turn_mod.TurnCancelled()
     except httpx.HTTPError:
         turn_mod.raise_if_cancelled()
@@ -2139,6 +2141,7 @@ async def _pause_unless_the_reply_ended(body) -> AsyncIterator[str]:
         if piece:
             yield piece
         return
+    turn_mod.mark_pause_cut()
     turn_mod.raise_if_cancelled()
     raise turn_mod.TurnCancelled()
 

@@ -7304,6 +7304,8 @@ async def _iter_streamed_model(
 def _abandon_model_error(exc: llm.ProviderError) -> None:
     """Stop is immediate. A client abort is a stop. Anything else is the caller's choice."""
     if turn_mod.cancelled() or "incomplete chunked read" in str(exc).lower():
+        if turn_mod.pause_requested():
+            turn_mod.mark_pause_cut()
         raise turn_mod.TurnCancelled() from exc
 
 
@@ -7452,6 +7454,31 @@ def _partial_stream(text_bits: list[str]):
         yield "thinking", hidden
     if body:
         yield "stage", body
+
+
+def _pause_leaves_unfinished_work(text_bits: list[str]) -> bool:
+    """True when this pause cut a tool chain or a reply that was still being written.
+
+    A prose answer that is already whole, with no tool left to run, is not resumable.
+    """
+    slot = turn_mod.current_slot()
+    if slot is not None and slot.cut_unfinished:
+        return True
+    if slot is not None and turn_mod._tool_in_progress(slot):
+        return True
+    if list(llm._native_calls.get() or []):
+        return True
+    _hidden, body = _partial_answer(text_bits)
+    if not (body or "").strip():
+        return True
+    if _cut_off_tool(body):
+        return True
+    try:
+        if parse_tools(body):
+            return True
+    except ToolError:
+        return True
+    return False
 
 
 def _keep_partial_reply(store, bot_id: str | None, chat_id: str | None, text_bits: list[str]) -> None:
@@ -8279,6 +8306,7 @@ async def run_turn(
             yield "ledger", json.dumps(_ledger_items())
             return
         if turn_mod.pause_requested():
+            turn_mod.mark_pause_cut()
             yield "pause", "Paused, reading your message"
             return
         redirected = turn_mod.take_redirect()
@@ -8390,16 +8418,22 @@ async def run_turn(
             _keep_partial_reply(store, bot_id, chat_id, text_bits)
             raise
         except turn_mod.TurnCancelled:
-            if turn_mod.pause_requested():
+            if turn_mod.pause_requested() and _pause_leaves_unfinished_work(text_bits):
+                turn_mod.mark_pause_cut()
                 for event in _partial_stream(text_bits):
                     yield event
                 yield "pause", "Paused, reading your message"
                 return
-            if turn_mod.take_redirect():
+            if turn_mod.pause_requested():
+                # The text already in hand is the whole answer. Seal it.
+                # The message that arrived is the next turn, not a resume.
+                pass
+            elif turn_mod.take_redirect():
                 continue
-            for event in _partial_stream(text_bits):
-                yield event
-            raise
+            else:
+                for event in _partial_stream(text_bits):
+                    yield event
+                raise
         except GenerationLimit as exc:
             # The answer is already on screen and the model went quiet.
             # Ending here is the turn, not a pause for running too long.
@@ -8424,22 +8458,25 @@ async def run_turn(
                     for event in close(""):
                         yield event
                     return
-                if turn_mod.pause_requested():
+                if turn_mod.pause_requested() and _pause_leaves_unfinished_work(text_bits):
+                    turn_mod.mark_pause_cut()
                     for event in _partial_stream(text_bits):
                         yield event
                     yield "pause", "Paused, reading your message"
                     return
-                if turn_mod.take_redirect():
-                    continue
-                if turn_mod.cancelled() or "incomplete chunked read" in str(exc).lower():
+                if not turn_mod.pause_requested():
+                    if turn_mod.take_redirect():
+                        continue
+                    if turn_mod.cancelled() or "incomplete chunked read" in str(exc).lower():
+                        for event in _partial_stream(text_bits):
+                            yield event
+                        raise turn_mod.TurnCancelled() from exc
+                    if _retryable_provider(exc) or retry.is_unreachable_message(str(exc)):
+                        raise
                     for event in _partial_stream(text_bits):
                         yield event
-                    raise turn_mod.TurnCancelled() from exc
-                if _retryable_provider(exc) or retry.is_unreachable_message(str(exc)):
                     raise
-                for event in _partial_stream(text_bits):
-                    yield event
-                raise
+                # A pause after a whole prose answer seals that answer.
         finally:
             if model_slot is not None:
                 model_slot._model_request_active.clear()

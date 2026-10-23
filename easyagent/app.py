@@ -4491,6 +4491,28 @@ def _park_side_answer(store: Store, bot_id: str, chat_id: str) -> dict | None:
         slot.side_answer = False
         _drop_pause_rows(store, bot_id, chat_id)
         return None
+    # A sealed final answer has nothing left to run. The row would be a lie.
+    if slot.sealed_answer and not slot.cut_unfinished:
+        slot.side_answer = False
+        slot.sealed_answer = False
+        _drop_pause_rows(store, bot_id, chat_id)
+        try:
+            chat = store.get_chat(bot_id, chat_id)
+        except StoreError:
+            return None
+        run = chat.get("run") if isinstance(chat.get("run"), dict) else {}
+        if run.get("status") == "paused" or str(run.get("current_step") or "").startswith("Paused"):
+            if not _transcript_has_queued(chat):
+                _apply_run(chat, status="idle", step="")
+                chat["updated_at"] = now_iso()
+                try:
+                    store.save_chat(chat)
+                except (StoreError, OSError, HTTPException):
+                    _log.warning("Could not clear a finished pause.")
+        try:
+            return _public_chat(store, store.get_chat(bot_id, chat_id))
+        except StoreError:
+            return None
     try:
         chat = store.get_chat(bot_id, chat_id)
     except StoreError:
@@ -6519,7 +6541,10 @@ def _finish_reply(
     _settle_chips(chat)
     _stick_turn_notes(store, chat)
     _save_chat_final(store, chat)
-    if not getattr(turn_mod.slot_for(store, chat_id), "side_answer", False):
+    slot = turn_mod.slot_for(store, chat_id)
+    if (visible or "").strip() and not slot.cut_unfinished:
+        slot.sealed_answer = True
+    if not slot.side_answer:
         _drop_pause_rows(store, bot_id, chat_id)
         chat = store.get_chat(bot_id, chat_id)
     poke(store, "message")

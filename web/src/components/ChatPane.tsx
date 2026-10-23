@@ -839,7 +839,7 @@ export function ChatPane() {
                 frozen={frozen}
                 onChoose={onChoose}
               />
-              {liveTurn && steps.length ? finishedSteps.map((item) => (
+              {liveTurn && steps.length && !shown.some((row) => row.kind === "status" && row.content === "Paused, you sent a message") ? finishedSteps.map((item) => (
                 <div key={item.id} data-testid="activity-step" data-state={item.state} data-step-id={item.id}>
                   <Quiet
                     icon={runTone(item.text, "running") === "tool" ? <Terminal className="h-3 w-3" /> : <MessageSquare className="h-3 w-3" />}

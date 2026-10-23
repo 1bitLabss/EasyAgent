@@ -1,6 +1,8 @@
 # Changelog
 
 ## 0.3.46
+- While a side message is waiting, the transcript has one pause row, "Paused, you sent a message". The live status is the only status line. It does not also show "Paused, reading your message — finishing current step", and a finished "Running …" step does not stay on screen.
+- "Paused, say continue to resume" stays only when the interrupted turn still has work: a tool chain that was cut, or text that was cut before the model finished. A reply that was saved complete, with nothing left to run, drops that row on screen and in the saved chat, including after a reload.
 - Typing continue after a paused job saves and shows that word. The model still receives "Resume the checklist where it stopped. Do not start over." The continue row stays above the resumed answer, and a reload shows the same rows.
 - A message sent while text is streaming inserts the partial answer and "Paused, you sent a message" in the same frame as the new bubble, so no row already on screen moves.
 - One pause row at a time. While the side message is waiting the row says "Paused, you sent a message". After it is answered, that same row says "Paused, say continue to resume" only when the job can be resumed. Otherwise the row is removed. Continue, resume, and Stop clear it. It is not copied onto a tool step.

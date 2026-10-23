@@ -73,6 +73,7 @@ from easyagent.tools import (
 )
 from easyagent.vault import seal
 from easyagent.subagent import (
+    automatic_ask_allowed,
     child_messages,
     error_line,
     parse_subagent,
@@ -5551,9 +5552,18 @@ async def _finish_and_maybe_ask(
     helpers = parse_helpers(visible)
     visible = strip_helper_fences(visible)
     ask = parse_subagent(visible)
+    user_text = _last_user_text(store.get_chat(bot_id, chat_id).get("messages") or [])
+    # A plain question does not send another bot just because the reply contains the fence.
+    suppressed = bool(ask) and not automatic_ask_allowed(user_text)
+    if suppressed:
+        ask = None
     visible = strip_subagent_fences(visible)
     if ask and not visible.strip():
         visible = f"Asked {ask[0]} to do one task."
+    elif suppressed and not visible.strip():
+        from easyagent.check import NO_ANSWER
+
+        visible = NO_ANSWER
     finished = _finish_reply(
         store,
         bot_id,
@@ -5812,9 +5822,10 @@ def _finish_reply(
     chat = store.get_chat(bot_id, chat_id)
     _drop_activity(chat)
     visible = redact(store, visible)
-    from easyagent.tools import apply_verify_note
+    from easyagent.tools import apply_verify_note, unverified_claim
 
     visible = apply_verify_note(visible)
+    claim_unverified = unverified_claim()
     visible = keep_lessons(store, bot_id, visible)
     visible, handed = take_file(visible)
     attachment = _preview_attachment(store, bot_id, chat_id, made, visible)
@@ -5942,7 +5953,7 @@ def _finish_reply(
         ]
     elif "receipts" in message:
         message.pop("receipts", None)
-    if outcome is not None and outcome.unverified:
+    if (outcome is not None and outcome.unverified) or claim_unverified:
         message["unverified"] = True
     elif "unverified" in message:
         message.pop("unverified", None)

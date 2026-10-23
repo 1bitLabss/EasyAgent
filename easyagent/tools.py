@@ -166,24 +166,38 @@ def command_is_check(command: str) -> bool:
     return bool(_CHECK_COMMAND.search(command or ""))
 
 
-def apply_verify_note(text: str) -> str:
-    """A done or fixed claim names that it was not checked, unless this turn ran a check.
-
-    A short reply that did not write a file or start a command is left as it is.
-    """
+def _claim_was_not_checked(body: str) -> bool:
+    """A done or fixed claim after a write or a command, with no check this turn."""
     flags = _flag_box()
-    if flags is None:
-        return text or ""
-    body = text or ""
-    if not flags.get("effect"):
-        return body
+    if flags is None or not flags.get("effect"):
+        return False
     if not _DONE_CLAIM.search(body) or _UNVERIFIED_NOTE in body:
-        return body
+        return False
     if re.search(r"(?i)\b(not verified|did not verify|didn't verify|without verifying)\b", body):
-        return body
+        return False
     if flags.get("checked"):
-        return body
-    return (body.rstrip() + "\n\n" + _UNVERIFIED_NOTE).strip()
+        return False
+    return True
+
+
+def unverified_claim() -> bool:
+    """The status row, not a sentence in the answer."""
+    flags = _flag_box()
+    return bool(flags and flags.get("unverified_claim"))
+
+
+def apply_verify_note(text: str) -> str:
+    """Leave the model's words as they are.
+
+    A done or fixed claim that this turn did not check is a status flag.
+    It is not a sentence added to the answer. A short reply that did not
+    write a file or start a command leaves the flag off.
+    """
+    body = text or ""
+    flags = _flag_box()
+    if flags is not None:
+        flags["unverified_claim"] = _claim_was_not_checked(body)
+    return body
 
 
 def take_turn_notes() -> list[tuple[str, str]]:
@@ -3786,9 +3800,7 @@ _EXACT_LOG = re.compile(
     r"read the memory index\."
     r")$"
 )
-_LEADING_LOG = re.compile(
-    r"(?i)^(?:searched the web\.|ran a command on [^.]+\.|ran a tool\.)\s+"
-)
+_FENCE_LINE = re.compile(r"^[ \t]{0,3}```")
 
 
 def _is_exact_log(line: str, known: list[str] | None = None) -> bool:
@@ -3809,23 +3821,31 @@ def _same_unindented(left: str, right: str) -> bool:
 
 
 def _drop_known_logs(text: str, known: list[str] | None = None) -> str:
-    """The bubble is the model's words. A tool log is not the chat."""
-    blocks: list[str] = []
-    leads = [item.strip() for item in (known or []) if item and item.strip()]
-    for block in re.split(r"\n\s*\n", text or ""):
-        rows: list[str] = []
-        for row in block.splitlines():
-            cleaned = _LEADING_LOG.sub("", row).strip()
-            for lead in leads:
-                if cleaned.startswith(lead):
-                    cleaned = cleaned[len(lead):].strip()
-            if not cleaned or _is_exact_log(cleaned, known) or _is_harness_narration(cleaned):
-                continue
-            rows.append(cleaned)
-        piece = "\n".join(rows).strip()
-        if piece:
-            blocks.append(piece)
-    return "\n\n".join(blocks)
+    """Drop a whole tool-log line. Leave every other line, including its indent.
+
+    Text inside a ``` fence is copied unchanged, even when a line in there
+    looks like a log. A longer sentence that merely starts with a log is kept.
+    """
+    source = text or ""
+    if not source:
+        return ""
+    kept: list[str] = []
+    in_fence = False
+    for row in source.splitlines():
+        if _FENCE_LINE.match(row):
+            kept.append(row)
+            in_fence = not in_fence
+            continue
+        if in_fence:
+            kept.append(row)
+            continue
+        if _is_exact_log(row, known) or _is_harness_narration(row):
+            continue
+        kept.append(row)
+    result = "\n".join(kept)
+    if source.endswith("\n") and result and not result.endswith("\n"):
+        result += "\n"
+    return result
 
 
 _ANNOUNCE_LEAD = re.compile(
@@ -8910,8 +8930,8 @@ async def run_turn(
                 prose = _fallback_after_empty(lines, raws, messages)
             final = _show(_with_status(_not_bare(_ensure_shown(prose, lines, steps))))
             final = _drop_known_logs(final, lines)
-            # The log pass strips code indentation. That is not a new answer, and
-            # appending it paints the reply twice for a frame.
+            # A streamed copy that only lost a log line stays the text already
+            # on screen, so the bubble is not painted twice.
             if sent_answer and final and _same_unindented(sent_answer, final):
                 final = sent_answer
             if not _answer_is_failure(final):

@@ -30,6 +30,7 @@ from easyagent.tools import (
     _write_path,
     apply_verify_note,
     begin_turn_checks,
+    unverified_claim,
     command_is_check,
     end_turn_checks,
     mark_turn_checked,
@@ -312,15 +313,21 @@ def test_done_without_a_check_says_so():
     begin_turn_checks()
     try:
         assert apply_verify_note("Done.") == "Done."
+        assert unverified_claim() is False
         note_turn_effect()
-        assert apply_verify_note("Done.") == "Done.\n\nThis was not verified."
-        assert apply_verify_note("I fixed the shelf.") .endswith("This was not verified.")
+        assert apply_verify_note("Done.") == "Done."
+        assert unverified_claim() is True
+        assert apply_verify_note("I fixed the shelf.") == "I fixed the shelf."
+        assert unverified_claim() is True
         assert apply_verify_note("The shelf is ready.") == "The shelf is ready."
+        assert unverified_claim() is False
         said = apply_verify_note("Done. I did not verify it.")
         assert said == "Done. I did not verify it."
         assert said.count("This was not verified.") == 0
+        assert unverified_claim() is False
         mark_turn_checked()
         assert apply_verify_note("Done.") == "Done."
+        assert unverified_claim() is False
     finally:
         end_turn_checks()
     assert apply_verify_note("Done.") == "Done."

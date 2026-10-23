@@ -42,6 +42,45 @@ def strip_subagent_fences(reply: str) -> str:
     return re.sub(r"\n{3,}", "\n\n", text).strip()
 
 
+_CONSULT = re.compile(
+    r"(?i)\bask\s+another\s+bot\b"
+    r"|\bconsult\s+(?:another\s+)?(?:bot|agent)\b"
+    r"|\bdelegate\s+to\b"
+    r"|\bask\s+(?:the\s+)?(?!me\b|you\b|us\b|him\b|her\b|them\b|someone\b|anybody\b|anyone\b|another\b)"
+    r"([A-Za-z][\w-]{1,40})\s+to\b"
+)
+
+
+def user_asked_to_consult(text: str) -> bool:
+    """The person asked to send work to another bot. A question aimed at them is not that."""
+    return bool(_CONSULT.search(text or ""))
+
+
+def plain_consult_turn(text: str) -> bool:
+    """Chat, a lookup, or a search-and-answer. A coding task is not one of these."""
+    from easyagent.loop import is_quick, pick_playbook
+
+    raw = text or ""
+    if is_quick(raw) or pick_playbook(raw) == "research":
+        return True
+    if re.search(r"(?i)\b(search(?:\s+the\s+web)?|look\s*up|lookup)\b", raw):
+        if re.search(r"(?i)\b(write|create|save|fix|code|file|script|bug|patch)\b", raw):
+            return False
+        return True
+    return False
+
+
+def automatic_ask_allowed(text: str) -> bool:
+    """A subagent fence sends on its own only outside a plain question.
+
+    Chat, a lookup, and a search-and-answer ignore that fence unless the
+    person asked to consult the other bot.
+    """
+    if user_asked_to_consult(text):
+        return True
+    return not plain_consult_turn(text)
+
+
 def child_messages(bot_name: str, direction: str, task: str) -> list[dict]:
     """The only messages the child model sees."""
     direction_text = (direction or "").strip()

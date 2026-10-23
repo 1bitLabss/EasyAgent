@@ -28,6 +28,7 @@ from easyagent.tools import (
     _write_path,
     apply_verify_note,
     begin_turn_checks,
+    unverified_claim,
     end_turn_checks,
     note_turn_effect,
     parse_tool,
@@ -116,7 +117,8 @@ def test_a_worker_thread_keeps_the_unverified_note():
         return apply_verify_note("Done.")
 
     try:
-        assert "This was not verified." in asyncio.run(go())
+        assert asyncio.run(go()) == "Done."
+        assert unverified_claim() is True
     finally:
         end_turn_checks()
 
@@ -300,7 +302,8 @@ def test_a_live_write_keeps_the_summary_and_the_unverified_note(tmp_path):
         answer = stored["messages"][-1]["content"]
         assert target.read_text(encoding="utf-8") == "agenda\n"
         assert "whole summary of this change" in answer
-        assert "This was not verified." in answer
+        assert "This was not verified." not in answer
+        assert stored["messages"][-1].get("unverified") is True
         assert "in ." not in answer
     finally:
         client.close()

@@ -27,6 +27,21 @@ vi.mock("@/api", async () => {
 const PIER = "The east pier has twelve boats.";
 const MARK = "The pier mark is set.";
 const KILN = "The kiln note is the one that was written.";
+const MODEL = `The harbor counter lives in harbor.py.
+
+\`\`\`python
+def boats():
+
+    return 12
+\`\`\`
+
+\`\`\`yaml
+ship:
+  name: harbor
+  count: 12
+\`\`\``;
+const PYTHON_BODY = "def boats():\n\n    return 12\n";
+const YAML_BODY = "ship:\n  name: harbor\n  count: 12\n";
 
 function bot(): Bot {
   return {
@@ -69,14 +84,14 @@ function user(text: string): ChatMessage {
   return { id: "u1", role: "user", content: text, created_at: "2026-10-22T18:00:00Z" };
 }
 
-function answer(text: string): ChatMessage {
-  return { id: "a1", role: "assistant", content: text, created_at: "2026-10-22T18:00:33Z" };
+function answer(text: string, extra: Partial<ChatMessage> = {}): ChatMessage {
+  return { id: "a1", role: "assistant", content: text, created_at: "2026-10-22T18:00:33Z", ...extra };
 }
 
-function paint(saved: string) {
+function paint(saved: string, extra: Partial<ChatMessage> = {}) {
   queryClient.setQueryData(["bots"], [bot()]);
   queryClient.setQueryData(["ongoing", "bot-1"], { id: "chat-1" });
-  queryClient.setQueryData(["chat", "bot-1", "chat-1"], chat([user("How many boats are at the east pier?"), answer(saved)]));
+  queryClient.setQueryData(["chat", "bot-1", "chat-1"], chat([user("Write the harbor counter into harbor.py and show the Python and the YAML."), answer(saved, extra)]));
   queryClient.setQueryData(["approvals", "bot-1"], []);
   useApp.getState().openBot("bot-1", "chat-1");
   render(
@@ -107,5 +122,27 @@ describe("a finished turn has an answer row", () => {
     expect(bubble).not.toContain("CHILD-ONLY");
     expect(document.body.textContent || "").not.toContain("Retry");
     expect(document.body.textContent || "").not.toContain("Continue");
+  });
+
+  it("renders a coding reply byte for byte with the model output", () => {
+    paint(MODEL);
+    const row = document.querySelector("[data-role=assistant]");
+    expect(row).toBeTruthy();
+    const codes = Array.from(row!.querySelectorAll("pre code")).map((node) => node.textContent || "");
+    expect(codes).toEqual([PYTHON_BODY, YAML_BODY]);
+    const bubble = row!.querySelector(".bubble-bot")?.textContent || "";
+    expect(bubble).toContain("    return 12");
+    expect(bubble).toContain("  name: harbor");
+    expect(bubble).toContain("The harbor counter lives in harbor.py.");
+  });
+
+  it("keeps an unverified caveat off the answer text", () => {
+    const words = "Done. I wrote the agenda into note.txt and that is the whole summary of this change for the record.";
+    paint(words, { unverified: true });
+    const bubble = document.querySelector(".bubble-bot")?.textContent || "";
+    expect(bubble).toBe(words);
+    expect(bubble).not.toContain("This was not verified.");
+    const note = document.querySelector(".sys-line");
+    expect(note?.textContent).toBe("Unverified");
   });
 });

@@ -1730,6 +1730,8 @@ def create_app(data_dir: str | Path | None = None) -> FastAPI:
                 return _apply_mode_command(store, bot_id, chat_id, mode, content)
         if attachment is None and _continue_request(content) and not turn_mod.is_busy(store, chat_id):
             if _waiting_on_continue(store.get_chat(bot_id, chat_id)):
+                request.state.typed_continue = content
+                request.state.typed_client_id = client_id
                 return await resume_chat(bot_id, chat_id, request)
         async with turn_mod.boundary(store, chat_id):
             if client_id and _message_by_client(store.get_chat(bot_id, chat_id), client_id):
@@ -1943,22 +1945,32 @@ def create_app(data_dir: str | Path | None = None) -> FastAPI:
 
         undismiss_plan(store, bot_id, chat_id)
         _close_resume_offer(store, bot_id, chat_id)
-        line = "Resume the checklist where it stopped. Do not start over."
-        replaced = _replace_continue_prompt(store, bot_id, chat_id, line)
+        typed = str(getattr(request.state, "typed_continue", "") or "")
+        typed_client = str(getattr(request.state, "typed_client_id", "") or "")
+        # The person typed a word. That word is the saved row. The model still
+        # gets the resume instruction, and it is not written into the chat.
+        if typed:
+            echoed = _replace_continue_prompt(
+                store, bot_id, chat_id, typed, client_id=typed_client, resume_cue=True,
+            )
+            spoken = typed
+        else:
+            echoed = _replace_continue_prompt(store, bot_id, chat_id, RESUME_LINE)
+            spoken = "" if echoed else RESUME_LINE
         slot = turn_mod.slot_for(store, chat_id)
         slot.user_stop = False
         slot.drain_chains = 0
         if _wants_stream(request):
             return StreamingResponse(
-                _stream_resume(store, bot_id, chat_id, "" if replaced else line),
+                _stream_resume(store, bot_id, chat_id, spoken, echoed=echoed),
                 media_type="text/event-stream",
                 headers={"Cache-Control": "no-store", "X-Accel-Buffering": "no"},
             )
         try:
             async with chat_lock(store, chat_id):
                 turn_mod.bind(store, chat_id, bot_id=bot_id, resume=True)
-                if not replaced:
-                    _save_user_turn(store, bot_id, chat_id, line)
+                if echoed is None:
+                    _save_user_turn(store, bot_id, chat_id, spoken or RESUME_LINE)
                 return await _reply_json(store, bot_id, chat_id)
         finally:
             await _finish_turn(store, bot_id, chat_id)
@@ -2657,7 +2669,9 @@ def _model_message(store: Store, bot_id: str, chat_id: str, stored: dict, clippe
     """Show an attached file to the model without putting a typed path in its place."""
     content = clipped.get("content") or ""
     role = clipped.get("role") or "user"
-    if isinstance(stored, dict) and stored.get("steer") and role == "user" and isinstance(content, str) and content.strip():
+    if isinstance(stored, dict) and stored.get("resume_cue") and role == "user":
+        content = RESUME_LINE
+    elif isinstance(stored, dict) and stored.get("steer") and role == "user" and isinstance(content, str) and content.strip():
         from easyagent.safety import mark_untrusted
 
         content = (
@@ -4239,6 +4253,7 @@ WEDGE_TEXT = "This job was still marked running, but nothing was in flight, so I
 PAUSE_TEXT = "Paused, reading your message"
 PAUSED_YOU_SENT = "Paused, you sent a message"
 PAUSED_SAY_CONTINUE = "Paused, say continue to resume"
+RESUME_LINE = "Resume the checklist where it stopped. Do not start over."
 WEDGE_SECONDS = 60
 
 
@@ -4356,13 +4371,20 @@ def _park_side_answer(store: Store, bot_id: str, chat_id: str) -> dict | None:
         return None
 
 
-def _replace_continue_prompt(store: Store, bot_id: str, chat_id: str, line: str) -> bool:
-    """The continue row becomes the resume line. A status row cannot be deleted."""
+def _replace_continue_prompt(
+    store: Store,
+    bot_id: str,
+    chat_id: str,
+    line: str,
+    client_id: str = "",
+    resume_cue: bool = False,
+) -> dict | None:
+    """The pause row becomes the person's line, in the same place. A status row cannot be deleted."""
     try:
         chat = store.get_chat(bot_id, chat_id)
     except StoreError:
-        return False
-    replaced = False
+        return None
+    found: dict | None = None
     for message in chat.get("messages") or []:
         if not (
             isinstance(message, dict)
@@ -4375,16 +4397,22 @@ def _replace_continue_prompt(store: Store, bot_id: str, chat_id: str, line: str)
         message.pop("kind", None)
         message.pop("live", None)
         message.pop("interrupted", None)
-        replaced = True
+        if client_id:
+            message["client_id"] = client_id
+        if resume_cue:
+            message["resume_cue"] = True
+        else:
+            message.pop("resume_cue", None)
+        found = message
         break
-    if not replaced:
-        return False
+    if found is None:
+        return None
     chat["updated_at"] = now_iso()
     try:
         store.save_chat(chat)
     except (StoreError, OSError, HTTPException):
-        return False
-    return True
+        return None
+    return found
 
 
 def _continue_request(content: str) -> bool:
@@ -5477,7 +5505,7 @@ async def _auto_resume_turn(store: Store, bot_id: str, chat_id: str) -> None:
         turn_mod.slot_for(store, chat_id).user_stop = False
         async with chat_lock(store, chat_id):
             turn_mod.bind(store, chat_id, bot_id=bot_id, resume=True)
-            _save_user_turn(store, bot_id, chat_id, "Resume the checklist where it stopped. Do not start over.")
+            _save_user_turn(store, bot_id, chat_id, RESUME_LINE)
             await _reply_json(store, bot_id, chat_id)
     except Exception as exc:
         _log.warning("Auto resume failed: %s", exc)
@@ -6798,9 +6826,13 @@ async def _emit_run(store: Store, bot_id: str, chat_id: str, producer, *, resume
                 listeners.remove(queue)
 
 
-async def _stream_resume(store: Store, bot_id: str, chat_id: str, content: str):
+async def _stream_resume(store: Store, bot_id: str, chat_id: str, content: str, echoed: dict | None = None):
     async def produce():
-        if content:
+        # The pause row was already rewritten. Send that row before the answer
+        # so the screen does not keep a second copy under the reply.
+        if echoed:
+            yield _sse({"type": "user", "message": echoed})
+        elif content:
             message = _save_user_turn(store, bot_id, chat_id, content)
             yield _sse({"type": "user", "message": message})
         async for chunk in _stream_reply(store, bot_id, chat_id):

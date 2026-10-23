@@ -868,22 +868,43 @@ function begin(botId: string, chatId: string, seed?: { label?: string; run?: Run
   return flight;
 }
 
+function withoutStaleKind(prior: ChatMessage, message: ChatMessage): ChatMessage {
+  const merged: ChatMessage = { ...prior, ...message };
+  if (!message.kind) delete merged.kind;
+  return merged;
+}
+
+function dropContinueEcho(messages: ChatMessage[], kept: number, message: ChatMessage): ChatMessage[] {
+  const clientId = message.client_id || "";
+  const typed = message.role === "user" ? message.content || "" : "";
+  return messages.filter((item, index) => {
+    if (index === kept) return true;
+    if (clientId && item.client_id === clientId) return false;
+    if (typed && !item.id && item.role === "user" && item.content === typed) return false;
+    return true;
+  });
+}
+
 function placeMessage(flight: Flight, message: ChatMessage, options: { append?: boolean } = {}) {
   queryClient.setQueryData<Chat>(["chat", flight.botId, flight.chatId], (chat) => {
     if (!chat) return chat;
-    const messages = [...(chat.messages || [])];
+    let messages = [...(chat.messages || [])];
     const known = message.id ? messages.findIndex((item) => item.id === message.id) : -1;
     const byClient = message.client_id
       ? messages.findIndex((item) => item.client_id === message.client_id)
       : -1;
     if (known >= 0) {
-      messages[known] = { ...messages[known], ...message };
+      messages[known] = withoutStaleKind(messages[known], message);
+      messages = dropContinueEcho(messages, known, message);
     } else if (byClient >= 0) {
-      messages[byClient] = { ...messages[byClient], ...message };
+      messages[byClient] = withoutStaleKind(messages[byClient], message);
+      messages = dropContinueEcho(messages, byClient, message);
     } else if (!options.append) {
       const pending = messages.findIndex((item) => !item.id && item.role === "user" && item.content === message.content);
-      if (pending >= 0) messages[pending] = { ...messages[pending], ...message };
-      else messages.push(message);
+      if (pending >= 0) {
+        messages[pending] = withoutStaleKind(messages[pending], message);
+        messages = dropContinueEcho(messages, pending, message);
+      } else messages.push(message);
     } else {
       messages.push(message);
     }
@@ -896,6 +917,40 @@ function placeMessage(flight: Flight, message: ChatMessage, options: { append?: 
 }
 
 export const RETRY_REASON = "Not sent. Retry to send it again.";
+
+const PAUSED_SAY_CONTINUE = "Paused, say continue to resume";
+
+function continueWord(text: string): boolean {
+  return text.trim().toLowerCase().replace(/[.!]+$/u, "") === "continue";
+}
+
+function paintContinue(botId: string, chatId: string, text: string, clientId?: string): string | null {
+  const cached = queryClient.getQueryData<Chat>(["chat", botId, chatId]);
+  if (!continueWord(text) || cached?.run?.status === "running") return null;
+  const messages = cached?.messages || [];
+  const at = messages.findIndex((item) => item.kind === "status" && item.content === PAUSED_SAY_CONTINUE);
+  if (at < 0) return null;
+  const client_id = clientId || (typeof crypto !== "undefined" && crypto.randomUUID ? crypto.randomUUID() : `c-${Date.now()}`);
+  queryClient.setQueryData<Chat>(["chat", botId, chatId], (chat) => {
+    if (!chat) return chat;
+    const next = [...(chat.messages || [])];
+    const prior = next[at];
+    if (!prior) return chat;
+    next[at] = {
+      id: prior.id,
+      role: "user",
+      content: text,
+      client_id,
+      created_at: prior.created_at,
+    };
+    return {
+      ...chat,
+      messages: next,
+      message_count: Math.max(chat.message_count ?? next.length, next.length),
+    };
+  });
+  return client_id;
+}
 
 export function optimisticUser(botId: string, chatId: string, text: string, chip?: ChatMessage["chip"], clientId?: string) {
   const client_id = clientId || (typeof crypto !== "undefined" && crypto.randomUUID ? crypto.randomUUID() : `c-${Date.now()}`);
@@ -978,7 +1033,7 @@ export async function sendMessage(botId: string, chatId: string, text: string, f
     return;
   }
   const flight = begin(botId, chatId);
-  const id = optimisticUser(botId, chatId, text, undefined, clientId);
+  const id = paintContinue(botId, chatId, text, clientId) || optimisticUser(botId, chatId, text, undefined, clientId);
   try {
     let attachmentId: string | null = null;
     if (file) {

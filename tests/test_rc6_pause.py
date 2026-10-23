@@ -148,6 +148,7 @@ def test_eight_tool_job_and_a_mid_chain_message_match_the_screen(tmp_path, monke
     app, client, bot, chat = _world(tmp_path)
     store = app.state.store
     calls = {"model": 0, "tools": 0}
+    seen: list[list] = []
 
     async def execute(_store, request, bot_id=None):
         del bot_id
@@ -166,8 +167,9 @@ def test_eight_tool_job_and_a_mid_chain_message_match_the_screen(tmp_path, monke
             _hm_handle_running_session_message(_store, bot["id"], chat["id"], "and the kiln")
         return f"listed {request.path}"
 
-    async def stream_complete(**_kwargs):
+    async def stream_complete(**kwargs):
         calls["model"] += 1
+        seen.append(list(kwargs.get("messages") or []))
         number = calls["model"]
         if number <= 8:
             if number == 1:
@@ -184,7 +186,8 @@ def test_eight_tool_job_and_a_mid_chain_message_match_the_screen(tmp_path, monke
             return
         yield "The kiln is warm."
 
-    async def complete(**_kwargs):
+    async def complete(**kwargs):
+        seen.append(list(kwargs.get("messages") or []))
         return "The kiln is warm."
 
     monkeypatch.setattr("easyagent.tools.execute", execute)
@@ -224,13 +227,96 @@ def test_eight_tool_job_and_a_mid_chain_message_match_the_screen(tmp_path, monke
     ]
     assert blanks == []
 
-    resumed = client.post(url, json={"content": "continue"})
+    with client.stream(
+        "POST",
+        url,
+        json={"content": "continue", "client_id": "c-continue"},
+        headers={"Accept": "text/event-stream"},
+    ) as resumed:
+        assert resumed.status_code == 200, resumed.read()
+        resumed_body = resumed.read().decode()
+    resumed_events = _events(resumed_body)
+    user_events = [item for item in resumed_events if item.get("type") == "user"]
+    assert user_events, resumed_body[-800:]
+    assert user_events[0]["message"]["content"] == "continue"
+    assert resumed_events.index(user_events[0]) < resumed_events.index(next(item for item in resumed_events if item.get("type") == "done"))
+    done_resume = [item for item in resumed_events if item.get("type") == "done"]
+    assert done_resume, resumed_body[-800:]
+    reloaded = client.get(f"/api/bots/{bot['id']}/chats/{chat['id']}").json()
+    resumed_rows = _visible(done_resume[-1]["chat"]["messages"])
+    stored_rows = _visible(reloaded["messages"])
+    assert stored_rows == resumed_rows
+    assert stored_rows == [
+        "check the east pier",
+        "and the kiln",
+        "The kiln is warm.",
+        "continue",
+        "The kiln is warm.",
+    ]
+    typed = [item for item in reloaded["messages"] if item.get("role") == "user"][-1]
+    assert typed["content"] == "continue"
+    assert typed.get("client_id") == "c-continue"
+    assert "Resume the checklist" not in json.dumps([item.get("content") for item in reloaded["messages"]])
+    last_user = ""
+    for item in reversed(seen[-1]):
+        if item.get("role") == "user":
+            last_user = item.get("content") or ""
+            break
+    assert last_user == "Resume the checklist where it stopped. Do not start over."
+    client.close()
+
+
+def test_continue_json_saves_the_typed_word_and_reload_matches(tmp_path, monkeypatch):
+    """The saved user row is the typed word. Reload shows that same order."""
+    app, client, bot, chat = _world(tmp_path)
+    client.patch(f"/api/bots/{bot['id']}", json={"check_enabled": False})
+    store = app.state.store
+    doc = store.get_chat(bot["id"], chat["id"])
+    doc["run"] = {
+        "id": "run-paused",
+        "status": "paused",
+        "started_at": now_iso(),
+        "last_activity_at": now_iso(),
+        "current_step": "",
+        "reason": "",
+    }
+    doc["messages"] = [
+        {"id": "u1", "role": "user", "content": "check the east pier", "created_at": now_iso()},
+        {"id": "u2", "role": "user", "content": "and the kiln", "created_at": now_iso()},
+        {"id": "a2", "role": "assistant", "content": "The kiln is warm.", "created_at": now_iso()},
+        {"id": "paused", "role": "assistant", "kind": "status", "content": PAUSED_SAY_CONTINUE, "created_at": now_iso()},
+    ]
+    store.save_chat(doc)
+    seen: list[list] = []
+
+    async def complete(**kwargs):
+        seen.append(list(kwargs.get("messages") or []))
+        return "Picking up the pier."
+
+    monkeypatch.setattr("easyagent.llm.complete", complete)
+    url = f"/api/bots/{bot['id']}/chats/{chat['id']}/messages"
+    resumed = client.post(url, json={"content": "Continue", "client_id": "c-continue"})
     assert resumed.status_code == 200, resumed.text
     payload = resumed.json()
-    after = (payload.get("chat") or payload)["messages"]
-    texts = _visible(after)
-    assert PAUSED_SAY_CONTINUE not in texts
-    assert "Interrupted, resuming" not in texts
-    assert any("Do not start over" in text for text in texts)
-    assert any(text == "The kiln is warm." for text in texts)
+    answered = (payload.get("chat") or payload)["messages"]
+    reloaded = client.get(f"/api/bots/{bot['id']}/chats/{chat['id']}").json()
+    expect = [
+        "check the east pier",
+        "and the kiln",
+        "The kiln is warm.",
+        "Continue",
+        "Picking up the pier.",
+    ]
+    assert _visible(answered) == expect
+    assert _visible(reloaded["messages"]) == expect
+    typed = [item for item in reloaded["messages"] if item.get("role") == "user"][-1]
+    assert typed["content"] == "Continue"
+    assert typed["id"] == "paused"
+    assert "Resume the checklist" not in json.dumps([item.get("content") for item in reloaded["messages"]])
+    last_user = ""
+    for item in reversed(seen[-1]):
+        if item.get("role") == "user":
+            last_user = item.get("content") or ""
+            break
+    assert last_user == "Resume the checklist where it stopped. Do not start over."
     client.close()

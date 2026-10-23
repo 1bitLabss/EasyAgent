@@ -1,7 +1,7 @@
 import { useSyncExternalStore } from "react";
 import { api, queryClient, streamPost } from "@/api";
 import { noteActivity, settleActivity, type ActivityStep } from "@/lib/activity";
-import { activityLine } from "@/lib/run";
+import { activityLine, isToolStatus } from "@/lib/run";
 import { mergeChat, sameRun } from "@/lib/window";
 import { moodForBadge, pokeFace } from "@/lib/mood";
 import { useApp } from "@/store";
@@ -654,14 +654,18 @@ function apply(event: Record<string, unknown>, flight: Flight) {
     const chunk = String(event.text || "");
     const chars = (live.chars || 0) + chunk.length;
     const waitAt = live.waitAt || Date.now();
+    const serverStep = live.run?.current_step || "";
+    const keepTool = isToolStatus(live.label) || isToolStatus(serverStep);
     const label = flight.frozen && (live.label || "").startsWith("Paused")
       ? live.label
-      : activityLine({
-        step: "Writing",
-        activityStartedAt: new Date(waitAt).toISOString(),
-        now: Date.now(),
-        tokens: Math.floor(chars / 4),
-      });
+      : keepTool
+        ? (isToolStatus(serverStep) ? serverStep : live.label)
+        : activityLine({
+          step: "Writing",
+          activityStartedAt: new Date(waitAt).toISOString(),
+          now: Date.now(),
+          tokens: Math.floor(chars / 4),
+        });
     const reset = Boolean(event.reset);
     const nextText = flight.frozen ? flight.frozen.text : mergeAnswer(live.text, chunk, reset);
     remember(flight, carry(live, {
@@ -673,7 +677,7 @@ function apply(event: Record<string, unknown>, flight: Flight) {
       thoughtSeconds: freezeThought(live),
       chars,
       waitAt,
-      steps: settleActivity(live.steps),
+      steps: keepTool ? live.steps : settleActivity(live.steps),
     }));
     return;
   }

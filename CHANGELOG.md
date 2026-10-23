@@ -1,6 +1,8 @@
 # Changelog
 
 ## 0.3.46
+- A tool fence never appears in the reply. A complete fence, a fence split across stream chunks, and a fence cut off by a pause stay out of the live bubble and the saved text. That includes search_files and every other tool name.
+- The live status stays up while a tool is running, including a slow python call, until the turn ends. Tokens from the model do not replace that line.
 - A tool-using reply keeps the model's code. Indentation inside a fence, blank lines, and a short "Done." stay. Only an exact tool-log line is removed. A review, a revision, and the last no-tools answer do not flatten that text.
 - A restart in the middle of a turn does not leave an empty assistant bubble. The row says "Interrupted, resuming", and a reply that already had words is kept. "Picked up where it stopped." still follows when resume is on.
 - After the person asks another bot, that reply is context for one last call with no tools. The answer is written in this bot's own words and saved on the turn. Resume, including a resume after a restart, leaves YOLO on for the whole bot. It stays until the owner turns it off or it expires.

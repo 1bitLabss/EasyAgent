@@ -81,6 +81,8 @@ describe("run tone", () => {
     expect(activityLine({ step: "Writing index.html", activityStartedAt: "2026-10-08T12:00:00Z", now: start })).toBe("Writing index.html, 0s");
     expect(shownStep("Waiting on model", "Writing index.html")).toBe("Writing index.html");
     expect(shownStep("Writing, 4s", "Waiting on model, 4s")).toBe("Writing, 4s");
+    expect(shownStep("Writing, 4s", "Running python3 -c sleep")).toBe("Running python3 -c sleep");
+    expect(shownStep("Writing, 4s", "Searching files")).toBe("Searching files");
     expect(shownStep("Paused, reading your message", "Writing index.html")).toBe("Paused, reading your message");
     expect(shownStep("Running sleep 8", "Paused, reading your message — finishing current step")).toBe(
       "Paused, reading your message — finishing current step",

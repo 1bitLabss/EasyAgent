@@ -6199,6 +6199,24 @@ async def _stream_reply(
             model_chars += len(extra or "")
             return waiting_activity(time.monotonic() - model_mark, model_chars)
 
+        def token_step(extra: str) -> str | None:
+            """Tokens must not replace the line for a tool that is still running."""
+            from easyagent.plan import tool_status_line
+
+            current = ""
+            try:
+                current = str((store.get_chat(bot_id, chat_id).get("run") or {}).get("current_step") or "")
+            except Exception:
+                current = ""
+            if tool_status_line(current):
+                return None
+            return model_line(extra)
+
+        def shown_reply(text: str) -> str:
+            from easyagent.tools import _drop_tool_fences
+
+            return _drop_tool_fences(text or "")
+
         async for kind, text in stream_with_tools(
             base_url=endpoint["base_url"],
             api_key=endpoint.get("api_key") or None,
@@ -6210,7 +6228,7 @@ async def _stream_reply(
         ):
             if kind == "stage":
                 freeze_thought()
-                body = text or ""
+                body = shown_reply(text or "")
                 replace = False
                 if sent and (body.startswith(sent) or sent.startswith(body) or sent.strip() == body.strip()):
                     extra = body[len(sent):] if body.startswith(sent) else ""
@@ -6224,8 +6242,8 @@ async def _stream_reply(
                     store,
                     bot_id,
                     chat_id,
-                    reply=sent,
-                    step=model_line(extra),
+                    reply=shown_reply(sent),
+                    step=token_step(extra),
                     force=True,
                 )
                 saved_chars = len(sent)
@@ -6247,7 +6265,7 @@ async def _stream_reply(
                         bot_id,
                         chat_id,
                         thinking=thought,
-                        step=model_line(text),
+                        step=token_step(text),
                         force=not thought_saved,
                     )
                     thought_saved = True
@@ -6306,19 +6324,36 @@ async def _stream_reply(
             elif kind == "delta":
                 extra = text or ""
                 sent += extra
-                cleaned = drop_answer_leak(thought, sent)
+                visible_sent = shown_reply(sent)
+                cleaned = drop_answer_leak(thought, visible_sent)
                 if cleaned != thought:
                     thought = cleaned
                     _replace_live_thinking(store, bot_id, chat_id, thought)
                     yield _sse({"type": "replay", "text": thought})
+                if extra and visible_sent != sent:
+                    # This chunk is a tool fence. It is not part of the reply,
+                    # and it must not replace the tool's status line.
+                    if visible_sent.strip():
+                        saved_run = _write_live(
+                            store,
+                            bot_id,
+                            chat_id,
+                            reply=visible_sent,
+                            step=token_step(""),
+                            force=True,
+                        )
+                        if saved_run:
+                            yield _sse({"type": "run", "run": saved_run})
+                    sent = visible_sent
+                    continue
                 if extra:
                     force = saved_chars == 0 or len(sent) - saved_chars >= 24
                     saved_run = _write_live(
                         store,
                         bot_id,
                         chat_id,
-                        reply=sent,
-                        step=model_line(extra),
+                        reply=visible_sent,
+                        step=token_step(extra),
                         force=force,
                     )
                     if saved_run is not None:
@@ -6327,6 +6362,7 @@ async def _stream_reply(
                     if saved_run:
                         yield _sse({"type": "run", "run": saved_run})
             elif kind == "pause":
+                sent = shown_reply(sent)
                 if sent.strip():
                     _write_live(store, bot_id, chat_id, reply=sent, step=PAUSE_TEXT, force=True)
                 async for extra in _answer_after_pause(store, bot_id, chat_id, emit_done=emit_done):
@@ -6388,6 +6424,7 @@ async def _stream_reply(
         return
     except llm.ProviderError as exc:
         if turn_mod.pause_requested():
+            sent = shown_reply(sent)
             if sent.strip():
                 _write_live(store, bot_id, chat_id, reply=sent, step=PAUSE_TEXT, force=True)
             async for extra in _answer_after_pause(store, bot_id, chat_id, emit_done=emit_done):
@@ -6411,6 +6448,7 @@ async def _stream_reply(
         yield _sse({"type": "error", "detail": failed["reply"], "chat": failed["chat"]})
     except turn_mod.TurnCancelled:
         if turn_mod.pause_requested():
+            sent = shown_reply(sent)
             if sent.strip():
                 _write_live(store, bot_id, chat_id, reply=sent, step=PAUSE_TEXT, force=True)
             async for extra in _answer_after_pause(store, bot_id, chat_id, emit_done=emit_done):

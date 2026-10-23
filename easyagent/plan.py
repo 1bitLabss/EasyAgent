@@ -200,6 +200,27 @@ def waiting_activity(elapsed: float, chars: int) -> str:
     return f"Writing, {clock}"
 
 
+def tool_status_line(step: str) -> bool:
+    """True when the line is a tool still running.
+
+    "Writing, 4s" is the model. "Writing harbor.py" is a tool. "Running …"
+    and "Searching files" are tools. A pause is not one.
+    """
+    text = " ".join((step or "").split())
+    if not text or text.startswith("Paused"):
+        return False
+    base = re.sub(r", \d+m \d+s(?:, .* tokens so far)?$", "", text)
+    base = re.sub(r", \d+s(?:, .* tokens so far)?$", "", base)
+    folded = base.casefold()
+    if folded in {"thinking", "waiting", "writing", "revising", "asking"}:
+        return False
+    if folded.startswith("waiting on model") or folded.startswith("model not answering"):
+        return False
+    if folded.startswith("still waiting"):
+        return False
+    return True
+
+
 def elapsed_seconds(run: dict, now: datetime | None = None) -> int:
     started = _parse_time(run.get("started_at") if isinstance(run, dict) else None)
     if started is None:

@@ -430,6 +430,176 @@ _QWEN_FUNCTION = re.compile(r"<function=([^>\s]+)>(.*?)</function>", re.IGNORECA
 _QWEN_PARAM = re.compile(r"<parameter=([^>\s]+)>(.*?)</parameter>", re.IGNORECASE | re.DOTALL)
 
 
+_TOOL_FENCE_NAMES: tuple[str, ...] | None = None
+_TOOL_FENCE_RE: re.Pattern[str] | None = None
+# A finished ```skill document and a ```helper block are lifted out of the
+# saved reply by their own parsers. Stripping them here would drop the skill
+# and skip the helper. The live bubble and a pause still hide both.
+_KEPT_COMPLETE_FENCES = frozenset({"skill", "helper"})
+_SKIP_FENCE_RE: dict[frozenset[str], re.Pattern[str]] = {}
+
+
+def tool_fence_names() -> tuple[str, ...]:
+    """Fence labels that run a tool. ```python and ```yaml are not in this list.
+
+    The same tuple the skill parser uses. The stream hold and the saved reply
+    both read it, so a name cannot be recognized in one path and shown in another.
+    """
+    global _TOOL_FENCE_NAMES
+    if _TOOL_FENCE_NAMES is None:
+        from easyagent.botskills import _ACTION_FENCES
+
+        _TOOL_FENCE_NAMES = tuple(_ACTION_FENCES)
+    return _TOOL_FENCE_NAMES
+
+
+def _compiled_tool_fence(skip: frozenset[str] = frozenset()) -> re.Pattern[str]:
+    global _TOOL_FENCE_RE
+    if not skip:
+        if _TOOL_FENCE_RE is None:
+            _TOOL_FENCE_RE = _compile_tool_fence(())
+        return _TOOL_FENCE_RE
+    cached = _SKIP_FENCE_RE.get(skip)
+    if cached is None:
+        cached = _compile_tool_fence(tuple(sorted(skip)))
+        _SKIP_FENCE_RE[skip] = cached
+    return cached
+
+
+def _compile_tool_fence(skip: tuple[str, ...]) -> re.Pattern[str]:
+    skipped = set(skip)
+    names = sorted((name for name in tool_fence_names() if name not in skipped), key=len, reverse=True)
+    alt = "|".join(re.escape(name) for name in names)
+    return re.compile(
+        rf"```(?:{alt})(?![A-Za-z0-9_])[ \t]*\r?\n.*?```",
+        re.IGNORECASE | re.DOTALL,
+    )
+
+
+def _reply_opens_with_tool_fence(text: str) -> bool:
+    """The first thing in the reply is a tool fence. A ```python fence is not."""
+    rest = (text or "").lstrip(" \t\r\n")
+    if not rest.startswith("```"):
+        return False
+    line, sep, _rest = rest[3:].partition("\n")
+    token = line.strip().split()[0] if line.strip() else ""
+    return _fence_label_is_tool(token, line_closed=bool(sep))
+
+
+def _fence_label_is_tool(label: str, *, line_closed: bool) -> bool:
+    """True when this opening fence is a tool, or still might be one.
+
+    A line that has not ended can be a prefix (```search_fil). A finished
+    label has to be the whole name. ```python is never a tool.
+    """
+    name = (label or "").strip().lower()
+    names = tool_fence_names()
+    if not name:
+        return not line_closed
+    if name in names:
+        return True
+    if not line_closed and any(item.startswith(name) for item in names):
+        return True
+    return False
+
+
+def _open_tool_fence_at(text: str) -> int | None:
+    """Index of an unclosed tool fence, or None when the tail is prose or code."""
+    source = text or ""
+    if "```" not in source:
+        return None
+    open_at: int | None = None
+    idx = 0
+    while True:
+        found = source.find("```", idx)
+        if found < 0:
+            break
+        open_at = None if open_at is not None else found
+        idx = found + 3
+    if open_at is None:
+        return None
+    line, sep, _rest = source[open_at + 3 :].partition("\n")
+    token = line.strip().split()[0] if line.strip() else ""
+    if _fence_label_is_tool(token, line_closed=bool(sep)):
+        return open_at
+    return None
+
+
+def _drop_open_tool_tags(text: str) -> str:
+    cleaned = text or ""
+    for open_tag, close_tag in (
+        ("<tool_call", "</tool_call>"),
+        ("<function_calls", "</function_calls>"),
+        ("<invoke", "</invoke>"),
+    ):
+        while True:
+            lowered = cleaned.lower()
+            start = lowered.rfind(open_tag)
+            if start < 0 or close_tag in lowered[start:]:
+                break
+            cleaned = cleaned[:start]
+    return cleaned
+
+
+def _drop_tool_fences(text: str, *, keep_complete: frozenset[str] = frozenset()) -> str:
+    """Remove tool fences. A finished code fence, and an unfinished ```python, stay.
+
+    An unclosed tool fence is removed from its opening marker through the end,
+    so a pause cannot save ```search_files and the words inside it. A fence
+    that opened the reply does not leave its trailing newline in front of the
+    words that follow. keep_complete leaves a finished ```skill or ```helper
+    fence for the parser that saves it, then removes it from the stored reply.
+    """
+    source = text or ""
+    cleaned = _compiled_tool_fence(keep_complete).sub("", source)
+    cleaned = _drop_open_tool_tags(cleaned)
+    open_at = _open_tool_fence_at(cleaned)
+    if open_at is not None:
+        cleaned = cleaned[:open_at]
+    if _reply_opens_with_tool_fence(source):
+        cleaned = cleaned.lstrip("\r\n")
+    return cleaned
+
+
+def _visible_stream_text(text: str) -> str:
+    """Prose that can be shown while tokens are still arriving.
+
+    A trailing ` or `` is held back. It may be the start of a tool fence.
+    A finished ``` code fence is not held.
+    """
+    cleaned = _drop_tool_fences(text or "")
+    ticks = len(cleaned) - len(cleaned.rstrip("`"))
+    extra = ticks % 3
+    if extra:
+        cleaned = cleaned[:-extra]
+    return cleaned
+
+
+def _next_visible_delta(held: str, sent: str) -> tuple[str, str]:
+    """The next safe bubble text, and the visible text already sent.
+
+    A complete tool fence, a fence still being typed, and a fence cut off
+    in this buffer contribute nothing. Prose in front of an open fence can.
+    """
+    visible = _visible_stream_text(held)
+    holding = _hold_streamed_answer(held)
+    open_fence = _open_tool_fence_at(held) is not None
+    if holding and not open_fence:
+        return "", sent
+    if holding and not visible.strip():
+        return "", sent
+    if visible.startswith(sent):
+        extra = visible[len(sent) :]
+    elif sent.startswith(visible):
+        return "", sent
+    else:
+        extra = visible
+        sent = ""
+    if not extra:
+        return "", sent
+    return extra, sent + extra
+
+
 def strip_tool_markup(text: str, *, keep_shape: bool = False) -> str:
     """Remove tool fences and printed function calls. Leave ordinary prose.
 
@@ -459,6 +629,7 @@ def strip_tool_markup(text: str, *, keep_shape: bool = False) -> str:
         cleaned = pattern.sub("", cleaned)
     cleaned = _strip_memory_tools(cleaned)
     cleaned = re.sub(r"```plan[ \t]*\r?\n.*?```", "", cleaned, flags=re.DOTALL | re.IGNORECASE)
+    cleaned = _drop_tool_fences(cleaned, keep_complete=_KEPT_COMPLETE_FENCES)
     if keep_shape:
         return cleaned
     return re.sub(r"\n{3,}", "\n\n", cleaned).strip()
@@ -1083,7 +1254,11 @@ def _tagged_tool(text: str) -> ToolRequest | None:
 
 
 def _cut_off_tool(text: str) -> bool:
-    """An opened tool tag with no close is not a finished reply."""
+    """An opened tool tag or tool fence with no close is not a finished reply.
+
+    Every tool fence name is included, and so is a prefix still being typed
+    (```search_fil). ```python is a code fence and is not cut off.
+    """
     raw = text or ""
     lowered = raw.lower()
     for open_tag, close_tag in (
@@ -1093,10 +1268,7 @@ def _cut_off_tool(text: str) -> bool:
     ):
         if lowered.count(open_tag) > lowered.count(close_tag):
             return True
-    if re.search(r"```(?:files|shell|search|ssh|windows|project|memory|history|finish|react|routine|browser|fetch|research|mcp|bridge|plan|delegate|skill|tool_error)\b", raw, re.IGNORECASE):
-        if raw.count("```") % 2 == 1:
-            return True
-    return False
+    return _open_tool_fence_at(raw) is not None
 
 
 def parse_tool(text: str) -> ToolRequest | None:
@@ -7175,15 +7347,48 @@ async def _pull_model(
                 await permit.release()
 
 
-def _partial_stream(text_bits: list[str]):
-    """Thinking and reply already in hand when the stream stops."""
+def _clear_live_tool_fence(store, bot_id: str, chat_id: str) -> None:
+    """A pause must not leave a tool fence as the saved reply."""
+    try:
+        chat = store.get_chat(bot_id, chat_id)
+    except Exception:
+        return
+    messages = chat.get("messages") or []
+    for message in reversed(messages):
+        if not isinstance(message, dict) or message.get("role") != "assistant" or not message.get("live"):
+            continue
+        stored = str(message.get("content") or "")
+        cleaned = _drop_tool_fences(stored).strip()
+        if cleaned == stored.strip():
+            return
+        message["content"] = cleaned
+        try:
+            store.save_chat(chat)
+        except Exception:
+            return
+        return
+
+
+def _partial_answer(text_bits: list[str]) -> tuple[str, str]:
+    """Thinking and the reply to keep when the stream stops.
+
+    A tool fence, including one that never closed, is not part of the reply.
+    """
     partial = "".join(text_bits)
     if not partial.strip():
-        return
+        return "", ""
     hidden, answer = llm.peel_thinking(partial)
+    body = _drop_tool_fences(answer or "").strip()
+    if body.startswith("Stopped:"):
+        body = ""
+    return hidden, body
+
+
+def _partial_stream(text_bits: list[str]):
+    """Thinking and reply already in hand when the stream stops."""
+    hidden, body = _partial_answer(text_bits)
     if hidden.strip():
         yield "thinking", hidden
-    body = (answer or "").strip()
     if body:
         yield "stage", body
 
@@ -7193,9 +7398,9 @@ def _keep_partial_reply(store, bot_id: str | None, chat_id: str | None, text_bit
     partial = "".join(text_bits)
     if not partial.strip() or store is None or not bot_id or not chat_id:
         return
-    _hidden, answer = llm.peel_thinking(partial)
-    body = (answer or "").strip()
-    if not body or body.startswith("Stopped:"):
+    _hidden, body = _partial_answer(text_bits)
+    if not body:
+        _clear_live_tool_fence(store, bot_id, chat_id)
         return
     from easyagent.store import new_id, now_iso
 
@@ -7229,7 +7434,8 @@ def _keep_partial_reply(store, bot_id: str | None, chat_id: str | None, text_bit
         }
         messages.append(target)
     current = " ".join(str(target.get("content") or "").split())
-    if len(body) >= len(current):
+    stored = str(target.get("content") or "")
+    if len(body) >= len(current) or _drop_tool_fences(stored).strip() != stored.strip():
         target["content"] = body
     # The process may die before the turn is marked interrupted. The row has to
     # say so itself, or a restart stores this same reply again.
@@ -8055,12 +8261,10 @@ async def run_turn(
             if not bit:
                 return
             held_answer += bit
-            if _hold_streamed_answer(held_answer):
+            extra, sent_answer = _next_visible_delta(held_answer, sent_answer)
+            if not extra:
                 return
-            sent_answer += held_answer
-            held = held_answer
-            held_answer = ""
-            return held
+            return extra
 
         model_slot = turn_mod.current_slot()
         if model_slot is not None:

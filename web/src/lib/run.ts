@@ -87,12 +87,23 @@ function genericWait(step: string): boolean {
   return !step || step === "Thinking" || step === "Waiting" || step.startsWith("Waiting on model");
 }
 
+/** A tool that is still running. "Writing, 4s" is the model. "Writing harbor.py" is a tool. */
+export function isToolStatus(step?: string): boolean {
+  const text = activityBase((step || "").trim());
+  if (!text || text.startsWith("Paused")) return false;
+  const folded = text.toLowerCase();
+  if (folded === "thinking" || folded === "waiting" || folded === "writing" || folded === "revising" || folded === "asking") return false;
+  if (folded.startsWith("waiting on model") || folded.startsWith("model not answering") || folded.startsWith("still waiting")) return false;
+  return true;
+}
+
 /** A placeholder wait must not cover a step the server already named. */
 export function shownStep(label?: string, serverStep?: string): string {
   const live = (label || "").trim();
   const server = (serverStep || "").trim();
   if (live.startsWith("Paused")) return live;
   if (server.startsWith("Paused")) return server;
+  if (isToolStatus(server) && !isToolStatus(live)) return server;
   if (genericWait(live) && !genericWait(server)) return server;
   return live || server;
 }

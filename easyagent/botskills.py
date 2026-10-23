@@ -142,8 +142,27 @@ def list_skills(store, bot_id: str) -> list[dict]:
     return found
 
 
-def catalog(store, bot_id: str) -> str:
-    """Names only. Bodies stay on disk until a read."""
+def _shared_file(store, name: str) -> Path | None:
+    """A skill saved for every bot, in the data folder. The same slug rules as a bot skill."""
+    raw = name or ""
+    if _refuses_skill_name(raw):
+        return None
+    slug = slugify(raw)
+    if not slug:
+        return None
+    folder = Path(store.skills_dir)
+    try:
+        folder.mkdir(parents=True, exist_ok=True)
+        path = (folder / f"{slug}.md").resolve()
+        if not _same_place(path.parent, folder.resolve()):
+            return None
+    except OSError:
+        return None
+    return path
+
+
+def visible_skills(store, bot_id: str) -> list[dict]:
+    """Bot skills plus skills saved from a reply. The prompt and the skill tool share this list."""
     rows = list_skills(store, bot_id)
     seen = {row["name"] for row in rows}
     try:
@@ -156,6 +175,12 @@ def catalog(store, bot_id: str) -> str:
             continue
         rows.append({"name": name, "description": skill.get("description") or ""})
         seen.add(name)
+    return rows
+
+
+def catalog(store, bot_id: str) -> str:
+    """Names only. Bodies stay on disk until a read."""
+    rows = visible_skills(store, bot_id)
     if not rows:
         return "(none yet)"
     lines = ["Skills:"]
@@ -179,7 +204,10 @@ def _flat_description(text: str) -> str:
 def read_skill(store, bot_id: str, name: str) -> str:
     path = _file(store, bot_id, name)
     if not path.is_file() or path.is_symlink():
-        raise SkillError("That skill is not saved.")
+        shared = _shared_file(store, name)
+        if shared is None or not shared.is_file() or shared.is_symlink():
+            raise SkillError("That skill is not saved.")
+        path = shared
     text = path.read_text(encoding="utf-8")
     from easyagent.journal import scrub_text
 

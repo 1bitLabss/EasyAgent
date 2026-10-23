@@ -169,6 +169,7 @@ def apply_one(store, payload: dict) -> None:
             routine_id=str(payload.get("routine_id") or ""),
             routine_name=str(payload.get("routine_name") or ""),
             delivery_id=delivery_id,
+            missed=bool(payload.get("missed")),
         )
 
 

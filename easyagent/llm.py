@@ -599,6 +599,29 @@ NATIVE_TOOLS = [
         ["server", "tool"],
     ),
     _tool(
+        "routine",
+        "Create, edit, delete, or list a routine: a cron job, a reminder, a recurring task, or a check every morning. "
+        "action is create, edit, delete, or list. "
+        "Fields are name, prompt, cron, daily, weekdays, weekly, once, every_minutes, timezone, and quiet. "
+        "A routine runs only while EasyAgent is open. It is not saved until the person confirms the card. "
+        "Do not use Task Scheduler, schtasks, crontab, or launchd.",
+        {
+            "action": _STRING,
+            "id": _STRING,
+            "name": _STRING,
+            "prompt": _STRING,
+            "cron": _STRING,
+            "daily": _STRING,
+            "weekdays": _STRING,
+            "weekly": _STRING,
+            "once": _STRING,
+            "every_minutes": {"type": "integer"},
+            "timezone": _STRING,
+            "quiet": {"type": "boolean"},
+        },
+        ["action"],
+    ),
+    _tool(
         "skill",
         "List, read, or write one skill for this bot. action is list, read, or write. The body is data.",
         {"action": _STRING, "name": _STRING, "description": _STRING, "body": _STRING},
@@ -828,6 +851,33 @@ def _fence_for_call(call: dict) -> str:
         tools = json.dumps([str(item) for item in listed])
         if task:
             return f"```delegate\n{task}\ntools: {tools}\n```"
+    if name in {"routine", "create_routine", "edit_routine", "delete_routine"}:
+        routine_action = str(args.get("action") or "").strip().lower()
+        if name == "create_routine":
+            routine_action = "create"
+        elif name == "edit_routine":
+            routine_action = "edit"
+        elif name == "delete_routine":
+            routine_action = "delete"
+        if routine_action not in {"create", "edit", "delete", "list", "pause", "resume"}:
+            routine_action = "list" if name == "routine" else "create"
+        rows = [f"action: {routine_action}"]
+        for key in ("id", "name", "cron", "daily", "weekdays", "weekly", "once", "timezone"):
+            value = _string_arg(args, key)
+            if value:
+                rows.append(f"{key}: {value}")
+        every = args.get("every_minutes")
+        if every not in (None, ""):
+            rows.append(f"every_minutes: {every}")
+        if "quiet" in args and args.get("quiet") not in (None, ""):
+            rows.append("quiet: " + ("true" if args.get("quiet") else "false"))
+        prompt = _string_arg(args, "prompt")
+        if not prompt and routine_action in {"create", "edit"}:
+            prompt = body.strip()
+        head = "\n".join(rows)
+        if prompt:
+            return f"```routine\n{head}\n---\n{prompt.rstrip()}\n```"
+        return f"```routine\n{head}\n```"
     if name == "skill":
         skill_action = action or "list"
         skill_name = _string_arg(args, "name", "topic")

@@ -50,6 +50,9 @@ _ALIASES = {
     "reaction": "react",
     "tapback": "react",
     "connector": "mcp",
+    "create_routine": "routine",
+    "edit_routine": "routine",
+    "delete_routine": "routine",
 }
 
 # kind (+ action for files) of a ToolRequest, mapped to the registered name.
@@ -72,6 +75,7 @@ _KIND_TOOLS = {
     "finish": "finish",
     "delegate": "delegate_task",
     "skill": "skill",
+    "routine": "routine",
 }
 
 

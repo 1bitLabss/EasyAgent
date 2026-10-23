@@ -93,6 +93,7 @@ export type ChatMessage = {
   unverified?: boolean;
   speaker_name?: string;
   routine_name?: string;
+  missed?: boolean;
   speaker?: string;
   kind?: string;
   harness?: boolean;

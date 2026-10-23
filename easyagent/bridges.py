@@ -639,8 +639,11 @@ def _remember_webhook(store: Store, row: dict, recipient: str, text: str) -> Non
     atomic_write_json(path, rows[-_LOG_CAP:])
 
 
-def prompt_block(store: Store) -> str:
+def prompt_block(store: Store, bot_id: str | None = None) -> str:
     rows = [public_record(row) for row in list_records(store) if row.get("enabled") is not False]
+    if bot_id:
+        wanted = str(bot_id)
+        rows = [row for row in rows if str(row.get("bot_id") or "") == wanted]
     if not rows:
         return "No Telegram or Discord bridge is set up. Do not invent one."
     lines = ["A bridge reaches you. Do not message anyone else unless a card says you may."]

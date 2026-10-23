@@ -661,6 +661,7 @@ class HostIn(BaseModel):
 
     model_config = ConfigDict(extra="ignore")
     yolo: bool | None = None
+    start_at_login: bool | None = None
 
 
 class FirewallIn(BaseModel):
@@ -890,13 +891,19 @@ def create_app(data_dir: str | Path | None = None) -> FastAPI:
 
     @app.get("/api/host")
     def host_status():
-        return store.read_host()
+        host = store.read_host()
+        from easyagent.schedule import tzdata_warning
+
+        host["tzdata_warning"] = tzdata_warning()
+        return host
 
     @app.post("/api/host")
     def host_set(body: HostIn):
         patch = {}
         if body.yolo is not None:
             patch["yolo"] = body.yolo
+        if body.start_at_login is not None:
+            patch["start_at_login"] = body.start_at_login
         return store.save_host(patch)
 
     @app.get("/api/phone")
@@ -1106,6 +1113,9 @@ def create_app(data_dir: str | Path | None = None) -> FastAPI:
         card = resolve_card(card_id, body.decision, bot_id)
         if card is None or card.bot_id != bot_id:
             raise HTTPException(404, "That approval card is not waiting.")
+        if getattr(card, "install_failed", False):
+            message = getattr(card, "install_error", "") or "The connector was not installed."
+            raise HTTPException(400, message)
         proposal = card.proposal or {}
         if proposal.get("apply_on_approve") and isinstance(proposal.get("spec"), dict):
             proposal["apply_on_approve"] = False
@@ -1119,7 +1129,11 @@ def create_app(data_dir: str | Path | None = None) -> FastAPI:
             from easyagent.safety import _PENDING
 
             _PENDING.pop(card.id, None)
-        return {"ok": True, "decision": card.decision}
+        body_out = {"ok": True, "decision": card.decision}
+        warning = getattr(card, "install_error", "") or ""
+        if warning:
+            body_out["warning"] = warning
+        return body_out
 
     @app.get("/api/bots/{bot_id}/connectors")
     def get_connectors(bot_id: str):
@@ -3308,7 +3322,7 @@ def _turn_messages(store: Store, bot_id: str, chat: dict) -> tuple[dict, list[di
         earlier=view.earlier,
         workspace=_workspace_text(store, bot_id),
         connectors=_connectors_prompt(store, bot_id),
-        bridges=_bridges_prompt(store),
+        bridges=_bridges_prompt(store, bot_id),
     )
     from easyagent.plan import ensure_request_checklist, load_plan, prompt_block
 
@@ -3452,10 +3466,10 @@ def _webhook_header_token(request: Request) -> str:
     return ""
 
 
-def _bridges_prompt(store: Store) -> str:
+def _bridges_prompt(store: Store, bot_id: str = "") -> str:
     from easyagent.bridges import prompt_block
 
-    return prompt_block(store)
+    return prompt_block(store, bot_id or None)
 
 
 async def _bridge_loop(store: Store, stop: asyncio.Event) -> None:
@@ -3763,7 +3777,7 @@ async def _complete_for_room_bot(store: Store, room: dict, bot_id: str) -> tuple
         own_files=own_files_prompt(store, bot["id"]),
         workspace=_workspace_text(store, bot["id"]),
         connectors=_connectors_prompt(store, bot["id"]),
-        bridges=_bridges_prompt(store),
+        bridges=_bridges_prompt(store, bot_id),
     )
     from easyagent.features import ensure_capabilities
 
@@ -3899,7 +3913,7 @@ async def _ack_room_reaction(store: Store, room_id: str, message: dict) -> None:
         memory=_memory_prompt(store, bot["id"]),
         message_ids=message_index(room.get("messages") or [], self_id=bot["id"]),
         connectors=_connectors_prompt(store, bot["id"]),
-        bridges=_bridges_prompt(store),
+        bridges=_bridges_prompt(store, bot["id"]),
     )
     from easyagent.features import ensure_capabilities
 

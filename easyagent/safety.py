@@ -3887,11 +3887,19 @@ def resolve_card(card_id: str, decision: str, bot_id: str | None = None) -> Pend
     card.event.set()
     if (card.proposal or {}).get("kind") == "mcp-install":
         from easyagent.connectors import finish_install
+        from easyagent.store import StoreError
 
         try:
-            finish_install(card.id, decision)
-        except Exception:
-            return card
+            result = finish_install(card.id, decision)
+        except StoreError as exc:
+            card.install_error = exc.message
+            card.install_failed = True
+        except Exception as exc:
+            card.install_error = str(exc).strip() or "The connector was not installed."
+            card.install_failed = True
+        else:
+            if isinstance(result, dict) and result.get("refresh_error"):
+                card.install_error = str(result["refresh_error"])
     return card
 
 

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import sys
 
+from easyagent.direction import direction_body
 from easyagent.features import ensure_capabilities
 from easyagent.limits import DIRECTION_CAP
 
@@ -58,7 +59,7 @@ def build_system(
     connectors: str = "",
     bridges: str = "",
 ) -> str:
-    direction_text = (direction or "").strip()
+    direction_text = direction_body(direction or "")
     if len(direction_text) > DIRECTION_CAP:
         direction_text = direction_text[: DIRECTION_CAP - 40].rstrip() + "\n[direction truncated for context]"
     summary_text = (summary or "").strip() or "(nothing older: every saved message of this chat is in the message list)"
@@ -81,9 +82,21 @@ def build_system(
     shell_note = _shell_note()
     page_note = _page_note(workspace)
     from easyagent.codenote import CODING_BLOCK
+    from easyagent.schedule import OPEN_NOTE
 
     coding = CODING_BLOCK
+    open_note = OPEN_NOTE
     text = f"""You are {name}, running inside EasyAgent.
+
+# Routines
+You can save a routine: a cron job, a reminder, a recurring task, or a check every morning. The fields are name, prompt, cron, daily, weekdays, weekly, once, every_minutes, timezone, and quiet. Use the routine tool to create, edit, delete, or list one, or use a routine fence. {open_note} It is not saved until the person confirms the card. Do not create, edit, or delete a routine while you are already running as one. Do not use Task Scheduler, schtasks, crontab, or launchd. A quiet routine that has nothing to say replies with exactly: nothing new
+
+```routine
+name: Morning briefing
+weekdays: 8:00 AM
+---
+Summarize the morning.
+```
 
 Write in plain sentences. Use bold or a bullet list only when the person asked for a list, or the answer really is a list. A greeting or a fact you already know is one reply. Do not call a tool for it. For a task, say in one sentence what done looks like. That sentence is the finished result, not a line that says you are writing it now. If you have no plan, do not write one. If you do, put only that plan in a plan fence.
 
@@ -308,16 +321,6 @@ what was checked
 ```
 
 {coding}
-
-# Routines
-A routine is a saved prompt that runs on a schedule and posts into this chat. Propose one with a routine fence. It is not saved until the person confirms the card. Do not create, edit, or delete a routine while you are already running as one. A quiet routine that has nothing to say replies with exactly: nothing new
-
-```routine
-name: Morning briefing
-weekdays: 8:00 AM
----
-Summarize the morning.
-```
 
 # Saved computers
 Run a command on a Linux or Windows computer only when it is listed below. Do not invent a host, a user, or a password. An empty computer name, or a name that is not saved, means this computer. A tool failure comes back as the tool message. It is not the reply. Call finish only after the answer is written in your own words. A search title is not the answer.

@@ -92,10 +92,11 @@ def test_meter_warns_at_80_and_fills_at_90_without_a_fake_call():
     # and Windows +224 over the context plus the schema of that release, and
     # 4% of 7375 covered the longer PowerShell description. patch, search_files,
     # the read window, and command timeout/workdir add schema tokens, so the
-    # estimate now sits further above 7375. It must still include the tool list.
-    # Dropping that list (about 1,870 tokens) leaves only the 5656 context.
+    # estimate now sits further above 7375. The routine tool adds its fields
+    # on top of that. It must still include the tool list. Dropping that list
+    # (about 1,870 tokens) leaves only the 5656 context.
     assert gap["prompt_tokens"] == 5656 + tools
-    assert 2000 <= tools <= 2500
+    assert 2000 <= tools <= 2900
     refused = apply_meter({"context_tokens": 10, "context_overflow": 1}, 1000, 10)
     assert refused["context_level"] == 0
     assert refused["offer_compact"] == 1

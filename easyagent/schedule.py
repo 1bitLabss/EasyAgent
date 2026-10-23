@@ -18,6 +18,7 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from easyagent import gate
 from easyagent import llm
+from easyagent.direction import direction_body
 from easyagent.limits import DIRECTION_CAP
 from easyagent.notify import poke
 from easyagent.store import Store, StoreError, new_id, now_iso
@@ -176,7 +177,9 @@ async def run_due_schedules(store: Store, now: datetime | None = None) -> list[d
                 age = slot_age(schedule, slot, moment)
                 if age is not None and age > window:
                     continue
-                claimed.append((dict(schedule), slot))
+                copy = dict(schedule)
+                copy["_missed"] = age is not None and age > MISSED_AFTER_SECONDS
+                claimed.append((copy, slot))
             if changed:
                 store.save_schedules(bot["id"], schedules)
             for schedule, slot in claimed:
@@ -237,7 +240,7 @@ async def _run_one(store: Store, bot: dict, schedule: dict, slot: str) -> dict:
         entry = {**base, "status": "error", "output": "", "result": "", "error": "This bot's endpoint is missing.", "finished_at": now_iso()}
         await _deliver(store, bot, schedule, entry)
         return entry
-    direction = (store.read_direction() or "").strip()
+    direction = direction_body(store.read_direction() or "")
     if len(direction) > DIRECTION_CAP:
         direction = direction[: DIRECTION_CAP - 40].rstrip() + "\n[direction truncated]"
     name = bot.get("name") or "EasyAgent"
@@ -325,6 +328,27 @@ async def _run_one(store: Store, bot: dict, schedule: dict, slot: str) -> dict:
 
 class _Stopped(Exception):
     pass
+
+
+# A slot this late, and still inside the catch-up window, is a missed run.
+MISSED_AFTER_SECONDS = 120
+OPEN_NOTE = "Runs only while EasyAgent is open; turn on Start at login."
+TZDATA_WARNING = "Timezone data is missing. Routines use this computer's local clock, not UTC."
+
+
+def tzdata_available() -> bool:
+    """True when a real zone, not only UTC, can be loaded."""
+    try:
+        ZoneInfo("America/Chicago")
+    except (ZoneInfoNotFoundError, ModuleNotFoundError):
+        return False
+    except Exception:
+        return False
+    return True
+
+
+def tzdata_warning() -> str:
+    return "" if tzdata_available() else TZDATA_WARNING
 
 
 def catchup_seconds() -> float:
@@ -473,7 +497,21 @@ def local_zone_name() -> str:
             label = ""
     if label and _zone_ok(label):
         return iana_zone(label)
-    return "UTC"
+    if tzdata_available():
+        return "UTC"
+    # The zone database is missing. Do not pretend the clock is UTC.
+    if label:
+        return label
+    found = _local_tzinfo()
+    offset = None
+    if found is not None:
+        try:
+            offset = found.utcoffset(None)
+        except Exception:
+            offset = None
+    if offset == timedelta(0):
+        return "UTC"
+    return "local"
 
 
 def zone_for(schedule: dict):
@@ -519,6 +557,8 @@ def _clock_zone(schedule: dict):
     if loaded is not None:
         return loaded
     if local and _zone_ok(local):
+        return _offset_zone()
+    if not tzdata_available():
         return _offset_zone()
     return timezone.utc
 
@@ -632,6 +672,7 @@ async def _deliver(store: Store, bot: dict, schedule: dict, entry: dict) -> None
         "routine_name": name,
         "deliver": str(schedule.get("deliver") or ""),
         "deliver_chat": str(schedule.get("deliver_chat") or ""),
+        "missed": bool(schedule.get("_missed")),
     })
     await flush(store)
 
@@ -783,6 +824,15 @@ def plain_phrase(schedule: dict) -> str:
         if len(days) == 1:
             return f"Every {_DOW_NAME[next(iter(days))]} at {at}{tail}".strip()
     return expression or "cron"
+
+
+def confirm_detail(name: str, shown: str, prompt: str) -> str:
+    """What the routine card shows, including the open-app note and a zone-data warning."""
+    parts = [name, shown, prompt, OPEN_NOTE]
+    warn = tzdata_warning()
+    if warn:
+        parts.append(warn)
+    return "\n".join(part for part in parts if part)
 
 
 def preview(schedule: dict, now: datetime | None = None) -> str:
@@ -968,9 +1018,13 @@ def compile_routine(fields: dict, *, created_at: str | None = None) -> dict:
     every_minutes = fields.get("every_minutes")
     kind = (fields.get("kind") or "").strip()
     if once or kind == "once":
-        when = _parse_time(once or fields.get("at") or "")
-        if when is None:
-            raise ScheduleError("Say when this routine should run once.")
+        raw_once = (once or "").strip()
+        if raw_once:
+            when = _once_in_zone(raw_once, timezone_name)
+        else:
+            when = _parse_time(str(fields.get("at") or ""))
+            if when is None:
+                raise ScheduleError("Say when this routine should run once.")
         record["kind"] = "once"
         record["at"] = when.astimezone(timezone.utc).isoformat()
     elif daily:
@@ -1213,6 +1267,50 @@ def _chosen_model(bot: dict, endpoint: dict) -> str | None:
         return bot_model
     endpoint_model = (endpoint.get("model") or "").strip()
     return endpoint_model or None
+
+
+def _zoneinfo(name: str):
+    candidate = iana_zone((name or "").strip())
+    if not candidate:
+        return None
+    if candidate in {"UTC", "Etc/UTC", "GMT", "Etc/GMT"}:
+        try:
+            return ZoneInfo("UTC")
+        except (ZoneInfoNotFoundError, ModuleNotFoundError):
+            return timezone.utc
+    try:
+        return ZoneInfo(candidate)
+    except (ZoneInfoNotFoundError, ModuleNotFoundError):
+        return None
+
+
+def _once_in_zone(value: str, timezone_name: str) -> datetime:
+    """A clock time with no offset is that time in the routine's zone, not UTC."""
+    text = (value or "").strip()
+    try:
+        parsed = datetime.fromisoformat(text)
+    except ValueError:
+        parsed = None
+    if parsed is None:
+        raise ScheduleError("Say when this routine should run once.")
+    if parsed.tzinfo is not None:
+        return parsed
+    zone = _zoneinfo(timezone_name)
+    if zone is None:
+        if tzdata_available():
+            raise ScheduleError("That timezone is not recognized.")
+        zone = _offset_zone()
+    if not _wall_exists(parsed.year, parsed.month, parsed.day, parsed.hour, parsed.minute, zone):
+        raise ScheduleError("That time does not exist in this timezone.")
+    return datetime(
+        parsed.year,
+        parsed.month,
+        parsed.day,
+        parsed.hour,
+        parsed.minute,
+        parsed.second,
+        tzinfo=zone,
+    )
 
 
 def _parse_time(value: str) -> datetime | None:

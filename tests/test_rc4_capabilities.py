@@ -52,10 +52,10 @@ def _system(store, bot_id, chat_id) -> str:
 
 
 def test_the_capability_list_reaches_a_normal_chat_on_windows(tmp_path, monkeypatch):
-    """Default and YOLO, on Windows. The late Routines section is present, and so is the list at the top.
+    """Default and YOLO, on Windows. Routines and the capability list are at the top.
 
-    The native tool array has no scheduler. Context fitting, a disabled tool, and a
-    one-tool child list do not remove the capability list from the system prompt.
+    The native routine tool is create, edit, delete, and list. Context fitting, a
+    disabled tool, and a one-tool child list do not remove the capability list.
     """
     monkeypatch.setattr(sys, "platform", "win32")
     app = create_app(tmp_path)
@@ -78,10 +78,11 @@ def test_the_capability_list_reaches_a_normal_chat_on_windows(tmp_path, monkeypa
         assert "PowerShell" in system
         assert "# Routines" in system
         assert block in system
-        assert system.index("# What you can do") < system.index("# Direction") < system.index("# Routines")
-        assert "routines (recurring or scheduled jobs, run on a schedule, cron-like)" in system
+        assert system.index("# What you can do") < system.index("# Routines") < system.index("# Direction")
+        assert "routines (cron, reminders, recurring tasks, and every morning)" in system
+        assert "every morning" in system.lower()
     tool_names = [tool["function"]["name"] for tool in native_tools()]
-    assert "routine" not in tool_names
+    assert "routine" in tool_names
     assert "cron" not in tool_names
     terminal = next(tool for tool in native_tools() if tool["function"]["name"] == "terminal")
     assert "PowerShell" in terminal["function"]["description"]
@@ -305,6 +306,7 @@ def test_windows_without_tzdata_confirms_runs_and_catches_up(tmp_path, monkeypat
     assert len(posted) == 1
     assert posted[0]["routine_name"] == "Daily check"
     assert posted[0]["content"] == "The pier is quiet."
+    assert posted[0]["missed"] is True
     stored = store.list_schedules(bot["id"])[0]
     assert stored["last_slot"] == f"cron:{day.isoformat()}T08:00"
     assert asyncio.run(schedule.run_due_schedules(store, missed)) == []

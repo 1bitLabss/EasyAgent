@@ -12,3 +12,11 @@ Read this every turn. It outranks habits and guesses.
 - When you learn a durable preference or a reusable procedure, save it as a skill.
 - Do not claim you changed, deleted, or saved something unless you actually did.
 """
+
+
+def direction_body(text: str) -> str:
+    """The direction file without a second copy of its heading."""
+    body = (text or "").strip()
+    if body.lower().startswith("# direction"):
+        body = body.split("\n", 1)[1].lstrip("\n") if "\n" in body else ""
+    return body.strip()

@@ -56,23 +56,27 @@ class Feature:
 _FEATURES: tuple[Feature, ...] = (
     Feature("files", "files", tools=("list_dir", "read_file", "write_file", "search_files"), ask=r"\bfiles\b"),
     Feature("shell", "shell", tools=("terminal",), ask=r"\b(shell|terminal)\b"),
-    Feature(
-        "web",
-        "web search and browser",
-        tools=("web_search", "browser"),
-        ask=r"\b(web search|search the web|browser|browse)\b",
-    ),
+    Feature("web", "web search", tools=("web_search",), ask=r"\b(web search|search the web)\b"),
+    Feature("browser", "browser", tools=("browser",), ask=r"\b(browser|browse)\b"),
     Feature(
         "routines",
-        "routines (recurring or scheduled jobs, run on a schedule, cron-like)",
-        module="easyagent.schedule",
-        symbol="compile_routine",
+        "routines (cron, reminders, recurring tasks, and every morning)",
+        tools=("routine",),
     ),
     Feature("helpers", "helper bots", module="easyagent.helpers", symbol="parse_helpers", ask=r"\bhelpers?\b"),
     Feature("bots", "other bots", module="easyagent.subagent", symbol="user_asked_to_consult", ask=r"\b(other bots?|another bot)\b"),
     Feature("mcp", "MCP connectors", tools=("mcp",), ask=r"\b(mcp|connectors?)\b"),
-    Feature("skills", "skills and memory", tools=("skill", "memory"), ask=r"\b(skills?|memory)\b"),
+    Feature("skills", "skills", tools=("skill",), ask=r"\bskills?\b"),
+    Feature("memory", "memory", tools=("memory",), ask=r"\bmemory\b"),
     Feature("bridges", "chat bridges", module="easyagent.bridges", symbol="list_records", ask=r"\b(bridges?|telegram|discord)\b"),
+    Feature(
+        "yolo",
+        "YOLO (while /yolo is on, approval gates allow the action and show no card; a catastrophic command still blocks)",
+        module="easyagent.yolo",
+        symbol="passes",
+        ask=r"\byolo\b",
+    ),
+    Feature("learn", "nightly learning", module="easyagent.learn", symbol="list_candidates", ask=r"\bnightly\b"),
 )
 
 
@@ -160,30 +164,29 @@ def _denies(reply: str) -> bool:
 
 
 def _proposal_sentence(feature: Feature, user_text: str) -> str:
+    del user_text
     if feature.key == "routines":
         return (
             "A routine runs on a schedule, the same idea as cron. "
             "Confirm the routine card to save it."
         )
-    if feature.key == "skills":
-        if re.search(r"(?i)\bmemory\b", user_text) and not re.search(r"(?i)\bskills?\b", user_text):
-            return "You have memory. It is a file on this computer, and I can read it and file a line."
-        if re.search(r"(?i)\bskills?\b", user_text) and not re.search(r"(?i)\bmemory\b", user_text):
-            return "You have skills. I can save one and reuse it."
-        return "You have skills and memory. I can save a skill and file a line in memory."
-    if feature.key == "web":
-        if re.search(r"(?i)\bbrowse", user_text) and not re.search(r"(?i)web search|search the web", user_text):
-            return "You have a browser on this bot. I can open a page in it."
-        if re.search(r"(?i)web search|search the web", user_text) and not re.search(r"(?i)\bbrowse", user_text):
-            return "You have web search. I can search the public web from this computer."
-        return "You have web search and a browser. I can search and open a page."
+    if feature.key == "yolo":
+        return (
+            "YOLO means while /yolo is on, approval gates allow the action and show no card. "
+            "A catastrophic command still blocks."
+        )
     sentences = {
         "files": "You have files. I can list, read, and write them on this computer.",
         "shell": "You have a shell. I can run a command on this computer.",
+        "web": "You have web search. I can search the public web from this computer.",
+        "browser": "You have a browser on this bot. I can open a page in it.",
         "helpers": "You have helper bots. I can hand one task to a helper.",
         "bots": "You can ask another bot that already exists.",
         "mcp": "You have MCP connectors. I can call a saved connector.",
+        "skills": "You have skills. I can save one and reuse it.",
+        "memory": "You have memory. It is a file on this computer, and I can read it and file a line.",
         "bridges": "You have chat bridges for Telegram and Discord.",
+        "learn": "You have nightly learning. It can propose a skill from what this bot has done.",
     }
     return sentences.get(feature.key, f"You can use {feature.phrase}.")
 
@@ -211,7 +214,7 @@ def _offer_routine(store, bot_id: str, user_text: str) -> str:
     """Open a routine card, or save it when YOLO is already on. The reply names a routine."""
     from easyagent.helpers import in_helper
     from easyagent.safety import Verdict, _PENDING, _make_card, _notify, is_unattended, list_pending
-    from easyagent.schedule import ScheduleError, apply_confirmed, compile_routine, preview
+    from easyagent.schedule import ScheduleError, apply_confirmed, compile_routine, confirm_detail, preview
     from easyagent.yolo import passes
 
     if in_helper() or is_unattended():
@@ -237,7 +240,7 @@ def _offer_routine(store, bot_id: str, user_text: str) -> str:
         except ScheduleError:
             return ""
         return f"Saved the routine {name}. A routine runs on a schedule, the same idea as cron."
-    detail = "\n".join(part for part in (name, shown, prompt) if part)
+    detail = confirm_detail(name, shown, prompt)
     card = _make_card(
         bot_id,
         Verdict("ask", "routine", "Save this routine?", detail, ""),

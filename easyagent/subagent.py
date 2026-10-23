@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import re
 
+from easyagent.direction import direction_body
 from easyagent.limits import DIRECTION_CAP
 
 FENCE_RE = re.compile(r"```subagent[ \t]*\r?\n(.*?)```", re.DOTALL | re.IGNORECASE)
@@ -145,7 +146,7 @@ def automatic_ask_allowed(text: str, names=None) -> bool:
 
 def child_messages(bot_name: str, direction: str, task: str) -> list[dict]:
     """The only messages the child model sees."""
-    direction_text = (direction or "").strip()
+    direction_text = direction_body(direction or "")
     if len(direction_text) > DIRECTION_CAP:
         direction_text = direction_text[: DIRECTION_CAP - 40].rstrip() + "\n[direction truncated]"
     name = " ".join((bot_name or "EasyAgent").split()) or "EasyAgent"

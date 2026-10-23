@@ -456,6 +456,10 @@ def finish_install(card_id: str, decision: str) -> dict | None:
     pending = _INSTALLS.pop(card_id, None)
     if pending is None or decision != "approve":
         return None
+    command = list(pending["command"] or [])
+    url = pending["url"] if pending["transport"] == "http" else ""
+    # Approving the card is the allow. A custom server is not dropped after that.
+    grant_server(pending["store"], command=command, url=url)
     row = add_connector(
         pending["store"],
         pending["bot_id"],
@@ -470,8 +474,10 @@ def finish_install(card_id: str, decision: str) -> dict | None:
     )
     try:
         return refresh(pending["store"], pending["bot_id"], row["id"])
-    except StoreError:
-        return row
+    except StoreError as exc:
+        saved = dict(row)
+        saved["refresh_error"] = "The connector was saved, but its tools were not listed. " + str(exc)
+        return saved
 
 
 def update_connector(store: Store, bot_id: str, connector_id: str, *, enabled: bool | None, tools: dict | None) -> dict:

@@ -214,6 +214,7 @@ const MessageRow = memo(function MessageRow({
       {message.role === "assistant" && !failed && shownThinking(message.thinking) ? <ThinkingBox text={shownThinking(message.thinking)} streaming={streaming && !freeze} answering={Boolean((message.content || "").trim())} seconds={message.thought_seconds} /> : null}
       {showBubble ? (
       <div className={cn(mine ? "bubble-user" : "bubble-bot", failed && "bg-danger/10 text-danger")}>
+        {message.missed ? <p className="mb-1 text-xs" data-testid="missed-run">Missed run</p> : null}
         {message.routine_name ? <p className="mb-1 text-xs opacity-70">Routine · {message.routine_name}</p> : null}
         {message.speaker_name ? <p className="mb-1 text-xs opacity-70">{message.speaker_name}</p> : null}
         <div className={mine ? "whitespace-pre-wrap" : ""}>

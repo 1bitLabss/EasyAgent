@@ -1,7 +1,7 @@
 import { QueryClientProvider } from "@tanstack/react-query";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
-import { act, cleanup, fireEvent, render } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { Profiler } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { queryClient } from "@/api";
@@ -351,5 +351,39 @@ describe("reaction picker", () => {
     expect(reactionCss).toContain(".message-row:hover .reaction-picker");
     expect(reactionCss).toContain(".message-row:focus-within .reaction-picker");
     expect(reactionCss).toContain(".message-row:active .reaction-picker");
+  });
+});
+
+describe("missed routine row", () => {
+  afterEach(() => {
+    cleanup();
+    vi.useRealTimers();
+  });
+
+  it("shows Missed run on a caught-up routine", async () => {
+    queryClient.clear();
+    useApp.getState().openBot(BOT_ID, CHAT_ID);
+    queryClient.setQueryData(["bots"], [warbot()]);
+    queryClient.setQueryData(["ongoing", BOT_ID], { id: CHAT_ID });
+    queryClient.setQueryData(["chat", BOT_ID, CHAT_ID], {
+      id: CHAT_ID,
+      bot_id: BOT_ID,
+      title: "Ada",
+      messages: [{
+        id: "missed-1",
+        role: "assistant",
+        content: "The pier is quiet.",
+        routine_name: "Daily check",
+        missed: true,
+      }],
+      message_count: 1,
+    });
+    queryClient.setQueryData(["approvals", BOT_ID], []);
+    render(
+      <QueryClientProvider client={queryClient}>
+        <ChatPane />
+      </QueryClientProvider>,
+    );
+    expect((await screen.findByTestId("missed-run")).textContent).toBe("Missed run");
   });
 });

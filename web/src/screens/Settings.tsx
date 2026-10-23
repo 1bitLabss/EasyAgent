@@ -47,6 +47,33 @@ function GlobalYolo() {
   );
 }
 
+function RoutineClockNote() {
+  const host = useQuery({
+    queryKey: ["host"],
+    queryFn: () => api<{ start_at_login?: boolean; tzdata_warning?: string }>("/api/host"),
+  });
+  const on = Boolean(host.data?.start_at_login);
+  return (
+    <div className="space-y-2">
+      <p data-testid="routine-open-note">Runs only while EasyAgent is open; turn on Start at login.</p>
+      {host.data?.tzdata_warning ? (
+        <p className="text-sm text-danger" data-testid="tzdata-warning" role="alert">{host.data.tzdata_warning}</p>
+      ) : null}
+      <Button
+        type="button"
+        size="sm"
+        variant="outline"
+        data-testid="start-at-login"
+        onClick={() => {
+          void api("/api/host", { method: "POST", json: { start_at_login: !on } }).then(() => queryClient.invalidateQueries({ queryKey: ["host"] }));
+        }}
+      >
+        {on ? "Start at login is on" : "Turn on Start at login"}
+      </Button>
+    </div>
+  );
+}
+
 function Note({ children }: { children: ReactNode }) {
   return <p className="text-xs text-muted">{children}</p>;
 }
@@ -931,6 +958,7 @@ export function SettingsScreen() {
         </Block>
 
         <Block title="Routines">
+          <RoutineClockNote />
           <Note>A routine runs a saved prompt on your clock and posts the result into this bot's chat. The unread dot lights up. Quiet mode stays in the log when the reply is nothing new. A live chat keeps the model; the routine waits.</Note>
           <RoutineForm botId={botId} onError={setError} />
           {(schedules.data || []).length === 0 ? <Note>No routines yet. Add one, or ask in the chat and confirm the card.</Note> : (

@@ -55,6 +55,7 @@ export function ApprovalCard({ botId, botName, active }: { botId: string; botNam
     queryFn: () => api<Approval[]>(`/api/bots/${botId}/approvals`),
   });
   const card = (cards.data || [])[0];
+  const [error, setError] = useState("");
 
   useEffect(() => {
     if (!card || card.id === seen.current) return;
@@ -71,13 +72,27 @@ export function ApprovalCard({ botId, botName, active }: { botId: string; botNam
     }
   }, [card, botName]);
 
+  if (!card && error) {
+    return (
+      <p className="mx-auto mb-3 w-full max-w-[760px] rounded-2xl border border-border bg-card p-4 text-sm text-danger" data-testid="install-error" role="alert">
+        {error}
+      </p>
+    );
+  }
   if (!card) return null;
 
   async function decide(decision: "approve" | "deny" | "always" | "done" | "takeover" | "session" | "exec-always" | "class") {
-    await api(`/api/bots/${botId}/approvals/${card.id}`, { method: "POST", json: { decision } });
+    if (!card) return;
+    try {
+      const result = await api<{ warning?: string }>(`/api/bots/${botId}/approvals/${card.id}`, { method: "POST", json: { decision } });
+      setError(result?.warning || "");
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "The connector was not installed.");
+    }
     await queryClient.invalidateQueries({ queryKey: ["approvals", botId] });
     await queryClient.invalidateQueries({ queryKey: ["audit", botId] });
     await queryClient.invalidateQueries({ queryKey: ["bots"] });
+    await queryClient.invalidateQueries({ queryKey: ["connectors", botId] });
   }
 
   // A lasting grant is never offered for a blocked rule, a bridge send, a browser

@@ -1347,6 +1347,7 @@ class Store:
         routine_id: str = "",
         routine_name: str = "",
         delivery_id: str = "",
+        missed: bool = False,
     ) -> dict:
         """Append one finished routine reply. Re-reads the chat so a live save cannot drop it.
 
@@ -1367,6 +1368,7 @@ class Store:
                 "routine_id": routine_id,
                 "routine_name": routine_name,
                 **({"delivery_id": delivery_id} if delivery_id else {}),
+                **({"missed": True} if missed else {}),
             })
             chat["messages"] = messages
             chat["updated_at"] = now_iso()
@@ -1399,11 +1401,11 @@ class Store:
         return current
 
     def note_first_routine(self) -> dict:
-        """The first saved routine turns background running and start-at-login on."""
+        """Remember that a routine exists. Start at login stays off until the person turns it on."""
         path = self.root / "host.json"
         if path.is_file():
             return self.read_host()
-        return self.save_host({"background": True, "start_at_login": True, "explained": False, "paused_all": False})
+        return self.save_host({"background": True, "start_at_login": False, "explained": False, "paused_all": False})
 
     def existing_ongoing(self, bot_id: str) -> dict | None:
         """The pinned conversation, or the newest chat. Does not create one and does not delete any."""

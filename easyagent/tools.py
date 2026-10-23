@@ -3365,7 +3365,7 @@ def _routine_request(name: str, raw: dict) -> ToolRequest:
         action = "edit"
     elif name == "delete_routine":
         action = "delete"
-    if action not in {"create", "edit", "delete", "pause", "resume"}:
+    if action not in {"create", "edit", "delete", "pause", "resume", "list"}:
         action = "create"
     spec = {
         "action": action,
@@ -3398,8 +3398,8 @@ def _routine_from_body(body: str) -> ToolRequest | None:
     if not fields and not prompt.strip():
         return None
     action = (fields.get("action") or "create").strip().lower()
-    if action not in {"create", "edit", "delete", "pause", "resume"}:
-        raise ToolError("A routine action is create, edit, or delete.")
+    if action not in {"create", "edit", "delete", "pause", "resume", "list"}:
+        raise ToolError("A routine action is create, edit, delete, or list.")
     spec = {
         "action": action,
         "id": fields.get("id") or "",
@@ -3425,7 +3425,7 @@ def _routine_from_body(body: str) -> ToolRequest | None:
 async def _routine_proposal(store: Store, request: ToolRequest, bot_id: str | None) -> str:
     """A chat proposes a routine. It is saved only after the person confirms the card."""
     from easyagent.safety import Verdict, _PENDING, _audit, _make_card, _notify, _wait, is_unattended
-    from easyagent.schedule import ScheduleError, apply_confirmed, compile_routine, preview
+    from easyagent.schedule import OPEN_NOTE, ScheduleError, apply_confirmed, compile_routine, confirm_detail, preview, tzdata_warning
     from easyagent.store import StoreError, now_iso
 
     spec = {}
@@ -3437,6 +3437,23 @@ async def _routine_proposal(store: Store, request: ToolRequest, bot_id: str | No
     if not isinstance(spec, dict):
         spec = {}
     action = (spec.get("action") or request.action or "create").strip().lower()
+    if action == "list":
+        lines = ["Routines"]
+        warn = tzdata_warning()
+        if warn:
+            lines.append(warn)
+        rows = store.list_schedules(bot_id) if bot_id else []
+        if not rows:
+            lines.append("No routines.")
+        else:
+            for row in rows:
+                try:
+                    shown = preview(row)
+                except Exception:
+                    shown = str(row.get("cron") or row.get("kind") or "")
+                lines.append(f"- {row.get('name') or 'Routine'}: {shown}")
+        lines.append(OPEN_NOTE)
+        return "\n".join(lines)
     if is_unattended():
         _audit(store, bot_id, {
             "at": now_iso(),
@@ -3471,7 +3488,7 @@ async def _routine_proposal(store: Store, request: ToolRequest, bot_id: str | No
         "pause": "Pause this routine?",
         "resume": "Resume this routine?",
     }.get(action, "Confirm this routine?")
-    detail = "\n".join(part for part in (name, shown, prompt) if part)
+    detail = confirm_detail(name, shown, prompt)
     from easyagent.yolo import passes
 
     if bot_id and passes(store, bot_id):
@@ -3549,13 +3566,13 @@ async def _execute_now(store: Store, request: ToolRequest, bot_id: str | None = 
     if limited:
         raise ToolError(limited + " It was not run.")
     if request.kind == "skill":
-        from easyagent.botskills import SkillError, list_skills, read_skill, write_skill
+        from easyagent.botskills import SkillError, read_skill, visible_skills, write_skill
 
         if not bot_id:
             raise ToolError("This turn has no bot, so the skill was not opened.")
         try:
             if request.action == "list":
-                rows = list_skills(store, bot_id)
+                rows = visible_skills(store, bot_id)
                 if not rows:
                     return "No skills."
                 return "Skills\n" + "\n".join(

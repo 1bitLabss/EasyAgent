@@ -243,8 +243,25 @@ class _Held:
 
 
 def _plain_answer(text: str) -> str:
+    """Words with fences removed, for a comparison. Not the saved reply."""
     _hidden, answer = llm.peel_thinking(text or "")
     return _FENCE.sub("", answer or "").strip()
+
+
+def _published_answer(text: str) -> str:
+    """The salvage the person sees. Code fences, indent, and blank lines stay.
+
+    Thinking and tool fences come off. A ```python or ```yaml fence does not.
+    """
+    from easyagent import search as search_mod
+    from easyagent.subagent import strip_subagent_fences
+    from easyagent.tools import _strip_lesson_fences, strip_tool_markup
+
+    _hidden, answer = llm.peel_thinking(text or "", keep_shape=True)
+    cleaned = strip_subagent_fences(answer, keep_shape=True)
+    cleaned = search_mod.strip_search_fences(cleaned, keep_shape=True)
+    cleaned = strip_tool_markup(cleaned, keep_shape=True)
+    return _strip_lesson_fences(cleaned, keep_shape=True)
 
 
 def _child_reply(text: str, tools: list) -> bool:
@@ -296,8 +313,8 @@ async def _salvage(kwargs, messages, draft: str, tool_text: str) -> str:
     """One last call, with no tools. The draft and the tool results are context."""
     turn_mod.raise_if_cancelled()
     prior = list(messages or [])
-    kept = _plain_answer(draft)
-    if kept:
+    kept = _published_answer(draft)
+    if kept.strip():
         prior = [*prior, {"role": "assistant", "content": kept}]
     note = ANSWER_NOW
     if (tool_text or "").strip():
@@ -315,7 +332,7 @@ async def _salvage(kwargs, messages, draft: str, tool_text: str) -> str:
         raise
     except llm.ProviderError:
         return ""
-    return _plain_answer(text or "")
+    return _published_answer(text or "")
 
 
 async def _emit_answer(kwargs, messages, final: str, tools: list, tool_text: str, draft: str = ""):

@@ -136,6 +136,39 @@ describe("a finished turn has an answer row", () => {
     expect(bubble).toContain("The harbor counter lives in harbor.py.");
   });
 
+  it("does not render an empty bubble after a restart mid-turn", () => {
+    queryClient.setQueryData(["bots"], [bot()]);
+    queryClient.setQueryData(["ongoing", "bot-1"], { id: "chat-1" });
+    queryClient.setQueryData(["chat", "bot-1", "chat-1"], chat([
+      user("Write the harbor counter into harbor.py."),
+      {
+        id: "a-empty",
+        role: "assistant",
+        content: "",
+        thinking: "planning the pier",
+        created_at: "2026-10-22T18:00:33Z",
+      },
+      {
+        id: "a-note",
+        role: "assistant",
+        kind: "resume-note",
+        content: "Picked up where it stopped.",
+        created_at: "2026-10-22T18:00:34Z",
+      },
+    ]));
+    queryClient.setQueryData(["approvals", "bot-1"], []);
+    useApp.getState().openBot("bot-1", "chat-1");
+    render(
+      <QueryClientProvider client={queryClient}>
+        <ChatPane />
+      </QueryClientProvider>,
+    );
+    expect(document.querySelector(".bubble-bot")).toBeNull();
+    expect(document.querySelector("[data-testid=thinking-panel]")).toBeNull();
+    expect(document.querySelector("[data-testid=interrupted-resuming]")?.textContent).toBe("Interrupted, resuming");
+    expect(document.querySelector("[data-testid=pickup-card]")?.textContent).toBe("Picked up where it stopped.");
+  });
+
   it("keeps an unverified caveat off the answer text", () => {
     const words = "Done. I wrote the agenda into note.txt and that is the whole summary of this change for the record.";
     paint(words, { unverified: true });

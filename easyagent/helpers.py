@@ -71,8 +71,15 @@ def parse_helpers(reply: str) -> list[HelperSpec]:
     return found
 
 
-def strip_helper_fences(reply: str) -> str:
-    text = FENCE_RE.sub("", reply or "")
+def strip_helper_fences(reply: str, *, keep_shape: bool = False) -> str:
+    """Remove a helper fence. A reply with none is returned as written.
+
+    keep_shape also leaves indentation and blank lines when a fence is removed.
+    """
+    source = reply or ""
+    text = FENCE_RE.sub("", source)
+    if keep_shape or text == source:
+        return text
     return re.sub(r"\n{3,}", "\n\n", text).strip()
 
 

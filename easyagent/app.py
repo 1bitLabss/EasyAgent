@@ -5011,6 +5011,20 @@ def _pause_for_resume(store: Store, bot_id: str, chat_id: str) -> None:
         if message.get("role") == "assistant" and message.get("live"):
             message.pop("live", None)
             message.pop("error", None)
+            # An interrupted turn with no words yet is a status row. An empty
+            # assistant bubble with only a thinking panel is not the reply.
+            content = str(message.get("content") or "")
+            kind = str(message.get("kind") or "")
+            if (
+                not content.strip()
+                and not message.get("attachment")
+                and not (message.get("choices") or [])
+                and kind not in {"status", "pickup", "resume-note", "resume-offer"}
+            ):
+                message["kind"] = "status"
+                message["content"] = "Interrupted, resuming"
+                message.pop("thinking", None)
+                message.pop("thought_seconds", None)
         messages.append(message)
     plan = load_plan(store, bot_id, chat_id)
     index, total, label = progress(plan)
@@ -5546,14 +5560,14 @@ async def _finish_and_maybe_ask(
     from easyagent.helpers import for_model, parse_helpers, run_helpers, strip_helper_fences
 
     helpers = parse_helpers(visible)
-    visible = strip_helper_fences(visible)
+    visible = strip_helper_fences(visible, keep_shape=True)
     ask = parse_subagent(visible)
     user_text = _last_user_text(store.get_chat(bot_id, chat_id).get("messages") or [])
     # A plain question does not send another bot just because the reply contains the fence.
     suppressed = bool(ask) and not automatic_ask_allowed(user_text)
     if suppressed:
         ask = None
-    visible = strip_subagent_fences(visible)
+    visible = strip_subagent_fences(visible, keep_shape=True)
     if ask and not visible.strip():
         visible = f"Asked {ask[0]} to do one task."
     elif suppressed and not visible.strip():
@@ -5664,7 +5678,7 @@ async def _answer_in_parent_words(store: Store, bot_id: str, chat_id: str, child
             )
         except llm.ProviderError:
             raw = ""
-        spoken = strip_helper_fences(strip_subagent_fences(raw or ""))
+        spoken = strip_helper_fences(strip_subagent_fences(raw or "", keep_shape=True), keep_shape=True)
     if not spoken.strip():
         spoken = NO_ANSWER
     return _finish_reply(store, bot_id, chat_id, spoken, [])

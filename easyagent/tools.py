@@ -430,8 +430,12 @@ _QWEN_FUNCTION = re.compile(r"<function=([^>\s]+)>(.*?)</function>", re.IGNORECA
 _QWEN_PARAM = re.compile(r"<parameter=([^>\s]+)>(.*?)</parameter>", re.IGNORECASE | re.DOTALL)
 
 
-def strip_tool_markup(text: str) -> str:
-    """Remove tool fences and printed function calls. Leave ordinary prose."""
+def strip_tool_markup(text: str, *, keep_shape: bool = False) -> str:
+    """Remove tool fences and printed function calls. Leave ordinary prose.
+
+    keep_shape does not collapse blank lines or strip the ends. A code fence
+    that remains is byte for byte what the model wrote.
+    """
     cleaned = _TOOL_CALL_BLOCK.sub("", text or "")
     cleaned = re.sub(r"</tool_call>", "", cleaned, flags=re.IGNORECASE)
     cleaned = _FUNCTION_BLOCK.sub("", cleaned)
@@ -455,6 +459,8 @@ def strip_tool_markup(text: str) -> str:
         cleaned = pattern.sub("", cleaned)
     cleaned = _strip_memory_tools(cleaned)
     cleaned = re.sub(r"```plan[ \t]*\r?\n.*?```", "", cleaned, flags=re.DOTALL | re.IGNORECASE)
+    if keep_shape:
+        return cleaned
     return re.sub(r"\n{3,}", "\n\n", cleaned).strip()
 
 
@@ -3753,28 +3759,58 @@ def _full_page_read(request: ToolRequest, body: str) -> bool:
     return "<html" in text or "<!doctype" in text
 
 
+def _collapse_outside_fences(text: str) -> str:
+    """Merge runs of blank lines in prose. A ``` fence is copied unchanged."""
+    parts = re.split(r"(```[\s\S]*?```)", text or "")
+    out: list[str] = []
+    for index, part in enumerate(parts):
+        if index % 2 == 1:
+            out.append(part)
+        else:
+            out.append(re.sub(r"\n{3,}", "\n\n", part))
+    return "".join(out)
+
+
 def _without_dump(answer: str, raw: str) -> str:
-    """Drop a pasted listing or a long verbatim tool result from the reply."""
-    text = (answer or "").strip()
+    """Drop a pasted listing or a long verbatim tool result from the reply.
+
+    A reply with nothing to drop is returned as written, including its indent
+    and blank lines. A ``` fence is not edited while a listing is removed.
+    """
+    text = answer or ""
+    original = text
     raw_text = (raw or "").strip()
+    changed = False
     if raw_text and len(raw_text) >= 60 and raw_text in text:
         text = text.replace(raw_text, "")
+        changed = True
     names = _listing_names(raw_text)
     if len(names) >= 3:
         block = "\n".join(names)
         if len(block) >= 40 and block in text:
             text = text.replace(block, "")
+            changed = True
         kept: list[str] = []
         hits = 0
         name_set = {name.lower() for name in names}
+        in_fence = False
         for line in text.splitlines():
-            if line.strip().lower() in name_set:
+            if _FENCE_LINE.match(line):
+                kept.append(line)
+                in_fence = not in_fence
+                continue
+            if not in_fence and line.strip().lower() in name_set:
                 hits += 1
                 continue
             kept.append(line)
         if hits >= 3:
             text = "\n".join(kept)
-    return re.sub(r"\n{3,}", "\n\n", text).strip()
+            if original.endswith("\n"):
+                text += "\n"
+            changed = True
+    if not changed:
+        return original
+    return _collapse_outside_fences(text).strip()
 
 
 def _compose(line: str, answer: str) -> str:
@@ -4933,28 +4969,64 @@ def _is_raw_command_line(line: str) -> bool:
 
 
 def _drop_raw_command(answer: str, raw: str) -> str:
-    """Take raw command text back out of a reply. Leave the summary."""
+    """Take raw command text back out of a reply. Leave the summary.
+
+    Text inside a ``` fence stays, including its blank lines and indent.
+    """
     text = answer or ""
     blob = (raw or "").strip()
     if blob and len(blob) >= 40 and blob in text:
         text = text.replace(blob, "")
     raw_lines = {line.strip() for line in blob.splitlines() if len(line.strip()) >= 24}
     dump = len(raw_lines) >= 4
-    kept = []
+    kept: list[str] = []
+    in_fence = False
     for line in text.splitlines():
+        if _FENCE_LINE.match(line):
+            kept.append(line)
+            in_fence = not in_fence
+            continue
+        if in_fence:
+            kept.append(line)
+            continue
         stripped = line.strip()
         if _is_raw_command_line(stripped):
             continue
         if dump and stripped in raw_lines:
             continue
         kept.append(line)
-    return re.sub(r"\n{3,}", "\n\n", "\n".join(kept)).strip()
+    result = "\n".join(kept)
+    if text.endswith("\n") and result and not result.endswith("\n"):
+        result += "\n"
+    return _collapse_outside_fences(result).strip()
 
 
 def _drop_missing_command(answer: str) -> str:
-    """A command Windows could not run is not part of a finished reply."""
-    kept = [line for line in (answer or "").splitlines() if not _CMD_MISSING.search(line)]
-    return re.sub(r"\n{3,}", "\n\n", "\n".join(kept)).strip()
+    """A command Windows could not run is not part of a finished reply.
+
+    A reply with no such line is returned unchanged. A ``` fence is never edited.
+    """
+    source = answer or ""
+    if not source or not _CMD_MISSING.search(source):
+        return source
+    kept: list[str] = []
+    in_fence = False
+    dropped = False
+    for line in source.splitlines():
+        if _FENCE_LINE.match(line):
+            kept.append(line)
+            in_fence = not in_fence
+            continue
+        if not in_fence and _CMD_MISSING.search(line):
+            dropped = True
+            continue
+        kept.append(line)
+    if not dropped:
+        return source
+    result = "\n".join(kept)
+    if source.endswith("\n") and result and not result.endswith("\n"):
+        result += "\n"
+    return result
 
 
 def _useful_output(command: str, output: str) -> str:
@@ -5668,13 +5740,16 @@ def _lesson_from_fence(body: str) -> tuple[str, str] | None:
     return "", " ".join(lines)
 
 
-def _strip_lesson_fences(text: str) -> str:
+def _strip_lesson_fences(text: str, *, keep_shape: bool = False) -> str:
     def replacer(match: re.Match[str]) -> str:
         if _lesson_from_fence(match.group(1)) is None:
             return match.group(0)
         return ""
 
-    cleaned = _MEMORY_FENCE.sub(replacer, text or "")
+    source = text or ""
+    cleaned = _MEMORY_FENCE.sub(replacer, source)
+    if keep_shape or cleaned == source:
+        return cleaned
     return re.sub(r"\n{3,}", "\n\n", cleaned).strip()
 
 
@@ -5796,7 +5871,7 @@ def keep_lessons(store: Store, bot_id: str | None, text: str) -> str:
         except StoreError:
             continue
         _write_memory_md(store, bot_id, lesson, old)
-    return _strip_lesson_fences(text)
+    return _strip_lesson_fences(text, keep_shape=True)
 
 
 def _save_turn_notes(
@@ -6690,23 +6765,25 @@ def _drop_page_dump(text: str) -> str:
 
 
 def _spoken(text: str) -> str:
-    """The model's own account. A tool log, a ready line, or a command error is not the chat."""
-    _hidden, source = llm.peel_thinking(text or "")
-    cleaned = _strip_lesson_fences(
-        _drop_page_dump(strip_tool_markup(search_mod.strip_search_fences(source)))
-    ).strip()
-    if not cleaned:
-        return ""
-    blocks: list[str] = []
-    for block in re.split(r"\n\s*\n", cleaned):
-        lines = [" ".join(line.split()) for line in block.splitlines() if _keep_spoken_line(line)]
-        if lines:
-            blocks.append("\n".join(lines))
-    return "\n\n".join(blocks)
+    """The model's own account. An exact tool-log line is not the chat.
+
+    Text inside a ``` fence, leading indentation, and blank lines stay.
+    A short line such as "Done." stays. Tool fences are removed, and nothing
+    inside a remaining fence is rewritten.
+    """
+    _hidden, source = llm.peel_thinking(text or "", keep_shape=True)
+    cleaned = search_mod.strip_search_fences(source, keep_shape=True)
+    cleaned = strip_tool_markup(cleaned, keep_shape=True)
+    cleaned = _drop_page_dump(cleaned)
+    cleaned = _strip_lesson_fences(cleaned, keep_shape=True)
+    return _drop_known_logs(cleaned)
 
 
 def _visible_answer(text: str, raws: list[str]) -> str:
-    cleaned = strip_tool_markup(search_mod.strip_search_fences(text or ""))
+    cleaned = strip_tool_markup(
+        search_mod.strip_search_fences(text or "", keep_shape=True),
+        keep_shape=True,
+    )
     for raw in raws:
         cleaned = _without_dump(cleaned, raw)
     return cleaned
@@ -8436,9 +8513,11 @@ async def run_turn(
                 )
                 request = None
         if request is not None and request.kind == "finish":
-            written = _drop_known_logs(_spoken(text or ""), lines).strip()
+            spoken_body = _drop_known_logs(_spoken(text or ""), lines)
+            written = spoken_body.strip()
             if written and _repeats_result(written, raws):
                 written = ""
+                spoken_body = ""
             visible = _drop_known_logs(_spoken(shown_answer or ""), lines).strip()
             # The own-words check may reject a finish once. An answer the person
             # can already read ends the turn. A second rejection does not run.
@@ -8514,12 +8593,12 @@ async def run_turn(
                     yield event
                 return
             if written.strip() and not _short_done_line(written):
-                saved_prose = written
+                saved_prose = spoken_body
             if _hold_for_readback():
                 yield "status", "Thinking"
                 continue
             if _pending_write():
-                chosen = written if written.strip() and not _short_done_line(written) else saved_prose
+                chosen = spoken_body if written.strip() and not _short_done_line(written) else saved_prose
                 for event in close(chosen or ""):
                     yield event
                 return

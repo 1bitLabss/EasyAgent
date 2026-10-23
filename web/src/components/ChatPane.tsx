@@ -177,6 +177,22 @@ const MessageRow = memo(function MessageRow({
   const chip = chipText(message);
   const mine = message.role === "user";
   const showBubble = messageHasBubble(message);
+  // A restart mid-turn used to leave an empty assistant row whose only
+  // content was the thinking panel. That is a status line, not a reply.
+  if (
+    message.role === "assistant" &&
+    !message.live &&
+    !failed &&
+    !showBubble &&
+    !message.reaction &&
+    !message.kind
+  ) {
+    return (
+      <li className="message-row" data-role="assistant" data-kind="status" data-message-id={message.id || message.client_id || ""}>
+        <p className="sys-line" data-testid="interrupted-resuming">Interrupted, resuming</p>
+      </li>
+    );
+  }
   const choices = last && message.role === "assistant" && !failed && (message.choices || []).length > 1 ? message.choices || [] : [];
   const who = reactionWho(message.reaction_by, botName);
   async function react(emoji: string) {

@@ -1,6 +1,8 @@
 # Changelog
 
 ## 0.3.46
+- A tool-using reply keeps the model's code. Indentation inside a fence, blank lines, and a short "Done." stay. Only an exact tool-log line is removed. A review, a revision, and the last no-tools answer do not flatten that text.
+- A restart in the middle of a turn does not leave an empty assistant bubble. The row says "Interrupted, resuming", and a reply that already had words is kept. "Picked up where it stopped." still follows when resume is on.
 - After the person asks another bot, that reply is context for one last call with no tools. The answer is written in this bot's own words and saved on the turn. Resume, including a resume after a restart, leaves YOLO on for the whole bot. It stays until the owner turns it off or it expires.
 - A code fence keeps its indentation. A tool log is removed only when the whole line is that log, and text inside a fence is left as the model wrote it. A chat, a lookup, and a search-and-answer do not send another bot unless the person asked. "This was not verified." is not added to the answer. That caveat stays in the model's own words or on the unverified status line.
 - A turn always leaves an answer. Chat, a lookup, and a search-and-answer are not reviewed. A review runs at most once, and only after a file change, a test run, or three or more steps that changed state. The done-gate does not start another review. If the turn would end with no answer, one last call with no tools asks for the answer in the bot's own words, or a plain sentence says the turn ended before an answer was written. Another bot's reply is an input, not the answer. A turn searches the web at most twice, then answers. A message after a finished answer does not pause.

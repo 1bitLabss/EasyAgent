@@ -51,8 +51,10 @@ def search_query(reply: str) -> str | None:
     return query[:200]
 
 
-def strip_search_fences(reply: str) -> str:
+def strip_search_fences(reply: str, *, keep_shape: bool = False) -> str:
     text = FENCE_RE.sub("", reply or "")
+    if keep_shape:
+        return text
     return re.sub(r"\n{3,}", "\n\n", text).strip()
 
 

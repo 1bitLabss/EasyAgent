@@ -1144,14 +1144,31 @@ def drop_answer_leak(thought: str, answer: str) -> str:
     return thought
 
 
-def peel_thinking(text: str) -> tuple[str, str]:
-    """Return (reasoning, answer). The answer does not contain the think block."""
+def _collapse_outside_fences(text: str) -> str:
+    """Merge runs of blank lines in prose. A ``` fence is copied unchanged."""
+    parts = re.split(r"(```[\s\S]*?```)", text or "")
+    out: list[str] = []
+    for index, part in enumerate(parts):
+        if index % 2 == 1:
+            out.append(part)
+        else:
+            out.append(re.sub(r"\n{3,}", "\n\n", part))
+    return "".join(out)
+
+
+def peel_thinking(text: str, *, keep_shape: bool = False) -> tuple[str, str]:
+    """Return (reasoning, answer). The answer does not contain the think block.
+
+    keep_shape leaves the answer's indentation, blank lines, and fences as written.
+    """
     splitter = _ThinkSplitter()
     parts = splitter.feed(text or "")
     parts.extend(splitter.finish())
     reasoning = "".join(piece for kind, piece in parts if kind == "reasoning").strip()
     answer = "".join(piece for kind, piece in parts if kind == "text")
-    answer = re.sub(r"\n{3,}", "\n\n", answer).strip()
+    if keep_shape:
+        return reasoning, answer
+    answer = _collapse_outside_fences(answer).strip()
     return reasoning, answer
 
 

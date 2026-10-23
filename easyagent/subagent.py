@@ -37,8 +37,12 @@ def parse_subagent(reply: str) -> tuple[str, str] | None:
     return name, task
 
 
-def strip_subagent_fences(reply: str) -> str:
-    text = FENCE_RE.sub("", reply or "")
+def strip_subagent_fences(reply: str, *, keep_shape: bool = False) -> str:
+    """Remove an ask-another-bot fence. A reply with none is returned as written."""
+    source = reply or ""
+    text = FENCE_RE.sub("", source)
+    if keep_shape or text == source:
+        return text
     return re.sub(r"\n{3,}", "\n\n", text).strip()
 
 

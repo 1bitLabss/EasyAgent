@@ -74,9 +74,18 @@ def extract_skills(reply: str) -> tuple[str, list[dict]]:
         found.append(parsed)
         return ""
 
-    visible = FENCE_RE.sub(replace, reply or "")
-    visible = re.sub(r"\n{3,}", "\n\n", visible).strip()
-    return visible, found
+    source = reply or ""
+    visible = FENCE_RE.sub(replace, source)
+    if not found:
+        return source, found
+    parts = re.split(r"(```[\s\S]*?```)", visible)
+    kept: list[str] = []
+    for index, part in enumerate(parts):
+        if index % 2 == 1:
+            kept.append(part)
+        else:
+            kept.append(re.sub(r"\n{3,}", "\n\n", part))
+    return "".join(kept).strip(), found
 
 
 def pack_skills(skills: list[dict]) -> str:

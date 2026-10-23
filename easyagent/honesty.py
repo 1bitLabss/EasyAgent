@@ -1018,7 +1018,7 @@ async def settle(text: str, *, allow_model: bool = False) -> Outcome:
             unverified = True
     if hedged and not backing and not proof and not needs_verify:
         unverified = True
-    pieces = [rewritten.rstrip()]
+    pieces = [rewritten]
     excuse = await _excuse_note(trace, rewritten)
     if excuse:
         pieces.append(excuse)
@@ -1050,7 +1050,13 @@ async def settle(text: str, *, allow_model: bool = False) -> Outcome:
         promises = _open_promises(trace)
         if promises and "Blocked: still open" not in joined:
             pieces.append("Blocked: still open — " + "; ".join(promises) + ".")
-    body = "\n\n".join(part for part in pieces if part).strip()
+    extras = [part for part in pieces[1:] if part]
+    if extras:
+        body = "\n\n".join([rewritten.rstrip(), *extras]).strip()
+    elif rewritten.strip():
+        body = rewritten
+    else:
+        body = ""
     if not body:
         stall = _stall_line(trace) if trace.settings.get("stall", True) else ""
         body = stall

@@ -7,7 +7,10 @@ import pytest
 
 from easyagent.botskills import _ACTION_FENCES
 from easyagent.plan import tool_status_line
+from easyagent.subagent import automatic_ask_allowed, user_asked_to_consult
 from easyagent.tools import (
+    _drop_result_wrappers,
+    _ensure_shown,
     _keep_partial_reply,
     _next_visible_delta,
     _partial_stream,
@@ -219,4 +222,142 @@ def test_a_slow_python_tool_keeps_its_status(tmp_path, monkeypatch):
     raw = (tmp_path / "bots" / bot["id"] / "chats" / f"{chat['id']}.json").read_text(encoding="utf-8")
     assert "```search_files" not in raw
     assert "```shell" not in raw
+    client.close()
+
+
+_BOTS = ("Helper", "Helper2", "Helper3", "Helper4", "Kiln")
+
+_CONSULT_YES = (
+    "Ask the Helper2 bot to say hello",
+    "Ask Helper4: what is your favourite colour?",
+    "ask Helper what the tide is",
+    "what does Kiln think about the east pier",
+    "what does the Kiln think about the harbor",
+    "check with Helper",
+    "check with the Helper4 bot",
+    "get Helper's opinion",
+    "get the Helper's opinion on the pier",
+    "run this by Helper2",
+    "have Helper say hello",
+    "have the Helper2 bot look at the kiln",
+    "please ask another bot to count the boats",
+    "consult another agent about the kiln",
+    "please use another helper",
+    "delegate to Helper3",
+    "consult the Helper bot",
+    "Helper4: what is your favourite colour?",
+    "Ask the Helper2 bot: say hello",
+)
+
+_CONSULT_NO = (
+    "How many boats are at the east pier?",
+    "Look up how many boats are at the east pier.",
+    "who is Helper3's author",
+    "The notes mention Helper3.",
+    "ask me to explain the pier",
+    "what does the author think about Helper3",
+    "I have Helper3's notes on my desk",
+)
+
+
+@pytest.mark.parametrize("phrase", _CONSULT_YES)
+def test_a_named_consult_is_allowed(phrase):
+    assert user_asked_to_consult(phrase, _BOTS) is True
+    assert automatic_ask_allowed(phrase, _BOTS) is True
+
+
+@pytest.mark.parametrize("phrase", _CONSULT_NO)
+def test_a_plain_or_incidental_mention_is_not_a_consult(phrase):
+    assert user_asked_to_consult(phrase, _BOTS) is False
+    assert automatic_ask_allowed(phrase, _BOTS) is False
+
+
+def test_a_natural_ask_is_still_answered_in_the_parents_words(tmp_path, monkeypatch):
+    """The child reply is context. One no-tools call writes the parent's answer."""
+    from fastapi.testclient import TestClient
+
+    from easyagent.app import create_app
+
+    class Tape:
+        def __init__(self):
+            self.calls = []
+
+        async def __call__(self, *, base_url, api_key, model, messages, timeout=120, tools=None, **_kwargs):
+            self.calls.append({"messages": messages, "tools": tools})
+            system = messages[0]["content"]
+            blob = "\n".join(item.get("content") or "" for item in messages)
+            if "You were given one task" in system:
+                return "Blue, like the east pier."
+            if "The other bot replied:" in blob:
+                return "Helper4's favourite colour is blue."
+            return (
+                "Asking Helper4.\n\n"
+                "```subagent\n"
+                "bot: Helper4\n"
+                "say your favourite colour\n"
+                "```"
+            )
+
+    tape = Tape()
+    monkeypatch.setattr("easyagent.llm.complete", tape)
+    app = create_app(tmp_path)
+    client = TestClient(app)
+    endpoint = client.post(
+        "/api/endpoints",
+        json={"name": "local", "base_url": "http://127.0.0.1:9/v1"},
+    ).json()
+    parent = client.post("/api/bots", json={"name": "Ada", "endpoint_id": endpoint["id"]}).json()
+    client.post("/api/bots", json={"name": "Helper4", "endpoint_id": endpoint["id"]})
+    chat = client.post(f"/api/bots/{parent['id']}/chats").json()
+    sent = client.post(
+        f"/api/bots/{parent['id']}/chats/{chat['id']}/messages",
+        json={"content": "Ask Helper4: what is your favourite colour?"},
+    )
+    assert sent.status_code == 200, sent.text
+    messages = sent.json()["chat"]["messages"]
+    answer = messages[-1]
+    assert answer.get("subagent") is not True
+    assert answer["role"] == "assistant"
+    assert answer["content"] == "Helper4's favourite colour is blue."
+    followups = [call for call in tape.calls if call["tools"] is False]
+    assert len(followups) == 1
+    client.close()
+
+
+def test_a_bare_done_after_a_shell_step_stays_done(tmp_path, monkeypatch):
+    wrapped = '<<<UNTRUSTED source="tool">>>\nSHELL-MARK-91\n<<<END UNTRUSTED>>>'
+    shown = _ensure_shown(
+        "Done.",
+        ["Ran a command."],
+        [{"kind": "shell", "action": "", "command": "echo SHELL-MARK-91", "raw": wrapped}],
+    )
+    assert shown == "Done."
+    assert "UNTRUSTED" not in shown
+    kept = _ensure_shown(
+        "The command finished.",
+        ["Ran a command."],
+        [{"kind": "shell", "action": "", "command": "echo SHELL-MARK-91", "raw": wrapped}],
+    )
+    assert "SHELL-MARK-91" in kept
+    assert "UNTRUSTED" not in kept
+    assert "<<<" not in kept
+    echoed = _drop_result_wrappers("The pier is clear.\n\n" + wrapped)
+    assert "UNTRUSTED" not in echoed
+    assert "The pier is clear." in echoed
+
+    client, bot, chat, recorder = _world(tmp_path, monkeypatch)
+    recorder.reply = ["```shell\necho SHELL-MARK-91\n```", "Done."]
+    sent = client.post(
+        f"/api/bots/{bot['id']}/chats/{chat['id']}/messages",
+        json={"content": "run it"},
+    )
+    assert sent.status_code == 200, sent.text
+    stored = client.get(f"/api/bots/{bot['id']}/chats/{chat['id']}").json()
+    answer = stored["messages"][-1]["content"]
+    assert answer.strip() == "Done."
+    assert "UNTRUSTED" not in answer
+    assert "SHELL-MARK-91" not in answer
+    for message in stored["messages"]:
+        if message.get("role") == "assistant":
+            assert "UNTRUSTED" not in (message.get("content") or "")
     client.close()

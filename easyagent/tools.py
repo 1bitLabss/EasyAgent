@@ -541,6 +541,28 @@ def _drop_open_tool_tags(text: str) -> str:
     return cleaned
 
 
+_RESULT_BLOCK = re.compile(
+    r"<<<UNTRUSTED\b[^>\n]*>>>\n?(.*?)<<<END UNTRUSTED\b[^>\n]*>>>",
+    re.IGNORECASE | re.DOTALL,
+)
+_RESULT_OPEN = re.compile(r"<<<UNTRUSTED\b[^>\n]*>>>", re.IGNORECASE)
+_RESULT_END = re.compile(r"<<<END UNTRUSTED\b[^>\n]*>>>", re.IGNORECASE)
+
+
+def _drop_result_wrappers(text: str) -> str:
+    """Tool-result markers are for the model. They are not part of the reply.
+
+    The words inside a fence stay. The markers themselves do not.
+    """
+    body = text or ""
+    if "untrusted" not in body.lower():
+        return body
+    cleaned = _RESULT_BLOCK.sub(lambda match: match.group(1), body)
+    cleaned = _RESULT_OPEN.sub("", cleaned)
+    cleaned = _RESULT_END.sub("", cleaned)
+    return cleaned
+
+
 def _drop_tool_fences(text: str, *, keep_complete: frozenset[str] = frozenset()) -> str:
     """Remove tool fences. A finished code fence, and an unfinished ```python, stay.
 
@@ -558,7 +580,7 @@ def _drop_tool_fences(text: str, *, keep_complete: frozenset[str] = frozenset())
         cleaned = cleaned[:open_at]
     if _reply_opens_with_tool_fence(source):
         cleaned = cleaned.lstrip("\r\n")
-    return cleaned
+    return _drop_result_wrappers(cleaned)
 
 
 def _visible_stream_text(text: str) -> str:
@@ -5263,37 +5285,46 @@ def _remainder(answer: str, lines: list[str]) -> str:
 
 
 def _ensure_shown(answer: str, lines: list[str], steps: list[dict]) -> str:
-    """A status line alone is not the answer. Raw command text is not the answer either."""
-    text = _drop_missing_command(answer or "")
+    """A status line alone is not the answer. Raw command text is not the answer either.
+
+    A bare Done. stays Done. Tool-result markers are not appended and are not kept.
+    """
+    text = _drop_result_wrappers(_drop_missing_command(answer or ""))
     for step in reversed(steps):
         if step.get("kind") in {"shell", "ssh", "windows"}:
-            text = _drop_raw_command(text, step.get("raw") or "")
-            rest = _remainder(text, lines)
+            raw = _drop_result_wrappers(step.get("raw") or "")
+            text = _drop_raw_command(text, raw)
+            rest = " ".join(_remainder(text, lines).split())
+            if _SHORT_DONE.match(rest):
+                break
             thin = (not rest) or bool(_THIN_ANSWER.match(rest))
-            useful = _useful_output(step.get("command") or "", step.get("raw") or "")
+            useful = _useful_output(step.get("command") or "", raw)
             if thin and useful and not _contains_useful(text, useful):
                 text = _compose(text, useful)
             break
     rest = _remainder(text, lines)
+    if _SHORT_DONE.match(" ".join(rest.split())):
+        return text
     if _YES_NO.match(rest):
         return text
     thin = (not rest) or bool(_THIN_ANSWER.match(rest))
     if not thin or not steps:
         return text
     last = steps[-1]
+    shown_raw = _drop_result_wrappers(last.get("raw") or "")
     if last.get("kind") == "files" and last.get("action") == "read":
-        excerpt = _excerpt(last.get("raw") or "")
+        excerpt = _excerpt(shown_raw)
         if excerpt and excerpt not in text:
             text = _compose(text, excerpt)
     elif last.get("kind") == "project" and last.get("action") == "read":
-        excerpt = _excerpt(last.get("raw") or "")
+        excerpt = _excerpt(shown_raw)
         if excerpt and excerpt not in text:
             text = _compose(text, excerpt)
     elif last.get("kind") == "files" and last.get("action") == "list":
-        blurb = _list_blurb(last.get("raw") or "")
+        blurb = _list_blurb(shown_raw)
         if blurb and blurb not in text:
             text = _compose(text, blurb)
-    return text
+    return _drop_result_wrappers(text)
 
 
 def _complaint_close(lines: list[str], steps: list[dict], messages: list[dict]) -> str:

@@ -62,16 +62,60 @@ def strip_subagent_fences(reply: str, *, keep_shape: bool = False) -> str:
 
 _CONSULT = re.compile(
     r"(?i)\bask\s+another\s+bot\b"
+    r"|\banother\s+(?:bot|agent|helper)\b"
     r"|\bconsult\s+(?:another\s+)?(?:bot|agent)\b"
     r"|\bdelegate\s+to\b"
     r"|\bask\s+(?:the\s+)?(?!me\b|you\b|us\b|him\b|her\b|them\b|someone\b|anybody\b|anyone\b|another\b)"
-    r"([A-Za-z][\w-]{1,40})\s+to\b"
+    r"([A-Za-z][\w-]{1,40})(?:\s+bot)?\s+to\b"
 )
 
 
-def user_asked_to_consult(text: str) -> bool:
-    """The person asked to send work to another bot. A question aimed at them is not that."""
-    return bool(_CONSULT.search(text or ""))
+def _roster(names) -> list[str]:
+    """Bot names this bot can actually ask. Longer names win over a shorter prefix."""
+    found: list[str] = []
+    seen: set[str] = set()
+    for name in names or ():
+        cleaned = " ".join(str(name or "").split())
+        key = cleaned.casefold()
+        if not cleaned or key in _IGNORED_BOTS or key in seen:
+            continue
+        seen.add(key)
+        found.append(cleaned)
+    found.sort(key=len, reverse=True)
+    return found
+
+
+def _named_consult(text: str, names) -> bool:
+    """An asking verb or a colon, tied to a bot that is actually available."""
+    roster = _roster(names)
+    if not roster:
+        return False
+    alt = "|".join(re.escape(name) for name in roster)
+    name = rf"(?:{alt})"
+    patterns = (
+        rf"(?i)\b(?:ask|consult|tell|ping|query|message|delegate)\s+(?:the\s+)?(?:bot\s+)?{name}(?:\s+bot)?\b",
+        rf"(?i)\bwhat\s+does\s+(?:the\s+)?{name}\s+think\b",
+        rf"(?i)\bcheck\s+with\s+(?:the\s+)?{name}(?:\s+bot)?\b",
+        rf"(?i)\bget\s+(?:the\s+)?{name}(?:'s|’s)\s+opinion\b",
+        rf"(?i)\brun\s+this\s+by\s+(?:the\s+)?{name}(?:\s+bot)?\b",
+        rf"(?i)\bhave\s+(?:the\s+)?{name}(?:\s+bot)?\s+[A-Za-z]",
+        rf"(?i)(?:\bask\s+(?:the\s+)?)?{name}(?:\s+bot)?\s*:",
+    )
+    raw = text or ""
+    return any(re.search(pattern, raw) for pattern in patterns)
+
+
+def user_asked_to_consult(text: str, names=None) -> bool:
+    """The person asked to send work to another bot. A question aimed at them is not that.
+
+    A name counts when it is one of the bots available here, and the sentence
+    asks that bot (a common asking verb, or a colon). Naming a bot in passing
+    does not. 'another bot', 'another agent', and 'another helper' do.
+    """
+    raw = text or ""
+    if _CONSULT.search(raw):
+        return True
+    return _named_consult(raw, names)
 
 
 def plain_consult_turn(text: str) -> bool:
@@ -88,13 +132,13 @@ def plain_consult_turn(text: str) -> bool:
     return False
 
 
-def automatic_ask_allowed(text: str) -> bool:
+def automatic_ask_allowed(text: str, names=None) -> bool:
     """A subagent fence sends on its own only outside a plain question.
 
     Chat, a lookup, and a search-and-answer ignore that fence unless the
-    person asked to consult the other bot.
+    person asked to consult the other bot. names are the bots this bot can ask.
     """
-    if user_asked_to_consult(text):
+    if user_asked_to_consult(text, names):
         return True
     return not plain_consult_turn(text)
 

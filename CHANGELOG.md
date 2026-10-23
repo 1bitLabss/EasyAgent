@@ -1,6 +1,8 @@
 # Changelog
 
 ## 0.3.46
+- Asking a bot by name is a consult. "Ask the Helper2 bot to…", "Ask Helper4: …", "what does Kiln think", "check with", "get their opinion", "run this by", and "have them…" count when that bot is one this bot can ask. So does "another bot", "another agent", or "another helper". A plain question that names no bot still does not. A bot named only in passing does not. The answer stays in this bot's own words.
+- A bare "Done." after a tool stays "Done." Tool-result markers never appear in the reply.
 - A tool fence never appears in the reply. A complete fence, a fence split across stream chunks, and a fence cut off by a pause stay out of the live bubble and the saved text. That includes search_files and every other tool name.
 - The live status stays up while a tool is running, including a slow python call, until the turn ends. Tokens from the model do not replace that line.
 - A tool-using reply keeps the model's code. Indentation inside a fence, blank lines, and a short "Done." stay. Only an exact tool-log line is removed. A review, a revision, and the last no-tools answer do not flatten that text.

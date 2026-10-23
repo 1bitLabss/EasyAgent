@@ -5542,6 +5542,22 @@ def _append_error(store: Store, bot_id: str, chat_id: str, detail: str) -> dict:
     return {"reply": shown, "skills_saved": [], "chat": public, "context": stats}
 
 
+def _other_bot_names(store: Store, bot_id: str) -> tuple[str, ...]:
+    """Bots this bot can ask. Its own name is not one of them."""
+    names: list[str] = []
+    try:
+        bots = store.list_bots()
+    except StoreError:
+        return ()
+    for other in bots:
+        if str(other.get("id") or "") == str(bot_id or ""):
+            continue
+        name = " ".join(str(other.get("name") or "").split())
+        if name:
+            names.append(name)
+    return tuple(names)
+
+
 async def _finish_and_maybe_ask(
     store: Store,
     bot_id: str,
@@ -5563,8 +5579,9 @@ async def _finish_and_maybe_ask(
     visible = strip_helper_fences(visible, keep_shape=True)
     ask = parse_subagent(visible)
     user_text = _last_user_text(store.get_chat(bot_id, chat_id).get("messages") or [])
+    names = _other_bot_names(store, bot_id)
     # A plain question does not send another bot just because the reply contains the fence.
-    suppressed = bool(ask) and not automatic_ask_allowed(user_text)
+    suppressed = bool(ask) and not automatic_ask_allowed(user_text, names)
     if suppressed:
         ask = None
     visible = strip_subagent_fences(visible, keep_shape=True)
@@ -5614,7 +5631,7 @@ async def _finish_and_maybe_ask(
         )
     finished = await _ask_named(store, bot_id, chat_id, ask[0], ask[1])
     # The person asked for the other bot. Its reply is context, then this bot answers.
-    if not user_asked_to_consult(user_text):
+    if not user_asked_to_consult(user_text, names):
         return finished
     rows = (finished.get("chat") or {}).get("messages") or []
     last = rows[-1] if rows else {}

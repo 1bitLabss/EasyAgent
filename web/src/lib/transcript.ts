@@ -45,8 +45,17 @@ function queuedDuringReply(row: ChatMessage): boolean {
   return row.chip === "queued" || row.chip === "seen" || row.chip === "held";
 }
 
-/** The open reply stays where it started. Later user lines stay below it. A new reply goes last. */
-export function placeLiveReply(rows: ChatMessage[], live: ChatMessage, stamp: string, replyId: string): ChatMessage[] {
+/** The open reply stays where it started. Later user lines stay below it. A new reply goes last.
+ * `below` is the answer to a message sent during a tool step that had no text yet:
+ * that answer is appended under the person's row, and it stays there.
+ */
+export function placeLiveReply(
+  rows: ChatMessage[],
+  live: ChatMessage,
+  stamp: string,
+  replyId: string,
+  below = false,
+): ChatMessage[] {
   const index = rows.findIndex((row) => {
     if (row.role !== "assistant" || skippableRow(row)) return false;
     if (stamp && row.client_id === stamp) return true;
@@ -68,8 +77,8 @@ export function placeLiveReply(rows: ChatMessage[], live: ChatMessage, stamp: st
   }
   const painted: ChatMessage = { ...live, role: "assistant", client_id: live.client_id || stamp, live: undefined };
   const already = rows.some((row) => row.role === "assistant" && !skippableRow(row));
-  // A later answer goes under every message already on screen.
-  if (already) return [...rows, painted];
+  // A later answer, and the answer to a no-text busy send, go under every message already on screen.
+  if (already || below) return [...rows, painted];
   let at = rows.length;
   while (at > 0) {
     const row = rows[at - 1];

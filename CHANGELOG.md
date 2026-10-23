@@ -1,6 +1,8 @@
 # Changelog
 
 ## 0.3.46
+- A message sent during a tool step stays where it was drawn. The answer to it is drawn under it from the first token to idle, and that message does not jump when the turn settles. A tool step that simply finished does not leave "Paused, say continue to resume". That row stays only when the chain was cut with work left.
+- A pause row that is already above a person's message is not removed when the reply finishes with nothing left to run. The same row says "Finished before pausing", so the message under it does not move. A reply that is already being saved does not gain a pause row.
 - While a side message is waiting, the transcript has one pause row, "Paused, you sent a message". The live status is the only status line. It does not also show "Paused, reading your message — finishing current step", and a finished "Running …" step does not stay on screen.
 - "Paused, say continue to resume" stays only when the interrupted turn still has work: a tool chain that was cut, or text that was cut before the model finished. A reply that was saved complete, with nothing left to run, drops that row on screen and in the saved chat, including after a reload.
 - Typing continue after a paused job saves and shows that word. The model still receives "Resume the checklist where it stopped. Do not start over." The continue row stays above the resumed answer, and a reload shows the same rows.

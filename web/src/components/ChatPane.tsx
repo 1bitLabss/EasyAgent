@@ -670,6 +670,7 @@ export function ChatPane() {
       },
       stamp,
       frozen?.replyId || replyId,
+      Boolean(frozen && !showFrozen),
     );
   }
   if (frozen?.replyId && frozenHasBody(frozen)) {

@@ -7304,8 +7304,6 @@ async def _iter_streamed_model(
 def _abandon_model_error(exc: llm.ProviderError) -> None:
     """Stop is immediate. A client abort is a stop. Anything else is the caller's choice."""
     if turn_mod.cancelled() or "incomplete chunked read" in str(exc).lower():
-        if turn_mod.pause_requested():
-            turn_mod.mark_pause_cut()
         raise turn_mod.TurnCancelled() from exc
 
 
@@ -8298,6 +8296,27 @@ async def run_turn(
         narration_hits.append(spoken)
         return sum(1 for item in narration_hits if _near_line(item, spoken))
 
+    def _chain_is_resumable() -> bool:
+        """A longer chain, a command still running, or an open checklist still has work.
+
+        The tool function has already returned by the time the loop asks. A flag
+        left true is not a running tool, so one finished step is the next turn.
+        """
+        if len(steps) > 1:
+            return True
+        slot = turn_mod.current_slot()
+        if slot is not None and turn_mod._command_running(slot):
+            return True
+        if store is None or not bot_id or not chat_id:
+            return False
+        try:
+            from easyagent.plan import load_plan, progress
+
+            index, total, _label = progress(load_plan(store, bot_id, chat_id))
+        except Exception:
+            return False
+        return total > 1 and 0 < index < total
+
     model_slot = None
     searches_run = 0
     while True:
@@ -8306,7 +8325,16 @@ async def run_turn(
             yield "ledger", json.dumps(_ledger_items())
             return
         if turn_mod.pause_requested():
-            turn_mod.mark_pause_cut()
+            # The tool call has returned. Drop a leftover flag unless a command
+            # is still running, so the next turn does not look mid-tool.
+            slot = turn_mod.current_slot()
+            if slot is not None and not turn_mod._command_running(slot):
+                slot._executing_tools = False
+            if _chain_is_resumable():
+                turn_mod.mark_pause_cut()
+            else:
+                # The step finished. The side message is the next turn, not a resume.
+                turn_mod.take_user_pause()
             yield "pause", "Paused, reading your message"
             return
         redirected = turn_mod.take_redirect()
@@ -8426,8 +8454,9 @@ async def run_turn(
                 return
             if turn_mod.pause_requested():
                 # The text already in hand is the whole answer. Seal it.
-                # The message that arrived is the next turn, not a resume.
-                pass
+                # The cancel flag has to drop too, or the streaming drain
+                # skips the message and a background call answers it instead.
+                turn_mod.take_user_pause()
             elif turn_mod.take_redirect():
                 continue
             else:
@@ -8477,6 +8506,8 @@ async def run_turn(
                         yield event
                     raise
                 # A pause after a whole prose answer seals that answer.
+                # Clear the cancel flag so the streaming drain can answer it.
+                turn_mod.take_user_pause()
         finally:
             if model_slot is not None:
                 model_slot._model_request_active.clear()

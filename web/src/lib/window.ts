@@ -108,6 +108,48 @@ export function dedupeMessages(messages: ChatMessage[]): ChatMessage[] {
   return dropped ? out : messages;
 }
 
+const PAUSE_SENTENCES = new Set([
+  "Paused, you sent a message",
+  "Paused, say continue to resume",
+  "Finished before pausing",
+]);
+
+/** A pause row above a person's message is not dropped when a later snapshot omits it. */
+function holdPauseAboveUser(prev: ChatMessage[] | undefined, incoming: ChatMessage[], settled: boolean): ChatMessage[] {
+  if (!prev) return incoming;
+  const pauseAt = prev.findIndex(
+    (message) => message.kind === "status" && (message.client_id === "pause-you-sent" || PAUSE_SENTENCES.has(message.content || "")),
+  );
+  if (pauseAt < 0) return incoming;
+  const prior = prev[pauseAt];
+  const user = prev.slice(pauseAt + 1).find((message) => message.role === "user");
+  if (!prior || !user) return incoming;
+  const sameUser = (message: ChatMessage) =>
+    message.role === "user" &&
+    ((user.client_id && message.client_id === user.client_id) ||
+      (user.id && message.id === user.id) ||
+      message.content === user.content);
+  const userAt = incoming.findIndex(sameUser);
+  if (userAt < 0) return incoming;
+  if (prior.id && incoming.some((message) => message.id === prior.id)) return incoming;
+  const before = incoming[userAt - 1];
+  if (before?.kind === "status" && PAUSE_SENTENCES.has(before.content || "")) {
+    if (before.client_id || !prior.client_id) return incoming;
+    const next = incoming.slice();
+    next[userAt - 1] = { ...before, client_id: prior.client_id };
+    return next;
+  }
+  const next = incoming.slice();
+  next.splice(userAt, 0, {
+    ...prior,
+    role: "assistant",
+    kind: "status",
+    content: settled ? "Finished before pausing" : prior.content || "Paused, you sent a message",
+    client_id: prior.client_id || "pause-you-sent",
+  });
+  return next;
+}
+
 /** The optimistic pause row and the saved one are the same sentence. Keep the client key so the bubble under it does not remount. */
 function adoptPauseClient(prev: ChatMessage[] | undefined, incoming: ChatMessage[]): ChatMessage[] {
   const local = prev?.find((message) => !message.id && message.client_id === "pause-you-sent" && message.kind === "status");
@@ -120,9 +162,17 @@ function adoptPauseClient(prev: ChatMessage[] | undefined, incoming: ChatMessage
   });
 }
 
+function replySettled(status: string | undefined): boolean {
+  return status === "idle" || status === "stopped" || status === "error";
+}
+
 /** Keep a just-sent row when a poll or refresh snapshot has not caught up. */
-export function retainLocalTail(prev: ChatMessage[] | undefined, incoming: ChatMessage[]): ChatMessage[] {
-  const rows = adoptPauseClient(prev, incoming);
+export function retainLocalTail(
+  prev: ChatMessage[] | undefined,
+  incoming: ChatMessage[],
+  settled = false,
+): ChatMessage[] {
+  const rows = adoptPauseClient(prev, holdPauseAboveUser(prev, incoming, settled));
   if (!prev?.length) return dedupeMessages(rows);
   const incomingIds = new Set(rows.filter((message) => message.id).map((message) => message.id as string));
   const incomingClients = new Set(rows.filter((message) => message.client_id).map((message) => message.client_id as string));
@@ -174,7 +224,11 @@ export function shareChat(prev: unknown, incoming: unknown): unknown {
   const older = prev as Chat;
   const next = incoming as Chat;
   if (!Array.isArray(next.messages)) return incoming;
-  const messages = retainLocalTail(older.messages, shareMessages(older.messages, next.messages));
+  const messages = retainLocalTail(
+    older.messages,
+    shareMessages(older.messages, next.messages),
+    replySettled(next.run?.status),
+  );
   if (
     messages === older.messages &&
     older.id === next.id &&
@@ -226,7 +280,7 @@ export function mergeChat(prev: Chat | undefined, incoming: Chat): Chat {
   const prevStart = prev.window_start ?? 0;
   const loadedHistory = prevStart > 0 || base.length > TAIL;
   if (!loadedHistory) {
-    const kept = retainLocalTail(prev.messages, incomingMessages);
+    const kept = retainLocalTail(prev.messages, incomingMessages, replySettled(incoming.run?.status));
     return windowChat({ ...incoming, messages: kept, message_count: Math.max(total, kept.length) });
   }
   const lastId = base[base.length - 1]?.id;
@@ -236,7 +290,7 @@ export function mergeChat(prev: Chat | undefined, incoming: Chat): Chat {
   }
   const byId = new Map(incomingMessages.map((message) => [message.id, message]));
   const updated = base.map((message) => (message.id && byId.get(message.id)) || message);
-  const merged = retainLocalTail(base, [...updated, ...incomingMessages.slice(at + 1)]);
+  const merged = retainLocalTail(base, [...updated, ...incomingMessages.slice(at + 1)], replySettled(incoming.run?.status));
   return {
     ...incoming,
     messages: merged,

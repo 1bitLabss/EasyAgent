@@ -84,4 +84,21 @@ describe("chat transcript", () => {
     );
     expect(next.map((row) => row.content)).toEqual(["start", "old partial", "also this", "Noted also this."]);
   });
+
+  it("puts the answer to a no-text busy send under that message", () => {
+    const answer = { role: "assistant" as const, content: "The kiln is warm.", client_id: "live-r2" };
+    const during = placeLiveReply(
+      [
+        { id: "u0", role: "user", content: "check the east pier" },
+        { id: "u1", role: "user", content: "and the kiln", chip: "queued" },
+      ],
+      answer,
+      "live-r2",
+      "r2",
+      true,
+    );
+    expect(during.map((row) => row.content)).toEqual(["check the east pier", "and the kiln", "The kiln is warm."]);
+    const grown = placeLiveReply(during, { ...answer, content: "The kiln is warm. Listed." }, "live-r2", "r2", true);
+    expect(grown.map((row) => row.content)).toEqual(["check the east pier", "and the kiln", "The kiln is warm. Listed."]);
+  });
 });

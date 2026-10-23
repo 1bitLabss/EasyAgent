@@ -5,8 +5,10 @@ import json
 from fastapi.testclient import TestClient
 
 from easyagent.app import (
+    FINISHED_BEFORE_PAUSING,
     PAUSED_SAY_CONTINUE,
     PAUSED_YOU_SENT,
+    _drop_pause_rows,
     create_app,
 )
 
@@ -157,4 +159,96 @@ def test_a_mid_text_cut_still_says_continue_after_reload(tmp_path, monkeypatch):
     assert saved["run"]["status"] == "paused"
     again = client.get(f"/api/bots/{bot['id']}/chats/{chat['id']}").json()
     assert _visible(again["messages"]) == stored
+    client.close()
+
+
+def test_one_finished_tool_does_not_leave_say_continue(tmp_path, monkeypatch):
+    """A side question during one tool step is the next turn. Nothing is left to resume."""
+    import easyagent.llm as llm
+
+    app, client, bot, chat = _world(tmp_path)
+    store = app.state.store
+    calls = {"model": 0, "tools": 0}
+
+    async def execute(_store, request, bot_id=None):
+        del bot_id
+        calls["tools"] += 1
+        from easyagent import turn as turn_mod
+        from easyagent.hermes_busy import _hm_handle_running_session_message
+        from easyagent.plan import enqueue
+
+        slot = turn_mod.slot_for(_store, chat["id"])
+        slot._executing_tools = True
+        slot.sealing = False
+        enqueue(_store, bot["id"], chat["id"], "and the kiln", client_id="c-kiln")
+        _hm_handle_running_session_message(_store, bot["id"], chat["id"], "and the kiln")
+        return f"listed {request.path}"
+
+    async def stream_complete(**kwargs):
+        calls["model"] += 1
+        if calls["model"] == 1:
+            llm._store_native_calls({
+                0: {"id": "call_1", "name": "list_dir", "arguments": '{"path": "pier-1"}'},
+            })
+            if False:
+                yield ""
+            return
+        yield "The kiln is warm."
+
+    async def complete(**_kwargs):
+        return "The kiln is warm."
+
+    monkeypatch.setattr("easyagent.tools.execute", execute)
+    monkeypatch.setattr("easyagent.llm.stream_complete", stream_complete)
+    monkeypatch.setattr("easyagent.llm.complete", complete)
+    url = f"/api/bots/{bot['id']}/chats/{chat['id']}/messages"
+    with client.stream(
+        "POST",
+        url,
+        json={"content": "check the east pier"},
+        headers={"Accept": "text/event-stream"},
+    ) as response:
+        assert response.status_code == 200, response.read()
+        body = response.read().decode()
+    done = [item for item in _events(body) if item.get("type") == "done"]
+    assert done, body[-800:]
+    saved = client.get(f"/api/bots/{bot['id']}/chats/{chat['id']}").json()
+    stored = _visible(saved["messages"])
+    screen = _visible(done[-1]["chat"]["messages"])
+    assert calls["tools"] == 1, calls
+    assert stored == screen
+    assert stored == [
+        "check the east pier",
+        "and the kiln",
+        "The kiln is warm.",
+    ]
+    assert PAUSED_SAY_CONTINUE not in stored
+    assert PAUSED_YOU_SENT not in stored
+    assert FINISHED_BEFORE_PAUSING not in stored
+    assert saved["run"]["status"] != "paused"
+    client.close()
+
+
+def test_a_pause_row_above_a_message_is_not_deleted(tmp_path):
+    """Retiring the row keeps its place, so the message under it does not jump."""
+    app, client, bot, chat = _world(tmp_path)
+    store = app.state.store
+    doc = store.get_chat(bot["id"], chat["id"])
+    doc["messages"] = [
+        {"id": "u1", "role": "user", "content": "check the east pier", "created_at": "2026-10-22T18:00:00Z"},
+        {"id": "a1", "role": "assistant", "content": "The east pier is listed.", "created_at": "2026-10-22T18:00:30Z"},
+        {"id": "pause", "role": "assistant", "kind": "status", "content": PAUSED_YOU_SENT, "created_at": "2026-10-22T18:00:33Z"},
+        {"id": "u2", "role": "user", "content": "and the kiln", "created_at": "2026-10-22T18:00:34Z"},
+    ]
+    store.save_chat(doc)
+    _drop_pause_rows(store, bot["id"], chat["id"])
+    kept = store.get_chat(bot["id"], chat["id"])
+    rows = _visible(kept["messages"])
+    assert rows == [
+        "check the east pier",
+        "The east pier is listed.",
+        FINISHED_BEFORE_PAUSING,
+        "and the kiln",
+    ]
+    assert next(item["id"] for item in kept["messages"] if item.get("content") == FINISHED_BEFORE_PAUSING) == "pause"
     client.close()

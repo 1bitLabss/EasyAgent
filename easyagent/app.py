@@ -4262,6 +4262,7 @@ WEDGE_TEXT = "This job was still marked running, but nothing was in flight, so I
 PAUSE_TEXT = "Paused, reading your message"
 PAUSED_YOU_SENT = "Paused, you sent a message"
 PAUSED_SAY_CONTINUE = "Paused, say continue to resume"
+FINISHED_BEFORE_PAUSING = "Finished before pausing"
 RESUME_LINE = "Resume the checklist where it stopped. Do not start over."
 WEDGE_SECONDS = 60
 
@@ -4448,16 +4449,39 @@ def _omit_live_ids(store: Store, bot_id: str, chat_id: str, ids: list[str]) -> d
     return chat
 
 
+def _user_after(messages: list, index: int) -> bool:
+    return any(
+        isinstance(item, dict) and item.get("role") == "user"
+        for item in messages[index + 1 :]
+    )
+
+
 def _drop_pause_rows(store: Store, bot_id: str, chat_id: str) -> None:
-    """Remove pause sentences that are no longer true. Nothing is yielded between the two saves."""
+    """Remove pause sentences that are no longer true. Nothing is yielded between the two saves.
+
+    A pause row that already sits above a person's message is not deleted.
+    Deleting it would pull that message up. The same row says the reply finished.
+    """
     try:
         chat = store.get_chat(bot_id, chat_id)
     except StoreError:
         return
     messages = [item for item in chat.get("messages") or [] if isinstance(item, dict)]
     ids: list[str] = []
-    for message in messages:
-        if not _pause_status(message) or not message.get("id"):
+    held = False
+    for index, message in enumerate(messages):
+        if not _pause_status(message):
+            continue
+        if _user_after(messages, index):
+            if message.get("content") != FINISHED_BEFORE_PAUSING:
+                message["content"] = FINISHED_BEFORE_PAUSING
+                message["kind"] = "status"
+                message["role"] = "assistant"
+                message.pop("live", None)
+                message.pop("interrupted", None)
+                held = True
+            continue
+        if not message.get("id"):
             continue
         ids.append(str(message["id"]))
         message.pop("kind", None)
@@ -4465,6 +4489,14 @@ def _drop_pause_rows(store: Store, bot_id: str, chat_id: str) -> None:
         message["role"] = "assistant"
         message["content"] = ""
         message["live"] = True
+    if held and not ids:
+        chat["messages"] = messages
+        chat["updated_at"] = now_iso()
+        try:
+            store.save_chat(chat)
+        except (StoreError, OSError, HTTPException):
+            _log.warning("Could not keep the finished pause line.")
+        return
     if not ids:
         return
     chat["messages"] = messages

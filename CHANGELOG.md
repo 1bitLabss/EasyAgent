@@ -1,6 +1,7 @@
 # Changelog
 
 ## 0.3.46
+- A Windows desktop without timezone data still saves a routine from the confirm card, runs it, and posts one missed run when the app opens again. The Windows zone name is kept, and the clock uses the local offset when that zone's data cannot load. The scheduler starts with the app.
 - A normal chat says what this bot can do at the top of its prompt: files, shell, web search and browser, routines, helper bots, other bots, MCP connectors, skills and memory, and chat bridges. That list is built from the feature registry. A small context window, a disabled tool, and a short tool list do not remove it. A cron job, a schedule, a recurring task, every morning, a reminder, a daily check, or keeping an eye on something proposes a routine card in the first reply. The answer names a routine. The bot does not answer that it has no scheduler. A question about the browser, MCP, a helper, a bridge, skills, or memory is answered as something the bot can do.
 - Asking a bot by name is a consult. "Ask the Helper2 bot to…", "Ask Helper4: …", "what does Kiln think", "check with", "get their opinion", "run this by", and "have them…" count when that bot is one this bot can ask. So does "another bot", "another agent", or "another helper". A plain question that names no bot still does not. A bot named only in passing does not. The answer stays in this bot's own words.
 - A bare "Done." after a tool stays "Done." Tool-result markers never appear in the reply.

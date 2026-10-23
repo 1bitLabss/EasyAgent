@@ -110,7 +110,7 @@ def due_slot(schedule: dict, now: datetime) -> str | None:
     created_at = _parse_time(schedule.get("created_at") or "")
     if created_at is None:
         return None
-    moment = _in_zone(now, zone_for(schedule))
+    moment = _in_zone(now, _slot_zone(schedule))
     kind = schedule.get("kind")
     if kind == "cron":
         slot = latest_cron_slot(schedule.get("cron") or "", moment, created_at)
@@ -161,12 +161,15 @@ async def run_due_schedules(store: Store, now: datetime | None = None) -> list[d
             for schedule in schedules:
                 try:
                     slot = due_slot(schedule, moment)
-                except (ScheduleError, ValueError, TypeError):
+                except (ScheduleError, ValueError, TypeError, ZoneInfoNotFoundError):
                     continue
                 if not slot or schedule.get("last_slot") == slot:
                     continue
                 schedule["last_slot"] = slot
-                stamp_next(schedule, moment)
+                try:
+                    stamp_next(schedule, moment)
+                except (ScheduleError, ValueError, TypeError, ZoneInfoNotFoundError):
+                    schedule["next_run"] = None
                 changed = True
                 if schedule.get("paused"):
                     continue
@@ -407,7 +410,7 @@ def windows_zone_name() -> str:
 
         with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, r"SYSTEM\CurrentControlSet\Control\TimeZoneInformation") as key:
             value, _kind = winreg.QueryValueEx(key, "TimeZoneKeyName")
-    except OSError:
+    except (OSError, ImportError):
         return ""
     return str(value or "").strip()
 
@@ -480,12 +483,44 @@ def zone_for(schedule: dict):
     if name in {"UTC", "Etc/UTC", "GMT", "Etc/GMT"}:
         try:
             return ZoneInfo("UTC")
-        except ZoneInfoNotFoundError:
+        except (ZoneInfoNotFoundError, ModuleNotFoundError):
             return timezone.utc
     try:
         return ZoneInfo(name)
-    except ZoneInfoNotFoundError:
+    except (ZoneInfoNotFoundError, ModuleNotFoundError):
         return None
+
+
+def _offset_zone():
+    """The process clock. Windows keeps a fixed offset when the zone database is missing."""
+    return _local_tzinfo() or timezone.utc
+
+
+def _slot_zone(schedule: dict):
+    """Zone for a due slot. A recognized name with no zone data uses the process offset."""
+    name = iana_zone((schedule.get("timezone") or "").strip())
+    if not name:
+        return None
+    found = zone_for(schedule)
+    if found is not None:
+        return found
+    if _zone_ok(name):
+        return _offset_zone()
+    return None
+
+
+def _clock_zone(schedule: dict):
+    """Zone for the next wall time. A missing zone database uses the process offset."""
+    found = _slot_zone(schedule)
+    if found is not None:
+        return found
+    local = local_zone_name()
+    loaded = zone_for({"timezone": local}) if local else None
+    if loaded is not None:
+        return loaded
+    if local and _zone_ok(local):
+        return _offset_zone()
+    return timezone.utc
 
 
 def _in_zone(moment: datetime, zone: ZoneInfo | None) -> datetime:
@@ -524,7 +559,7 @@ def is_quiet_text(text: str) -> bool:
 
 
 def slot_moment(schedule: dict, slot: str) -> datetime | None:
-    zone = zone_for(schedule) or timezone.utc
+    zone = _slot_zone(schedule) or timezone.utc
     if slot.startswith("cron:"):
         try:
             naive = datetime.fromisoformat(slot.split(":", 1)[1])
@@ -763,10 +798,7 @@ def preview(schedule: dict, now: datetime | None = None) -> str:
 def next_run(schedule: dict, now: datetime) -> datetime | None:
     if schedule.get("paused"):
         return None
-    zone = zone_for(schedule) or ZoneInfo(local_zone_name()) if _zone_ok(local_zone_name()) else timezone.utc
-    if not isinstance(zone, ZoneInfo) and zone_for(schedule) is None:
-        current = datetime.now().astimezone().tzinfo or timezone.utc
-        zone = current
+    zone = _clock_zone(schedule)
     moment = now if now.tzinfo else now.replace(tzinfo=timezone.utc)
     kind = schedule.get("kind")
     if kind == "once":
@@ -802,12 +834,15 @@ def next_run(schedule: dict, now: datetime) -> datetime | None:
 
 def _zone_ok(name: str) -> bool:
     candidate = iana_zone(name)
+    if not candidate:
+        return False
     if candidate in {"UTC", "Etc/UTC", "GMT", "Etc/GMT"}:
         return True
     try:
         ZoneInfo(candidate)
-    except ZoneInfoNotFoundError:
-        return False
+    except (ZoneInfoNotFoundError, ModuleNotFoundError):
+        # A Windows zone key still names a real place when tzdata is not on disk.
+        return candidate in set(_WINDOWS_ZONES.values())
     except Exception:
         return False
     return True

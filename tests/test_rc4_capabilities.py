@@ -1,7 +1,11 @@
 """The capability list stays in the prompt, and a schedule ask proposes a routine."""
 
+import asyncio
+import inspect
 import sys
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from zoneinfo import ZoneInfoNotFoundError
 
 from fastapi.testclient import TestClient
 
@@ -196,3 +200,112 @@ def test_the_bot_does_not_deny_a_feature_it_has(tmp_path, monkeypatch):
     blocked = steer_reply(None, None, "can you use the shell?", "That command is blocked.")
     assert blocked == "That command is blocked."
     client.close()
+
+
+def test_windows_without_tzdata_confirms_runs_and_catches_up(tmp_path, monkeypatch):
+    """A Windows desktop whose zone database is missing.
+
+    The registry module is absent, ZoneInfo cannot load, and the process clock is a
+    fixed Central offset. The Routines section stays in the prompt. A daily check
+    shows a confirm card, saves, and does not run while the app is closed. The next
+    start posts that one missed slot and does not post it again.
+    """
+    import easyagent.schedule as schedule
+    from easyagent.tools import _routine_from_body
+
+    central = timezone(timedelta(hours=-5), "Central Standard Time")
+
+    def missing(_name):
+        raise ZoneInfoNotFoundError(str(_name))
+
+    monkeypatch.setattr(sys, "platform", "win32")
+    monkeypatch.setattr(schedule, "ZoneInfo", missing)
+    monkeypatch.setattr(schedule, "_local_tzinfo", lambda: central)
+    monkeypatch.setattr(schedule, "_localtime_zone", lambda: "")
+    monkeypatch.setenv("EASYAGENT_SCHEDULE_TICK", "3600")
+    assert schedule.windows_zone_name() == ""
+    assert schedule.local_zone_name() == "America/Chicago"
+    assert "sys.platform" not in inspect.getsource(schedule.schedule_loop)
+    assert "sys.platform" not in inspect.getsource(schedule.run_due_schedules)
+    assert "start_at_login" not in inspect.getsource(schedule.schedule_loop)
+    assert "win32" not in inspect.getsource(_routine_from_body)
+    drafted = schedule.compile_routine({
+        "name": "Clock",
+        "prompt": "Say the time.",
+        "daily": "8:00 AM",
+        "timezone": "Central Standard Time",
+        "created_at": "2026-10-01T00:00:00+00:00",
+    })
+    assert drafted["timezone"] == "America/Chicago"
+    assert drafted["next_run"]
+    try:
+        schedule.compile_routine({
+            "name": "Clock",
+            "prompt": "Say the time.",
+            "daily": "8:00 AM",
+            "timezone": "Not A Real Zone",
+            "created_at": "2026-10-01T00:00:00+00:00",
+        })
+    except schedule.ScheduleError as exc:
+        assert "not recognized" in str(exc)
+    else:
+        raise AssertionError("an unknown zone was accepted")
+
+    class Recorder:
+        async def __call__(self, *, base_url, api_key, model, messages, timeout=120, **_extra):
+            return "The pier is quiet."
+
+    monkeypatch.setattr("easyagent.llm.complete", Recorder())
+    app = create_app(tmp_path)
+    client = TestClient(app)
+    endpoint = client.post("/api/endpoints", json={"name": "local", "base_url": "http://127.0.0.1:9/v1"}).json()
+    bot = client.post("/api/bots", json={"name": "Ada", "endpoint_id": endpoint["id"]}).json()
+    chat = client.post(f"/api/bots/{bot['id']}/chats").json()
+    store = app.state.store
+    assert "# Routines" in _system(store, bot["id"], chat["id"])
+    sent = client.post(
+        f"/api/bots/{bot['id']}/chats/{chat['id']}/messages",
+        json={"content": "check daily"},
+    )
+    assert sent.status_code == 200, sent.text
+    answer = sent.json()["chat"]["messages"][-1]
+    assert "routine" in answer["content"].lower()
+    assert answer["proposal"]["kind"] == "routine"
+    cards = client.get(f"/api/bots/{bot['id']}/approvals").json()
+    assert cards and cards[0]["rule"] == "routine"
+    assert "Save this routine?" in cards[0]["why"]
+    approved = client.post(
+        f"/api/bots/{bot['id']}/approvals/{cards[0]['id']}",
+        json={"decision": "approve"},
+    )
+    assert approved.status_code == 200, approved.text
+    saved = store.list_schedules(bot["id"])
+    assert len(saved) == 1
+    assert saved[0]["name"] == "Daily check"
+    assert saved[0]["timezone"] == "America/Chicago"
+    assert saved[0]["cron"] == "0 8 * * *"
+    assert not saved[0].get("last_slot")
+    client.close()
+
+    def routine_rows():
+        rows = []
+        for item in store.list_chats(bot["id"]):
+            full = store.get_chat(bot["id"], item["id"])
+            rows.extend(message for message in full.get("messages") or [] if message.get("routine_name"))
+        return rows
+
+    assert routine_rows() == []
+    created = datetime.fromisoformat(saved[0]["created_at"])
+    day = (created.astimezone(central) + timedelta(days=1)).date()
+    missed = datetime(day.year, day.month, day.day, 10, 0, tzinfo=central)
+    fired = asyncio.run(schedule.run_due_schedules(store, missed))
+    assert len(fired) == 1
+    assert fired[0]["status"] == "ok"
+    posted = routine_rows()
+    assert len(posted) == 1
+    assert posted[0]["routine_name"] == "Daily check"
+    assert posted[0]["content"] == "The pier is quiet."
+    stored = store.list_schedules(bot["id"])[0]
+    assert stored["last_slot"] == f"cron:{day.isoformat()}T08:00"
+    assert asyncio.run(schedule.run_due_schedules(store, missed)) == []
+    assert routine_rows() == posted

@@ -64,6 +64,7 @@ class Slot:
         self._turn_user_intervened = False
         self._supports_active_turn_redirect = True
         self.pause_for_user = False
+        self.side_answer = False
         # True only while the model read is waiting on the next line, not while a token is being saved.
         self.in_model_read = False
         # True after this reply's tokens are in hand, until the next model call or tool.
@@ -270,6 +271,7 @@ def bind(store, chat_id: str, bot_id: str = "", *, resume: bool = False) -> Slot
     slot.user_stop = False
     slot.redirect = False
     slot.pause_for_user = False
+    slot.side_answer = False
     slot.sealing = False
     slot.late_arrival = False
     slot.in_model_read = False

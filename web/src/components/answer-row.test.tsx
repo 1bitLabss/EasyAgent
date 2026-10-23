@@ -144,8 +144,8 @@ describe("a finished turn has an answer row", () => {
       {
         id: "a-empty",
         role: "assistant",
-        content: "",
-        thinking: "planning the pier",
+        kind: "status",
+        content: "Interrupted, resuming",
         created_at: "2026-10-22T18:00:33Z",
       },
       {
@@ -165,7 +165,8 @@ describe("a finished turn has an answer row", () => {
     );
     expect(document.querySelector(".bubble-bot")).toBeNull();
     expect(document.querySelector("[data-testid=thinking-panel]")).toBeNull();
-    expect(document.querySelector("[data-testid=interrupted-resuming]")?.textContent).toBe("Interrupted, resuming");
+    expect(document.querySelector("[data-testid=status-note]")?.textContent).toBe("Interrupted, resuming");
+    expect(document.querySelector("[data-testid=interrupted-resuming]")).toBeNull();
     expect(document.querySelector("[data-testid=pickup-card]")?.textContent).toBe("Picked up where it stopped.");
   });
 

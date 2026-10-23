@@ -713,9 +713,17 @@ def note_new_generation(store: Store, bot_id: str, chat_id: str) -> None:
         if not isinstance(message, dict):
             continue
         if message.get("role") == "assistant" and message.get("live"):
-            if str(message.get("content") or "").strip():
-                message["interrupted"] = True
-            message.pop("live", None)
+            has_body = bool(
+                str(message.get("content") or "").strip()
+                or message.get("attachment")
+                or message.get("choices")
+            )
+            if has_body:
+                if str(message.get("content") or "").strip():
+                    message["interrupted"] = True
+                message.pop("live", None)
+            else:
+                messages.remove(message)
             chat["updated_at"] = now_iso()
             store.save_chat(chat)
             return

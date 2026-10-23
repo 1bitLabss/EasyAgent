@@ -1728,6 +1728,9 @@ def create_app(data_dir: str | Path | None = None) -> FastAPI:
         if mode:
             async with chat_lock(store, chat_id):
                 return _apply_mode_command(store, bot_id, chat_id, mode, content)
+        if attachment is None and _continue_request(content) and not turn_mod.is_busy(store, chat_id):
+            if _waiting_on_continue(store.get_chat(bot_id, chat_id)):
+                return await resume_chat(bot_id, chat_id, request)
         async with turn_mod.boundary(store, chat_id):
             if client_id and _message_by_client(store.get_chat(bot_id, chat_id), client_id):
                 return _public_chat(store, store.get_chat(bot_id, chat_id))
@@ -1941,19 +1944,21 @@ def create_app(data_dir: str | Path | None = None) -> FastAPI:
         undismiss_plan(store, bot_id, chat_id)
         _close_resume_offer(store, bot_id, chat_id)
         line = "Resume the checklist where it stopped. Do not start over."
+        replaced = _replace_continue_prompt(store, bot_id, chat_id, line)
         slot = turn_mod.slot_for(store, chat_id)
         slot.user_stop = False
         slot.drain_chains = 0
         if _wants_stream(request):
             return StreamingResponse(
-                _stream_resume(store, bot_id, chat_id, line),
+                _stream_resume(store, bot_id, chat_id, "" if replaced else line),
                 media_type="text/event-stream",
                 headers={"Cache-Control": "no-store", "X-Accel-Buffering": "no"},
             )
         try:
             async with chat_lock(store, chat_id):
                 turn_mod.bind(store, chat_id, bot_id=bot_id, resume=True)
-                _save_user_turn(store, bot_id, chat_id, line)
+                if not replaced:
+                    _save_user_turn(store, bot_id, chat_id, line)
                 return await _reply_json(store, bot_id, chat_id)
         finally:
             await _finish_turn(store, bot_id, chat_id)
@@ -4232,29 +4237,169 @@ def _drop_activity(chat: dict) -> None:
 
 WEDGE_TEXT = "This job was still marked running, but nothing was in flight, so I paused it. Resume it, or dismiss it."
 PAUSE_TEXT = "Paused, reading your message"
+PAUSED_YOU_SENT = "Paused, you sent a message"
+PAUSED_SAY_CONTINUE = "Paused, say continue to resume"
 WEDGE_SECONDS = 60
 
 
+def _assistant_has_body(message: dict) -> bool:
+    """Words, a file, or choices. Thinking by itself is not a row."""
+    if str(message.get("content") or "").strip():
+        return True
+    if message.get("attachment"):
+        return True
+    if message.get("choices"):
+        return True
+    return False
+
+
+def _status_line(text: str) -> dict:
+    return {
+        "id": new_id(),
+        "role": "assistant",
+        "kind": "status",
+        "content": text,
+        "created_at": now_iso(),
+    }
+
+
 def _close_partial_for_pause(store: Store, bot_id: str, chat_id: str) -> None:
-    """Keep the reply that already arrived, and stay on this run."""
+    """Keep text already written. An assistant row with no words is not saved."""
     try:
         chat = store.get_chat(bot_id, chat_id)
     except StoreError:
         return
+    turn_mod.slot_for(store, chat_id).side_answer = True
     _drop_activity(chat)
+    kept: list = []
+    noted = False
+    dropped = False
     for message in chat.get("messages") or []:
-        if not isinstance(message, dict) or message.get("role") != "assistant" or not message.get("live"):
+        if not isinstance(message, dict):
+            kept.append(message)
             continue
-        if str(message.get("content") or "").strip() or str(message.get("thinking") or "").strip():
-            message["interrupted"] = True
+        if message.get("role") != "assistant" or not message.get("live"):
+            kept.append(message)
+            continue
+        if message.get("kind") in {"status", "activity", "pickup"} or message.get("about") == "activity":
+            kept.append(message)
+            continue
         message.pop("live", None)
         message.pop("error", None)
+        # The status line below is the pause the person sees. The older
+        # "paused — you sent a message" mark would be a second sentence.
+        message.pop("interrupted", None)
+        if not _assistant_has_body(message):
+            dropped = True
+            continue
+        kept.append(message)
+        if not noted:
+            kept.append(_status_line(PAUSED_YOU_SENT))
+            noted = True
+    # A blank live row can be removed on its own. Removing it in the same
+    # write as a new status line makes the store keep the blank row.
+    if dropped and noted:
+        chat["messages"] = [
+            item
+            for item in kept
+            if not (
+                isinstance(item, dict)
+                and item.get("kind") == "status"
+                and item.get("content") == PAUSED_YOU_SENT
+            )
+        ]
+        try:
+            store.save_chat(chat)
+        except (StoreError, OSError, HTTPException):
+            _log.warning("Could not drop the empty paused reply.")
+    chat["messages"] = kept
     _apply_run(chat, status="running", step=PAUSE_TEXT)
     chat["updated_at"] = now_iso()
     try:
         store.save_chat(chat)
     except (StoreError, OSError, HTTPException):
         _log.warning("Could not save the paused reply.")
+
+
+def _park_side_answer(store: Store, bot_id: str, chat_id: str) -> dict | None:
+    """The first job stopped so this message could be answered. Say so, once.
+
+    The tool calls that were in flight are not in the transcript, so this does
+    not restart them. Saying continue does. The row is the same words on screen.
+    """
+    slot = turn_mod.slot_for(store, chat_id)
+    if not getattr(slot, "side_answer", False):
+        return None
+    if slot.user_stop:
+        slot.side_answer = False
+        return None
+    try:
+        chat = store.get_chat(bot_id, chat_id)
+    except StoreError:
+        slot.side_answer = False
+        return None
+    messages = [item for item in chat.get("messages") or [] if isinstance(item, dict)]
+    if not any(item.get("kind") == "status" and item.get("content") == PAUSED_SAY_CONTINUE for item in messages):
+        messages.append(_status_line(PAUSED_SAY_CONTINUE))
+        chat["messages"] = messages
+    _apply_run(chat, status="paused", step="")
+    chat["updated_at"] = now_iso()
+    try:
+        store.save_chat(chat)
+    except (StoreError, OSError, HTTPException):
+        _log.warning("Could not save the paused job.")
+        return None
+    slot.side_answer = False
+    try:
+        return _public_chat(store, store.get_chat(bot_id, chat_id))
+    except StoreError:
+        return None
+
+
+def _replace_continue_prompt(store: Store, bot_id: str, chat_id: str, line: str) -> bool:
+    """The continue row becomes the resume line. A status row cannot be deleted."""
+    try:
+        chat = store.get_chat(bot_id, chat_id)
+    except StoreError:
+        return False
+    replaced = False
+    for message in chat.get("messages") or []:
+        if not (
+            isinstance(message, dict)
+            and message.get("kind") == "status"
+            and message.get("content") == PAUSED_SAY_CONTINUE
+        ):
+            continue
+        message["role"] = "user"
+        message["content"] = line
+        message.pop("kind", None)
+        message.pop("live", None)
+        message.pop("interrupted", None)
+        replaced = True
+        break
+    if not replaced:
+        return False
+    chat["updated_at"] = now_iso()
+    try:
+        store.save_chat(chat)
+    except (StoreError, OSError, HTTPException):
+        return False
+    return True
+
+
+def _continue_request(content: str) -> bool:
+    text = " ".join((content or "").split()).strip().lower().rstrip(".!")
+    return text == "continue"
+
+
+def _waiting_on_continue(chat: dict) -> bool:
+    run = chat.get("run") if isinstance(chat.get("run"), dict) else {}
+    if run.get("status") != "paused":
+        return False
+    return any(
+        isinstance(item, dict) and item.get("kind") == "status" and item.get("content") == PAUSED_SAY_CONTINUE
+        for item in chat.get("messages") or []
+    )
 
 
 async def _coalesce_user_messages(store: Store, bot_id: str, chat_id: str) -> None:
@@ -4295,9 +4440,14 @@ async def _json_after_pause(store: Store, bot_id: str, chat_id: str) -> dict:
             chat = store.get_chat(bot_id, chat_id)
         except StoreError:
             return {"reply": "", "chat": None}
-        public = _public_chat(store, chat)
+        parked = _park_side_answer(store, bot_id, chat_id)
+        public = parked or _public_chat(store, chat)
         return {"reply": "", "chat": public, "context": public.get("context")}
-    return await _reply_json(store, bot_id, chat_id, continue_run=True)
+    result = await _reply_json(store, bot_id, chat_id, continue_run=True)
+    parked = _park_side_answer(store, bot_id, chat_id)
+    if isinstance(result, dict) and parked is not None:
+        result = {**result, "chat": parked}
+    return result
 
 
 async def _answer_after_pause(store: Store, bot_id: str, chat_id: str, *, emit_done: bool):
@@ -4321,9 +4471,11 @@ async def _answer_after_pause(store: Store, bot_id: str, chat_id: str, *, emit_d
             continue
         break
     if taken == 0:
+        parked = _park_side_answer(store, bot_id, chat_id)
         if emit_done:
             try:
-                yield _sse({"type": "done", "chat": _public_chat(store, store.get_chat(bot_id, chat_id))})
+                chat = parked or _public_chat(store, store.get_chat(bot_id, chat_id))
+                yield _sse({"type": "done", "chat": chat})
             except StoreError:
                 return
         return
@@ -4793,8 +4945,11 @@ async def _finish_turn(store: Store, bot_id: str, chat_id: str) -> None:
             from easyagent.plan import release_hold_for_send
 
             slot.user_stop = False
+            slot.side_answer = False
             release_hold_for_send(store, bot_id, chat_id)
             _force_clear_running(store, bot_id, chat_id, "you pressed Stop")
+        else:
+            _park_side_answer(store, bot_id, chat_id)
         from easyagent.hermes_busy import handoff_leftover_steer
 
         handoff_leftover_steer(store, bot_id, chat_id)
@@ -5040,14 +5195,15 @@ def _pause_for_resume(store: Store, bot_id: str, chat_id: str) -> None:
     except StoreError:
         return
     messages = []
+    dropped_blank = False
     for message in chat.get("messages") or []:
         if isinstance(message, dict) and message.get("about") == "activity":
             continue
         if message.get("role") == "assistant" and message.get("live"):
             message.pop("live", None)
             message.pop("error", None)
-            # An interrupted turn with no words yet is a status row. An empty
-            # assistant bubble with only a thinking panel is not the reply.
+            # "Interrupted, resuming" is only true when this process is about
+            # to resume. With auto-resume off, an empty row is not saved.
             content = str(message.get("content") or "")
             kind = str(message.get("kind") or "")
             if (
@@ -5056,6 +5212,9 @@ def _pause_for_resume(store: Store, bot_id: str, chat_id: str) -> None:
                 and not (message.get("choices") or [])
                 and kind not in {"status", "pickup", "resume-note", "resume-offer"}
             ):
+                if not _auto_resume_on(bot):
+                    dropped_blank = True
+                    continue
                 message["kind"] = "status"
                 message["content"] = "Interrupted, resuming"
                 message.pop("thinking", None)
@@ -5083,6 +5242,12 @@ def _pause_for_resume(store: Store, bot_id: str, chat_id: str) -> None:
             text = f"This job stopped during {activity}. Resume it, or dismiss it."
         kind = "resume-offer"
         chat.pop("resume_now", None)
+    if dropped_blank:
+        chat["messages"] = messages
+        try:
+            store.save_chat(chat)
+        except (StoreError, OSError):
+            _log.warning("Could not drop the empty reply before resume.")
     messages.append({
         "id": new_id(),
         "role": "assistant",
@@ -6473,6 +6638,9 @@ async def _stream_reply(
                 result = {"chat": _public_chat(store, store.get_chat(bot_id, chat_id)), "reply": result.get("reply")}
             except StoreError:
                 pass
+        parked = _park_side_answer(store, bot_id, chat_id)
+        if parked is not None:
+            result = {**result, "chat": parked}
         if emit_done:
             from easyagent.safety import list_pending
 
@@ -6632,8 +6800,9 @@ async def _emit_run(store: Store, bot_id: str, chat_id: str, producer, *, resume
 
 async def _stream_resume(store: Store, bot_id: str, chat_id: str, content: str):
     async def produce():
-        message = _save_user_turn(store, bot_id, chat_id, content)
-        yield _sse({"type": "user", "message": message})
+        if content:
+            message = _save_user_turn(store, bot_id, chat_id, content)
+            yield _sse({"type": "user", "message": message})
         async for chunk in _stream_reply(store, bot_id, chat_id):
             yield chunk
 

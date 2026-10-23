@@ -1106,6 +1106,19 @@ def create_app(data_dir: str | Path | None = None) -> FastAPI:
         card = resolve_card(card_id, body.decision, bot_id)
         if card is None or card.bot_id != bot_id:
             raise HTTPException(404, "That approval card is not waiting.")
+        proposal = card.proposal or {}
+        if proposal.get("apply_on_approve") and isinstance(proposal.get("spec"), dict):
+            proposal["apply_on_approve"] = False
+            if card.decision in {"approve", "always"}:
+                from easyagent.schedule import apply_confirmed
+
+                try:
+                    apply_confirmed(store, bot_id, proposal["spec"])
+                except (ScheduleError, StoreError) as exc:
+                    raise HTTPException(400, str(exc)) from exc
+            from easyagent.safety import _PENDING
+
+            _PENDING.pop(card.id, None)
         return {"ok": True, "decision": card.decision}
 
     @app.get("/api/bots/{bot_id}/connectors")
@@ -3300,7 +3313,9 @@ def _turn_messages(store: Store, bot_id: str, chat: dict) -> tuple[dict, list[di
     from easyagent.plan import ensure_request_checklist, load_plan, prompt_block
 
     ensure_request_checklist(store, bot_id, chat.get("id") or "", _last_user_text(chat.get("messages") or []))
-    system = system + "\n\n" + prompt_block(load_plan(store, bot_id, chat.get("id") or ""))
+    from easyagent.features import ensure_capabilities
+
+    system = ensure_capabilities(system + "\n\n" + prompt_block(load_plan(store, bot_id, chat.get("id") or "")))
     from easyagent.nctx import note_system_tokens
     from easyagent.situation import attach_desktop
 
@@ -3750,6 +3765,9 @@ async def _complete_for_room_bot(store: Store, room: dict, bot_id: str) -> tuple
         connectors=_connectors_prompt(store, bot["id"]),
         bridges=_bridges_prompt(store),
     )
+    from easyagent.features import ensure_capabilities
+
+    system = ensure_capabilities(system)
     _, _, clip_limit = context_window(budget)
     tail = coalesce_assistants([
         _room_tail_item(bot, message, clip_limit)
@@ -3883,6 +3901,9 @@ async def _ack_room_reaction(store: Store, room_id: str, message: dict) -> None:
         connectors=_connectors_prompt(store, bot["id"]),
         bridges=_bridges_prompt(store),
     )
+    from easyagent.features import ensure_capabilities
+
+    system = ensure_capabilities(system)
     _, _, clip_limit = context_window(budget)
     tail = coalesce_assistants([
         _room_tail_item(bot, item, clip_limit)
@@ -5573,12 +5594,14 @@ async def _finish_and_maybe_ask(
     thought_seconds: int = 0,
 ) -> dict:
     """Save the parent reply, then run helpers, then at most one child ask found in it."""
+    from easyagent.features import steer_reply
     from easyagent.helpers import for_model, parse_helpers, run_helpers, strip_helper_fences
 
+    user_text = _last_user_text(store.get_chat(bot_id, chat_id).get("messages") or [])
+    visible = steer_reply(store, bot_id, user_text, visible or "")
     helpers = parse_helpers(visible)
     visible = strip_helper_fences(visible, keep_shape=True)
     ask = parse_subagent(visible)
-    user_text = _last_user_text(store.get_chat(bot_id, chat_id).get("messages") or [])
     names = _other_bot_names(store, bot_id)
     # A plain question does not send another bot just because the reply contains the fence.
     suppressed = bool(ask) and not automatic_ask_allowed(user_text, names)
@@ -5949,6 +5972,9 @@ def _finish_reply(
         if cleaned and cleaned not in kept:
             kept.append(cleaned)
     if not visible.strip() and not kept and not saved and quiet:
+        from easyagent.features import take_routine_offer
+
+        take_routine_offer()
         chat = store.get_chat(bot_id, chat_id)
         _drop_activity(chat)
         messages = chat.setdefault("messages", [])
@@ -6077,6 +6103,11 @@ def _finish_reply(
         message["choices"] = kept
     elif "choices" in message:
         message.pop("choices", None)
+    from easyagent.features import take_routine_offer
+
+    offer = take_routine_offer()
+    if offer:
+        message["proposal"] = offer
     if attachment:
         message["attachment"] = attachment
     from easyagent.tools import LOOP_TEXT

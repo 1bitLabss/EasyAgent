@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import sys
 
+from easyagent.features import ensure_capabilities
 from easyagent.limits import DIRECTION_CAP
 
 
@@ -381,4 +382,4 @@ Summary of older turns:
     block = (earlier or "").strip()
     if block:
         text += "\n" + block + "\n"
-    return text
+    return ensure_capabilities(text)

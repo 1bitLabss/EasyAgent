@@ -25,6 +25,11 @@ import { RETRY_REASON, attachLive, canResume, chatStillPolling, flightFor, retry
 import type { Bot, Chat, ChatMessage } from "@/types";
 
 const REACTIONS = ["👍", "👎", "❤️", "👀"];
+const PAUSE_LINE = new Set([
+  "Paused, you sent a message",
+  "Paused, say continue to resume",
+  "Finished before pausing",
+]);
 
 function AttachmentView({ message, botId, chatId }: { message: ChatMessage; botId: string; chatId: string }) {
   const att = message.attachment;
@@ -169,7 +174,10 @@ const MessageRow = memo(function MessageRow({
   if (message.kind === "status" || message.kind === "pickup") {
     return (
       <li className="message-row" data-kind={message.kind}>
-        <p className="sys-line" data-testid={message.kind === "pickup" ? "pickup-marker" : "status-note"}>{message.content}</p>
+        <p
+          className={cn("sys-line", message.kind === "status" && PAUSE_LINE.has(message.content || "") && "sys-line-pause")}
+          data-testid={message.kind === "pickup" ? "pickup-marker" : "status-note"}
+        >{message.content}</p>
       </li>
     );
   }

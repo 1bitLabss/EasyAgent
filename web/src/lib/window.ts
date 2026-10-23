@@ -114,8 +114,18 @@ const PAUSE_SENTENCES = new Set([
   "Finished before pausing",
 ]);
 
-/** A pause row above a person's message is not dropped when a later snapshot omits it. */
-function holdPauseAboveUser(prev: ChatMessage[] | undefined, incoming: ChatMessage[], settled: boolean): ChatMessage[] {
+/** A pause row above a person's message is not dropped when a later snapshot omits it.
+
+ A resolved cut is not put back, and it is not relabeled finished. Stop clears
+ the row. A you-sent row that settles with the reply already done stays one
+ line so the message under it does not jump.
+ */
+function holdPauseAboveUser(
+  prev: ChatMessage[] | undefined,
+  incoming: ChatMessage[],
+  settled: boolean,
+  cleared = false,
+): ChatMessage[] {
   if (!prev) return incoming;
   const pauseAt = prev.findIndex(
     (message) => message.kind === "status" && (message.client_id === "pause-you-sent" || PAUSE_SENTENCES.has(message.content || "")),
@@ -132,6 +142,7 @@ function holdPauseAboveUser(prev: ChatMessage[] | undefined, incoming: ChatMessa
   const userAt = incoming.findIndex(sameUser);
   if (userAt < 0) return incoming;
   if (prior.id && incoming.some((message) => message.id === prior.id)) return incoming;
+  if (cleared || (settled && prior.content === "Paused, say continue to resume")) return incoming;
   const before = incoming[userAt - 1];
   if (before?.kind === "status" && PAUSE_SENTENCES.has(before.content || "")) {
     if (before.client_id || !prior.client_id) return incoming;
@@ -171,8 +182,9 @@ export function retainLocalTail(
   prev: ChatMessage[] | undefined,
   incoming: ChatMessage[],
   settled = false,
+  cleared = false,
 ): ChatMessage[] {
-  const rows = adoptPauseClient(prev, holdPauseAboveUser(prev, incoming, settled));
+  const rows = adoptPauseClient(prev, holdPauseAboveUser(prev, incoming, settled, cleared));
   if (!prev?.length) return dedupeMessages(rows);
   const incomingIds = new Set(rows.filter((message) => message.id).map((message) => message.id as string));
   const incomingClients = new Set(rows.filter((message) => message.client_id).map((message) => message.client_id as string));
@@ -228,6 +240,7 @@ export function shareChat(prev: unknown, incoming: unknown): unknown {
     older.messages,
     shareMessages(older.messages, next.messages),
     replySettled(next.run?.status),
+    next.run?.status === "stopped" || next.run?.status === "error",
   );
   if (
     messages === older.messages &&
@@ -280,7 +293,12 @@ export function mergeChat(prev: Chat | undefined, incoming: Chat): Chat {
   const prevStart = prev.window_start ?? 0;
   const loadedHistory = prevStart > 0 || base.length > TAIL;
   if (!loadedHistory) {
-    const kept = retainLocalTail(prev.messages, incomingMessages, replySettled(incoming.run?.status));
+    const kept = retainLocalTail(
+      prev.messages,
+      incomingMessages,
+      replySettled(incoming.run?.status),
+      incoming.run?.status === "stopped" || incoming.run?.status === "error",
+    );
     return windowChat({ ...incoming, messages: kept, message_count: Math.max(total, kept.length) });
   }
   const lastId = base[base.length - 1]?.id;
@@ -290,7 +308,12 @@ export function mergeChat(prev: Chat | undefined, incoming: Chat): Chat {
   }
   const byId = new Map(incomingMessages.map((message) => [message.id, message]));
   const updated = base.map((message) => (message.id && byId.get(message.id)) || message);
-  const merged = retainLocalTail(base, [...updated, ...incomingMessages.slice(at + 1)], replySettled(incoming.run?.status));
+  const merged = retainLocalTail(
+    base,
+    [...updated, ...incomingMessages.slice(at + 1)],
+    replySettled(incoming.run?.status),
+    incoming.run?.status === "stopped" || incoming.run?.status === "error",
+  );
   return {
     ...incoming,
     messages: merged,

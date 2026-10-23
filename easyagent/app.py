@@ -1833,7 +1833,7 @@ def create_app(data_dir: str | Path | None = None) -> FastAPI:
         slot = turn_mod.slot_for(store, chat_id)
         slot.user_stop = False
         slot.side_answer = False
-        _drop_pause_rows(store, bot_id, chat_id)
+        _drop_pause_rows(store, bot_id, chat_id, force=True)
         if worker is None or worker.done():
             turn_mod.clear_busy(store, chat_id)
             if queued_items(store, bot_id, chat_id) and turn_mod.try_begin(store, chat_id):
@@ -1959,13 +1959,15 @@ def create_app(data_dir: str | Path | None = None) -> FastAPI:
         else:
             echoed = _replace_continue_prompt(store, bot_id, chat_id, RESUME_LINE)
             spoken = "" if echoed else RESUME_LINE
-        _drop_pause_rows(store, bot_id, chat_id)
+        _drop_pause_rows(store, bot_id, chat_id, force=True)
         slot = turn_mod.slot_for(store, chat_id)
         slot.user_stop = False
         slot.drain_chains = 0
         if _wants_stream(request):
             return StreamingResponse(
-                _stream_resume(store, bot_id, chat_id, spoken, echoed=echoed),
+                _stream_resume(
+                    store, bot_id, chat_id, spoken, echoed=echoed, resume_cue=bool(typed), client_id=typed_client,
+                ),
                 media_type="text/event-stream",
                 headers={"Cache-Control": "no-store", "X-Accel-Buffering": "no"},
             )
@@ -1973,7 +1975,9 @@ def create_app(data_dir: str | Path | None = None) -> FastAPI:
             async with chat_lock(store, chat_id):
                 turn_mod.bind(store, chat_id, bot_id=bot_id, resume=True)
                 if echoed is None:
-                    _save_user_turn(store, bot_id, chat_id, spoken or RESUME_LINE)
+                    _save_user_turn(
+                        store, bot_id, chat_id, spoken or RESUME_LINE, client_id=typed_client, resume_cue=bool(typed),
+                    )
                 return await _reply_json(store, bot_id, chat_id)
         finally:
             await _finish_turn(store, bot_id, chat_id)
@@ -2025,7 +2029,7 @@ def create_app(data_dir: str | Path | None = None) -> FastAPI:
         slot.side_answer = False
         slot.deliver_queue = False
         slot.cancel = asyncio.Event()
-        _drop_pause_rows(store, bot_id, chat_id)
+        _drop_pause_rows(store, bot_id, chat_id, force=True)
         if not turn_mod.request_in_flight(store, chat_id):
             turn_mod.clear_busy(store, chat_id)
         return _public_chat(store, chat)
@@ -3121,11 +3125,12 @@ def _save_user_turn(
     attachment: dict | None = None,
     message_id: str | None = None,
     client_id: str = "",
+    resume_cue: bool = False,
 ) -> dict:
     # A new line means an old pause sentence is no longer the state of this chat.
     # The side answer's own row is queued, not saved here, so its pause line stays.
     if not getattr(turn_mod.slot_for(store, chat_id), "side_answer", False):
-        _drop_pause_rows(store, bot_id, chat_id)
+        _drop_pause_rows(store, bot_id, chat_id, force=True)
     chat = store.get_chat(bot_id, chat_id)
     if client_id:
         existing = _message_by_client(chat, client_id)
@@ -3136,6 +3141,8 @@ def _save_user_turn(
     message = {"id": message_id or new_id(), "role": "user", "content": content, "created_at": now_iso()}
     if client_id:
         message["client_id"] = client_id
+    if resume_cue:
+        message["resume_cue"] = True
     if attachment:
         message["attachment"] = _public_attachment(attachment)
     chat["messages"].append(message)
@@ -4350,7 +4357,7 @@ def _pause_status(message: dict) -> bool:
     return (
         isinstance(message, dict)
         and message.get("kind") == "status"
-        and message.get("content") in {PAUSED_YOU_SENT, PAUSED_SAY_CONTINUE}
+        and message.get("content") in {PAUSED_YOU_SENT, PAUSED_SAY_CONTINUE, FINISHED_BEFORE_PAUSING}
     )
 
 
@@ -4456,23 +4463,49 @@ def _user_after(messages: list, index: int) -> bool:
     )
 
 
-def _drop_pause_rows(store: Store, bot_id: str, chat_id: str) -> None:
+def _blank_pause_row(message: dict, ids: list[str]) -> None:
+    if not message.get("id"):
+        return
+    ids.append(str(message["id"]))
+    message.pop("kind", None)
+    message.pop("interrupted", None)
+    message["role"] = "assistant"
+    message["content"] = ""
+    message["live"] = True
+
+
+def _drop_pause_rows(store: Store, bot_id: str, chat_id: str, *, force: bool = False) -> None:
     """Remove pause sentences that are no longer true. Nothing is yielded between the two saves.
 
-    A pause row that already sits above a person's message is not deleted.
-    Deleting it would pull that message up. The same row says the reply finished.
+    A complete turn retires one pause row above a person's message in place.
+    A cut keeps "say continue" and is never labeled finished. Stop, resume,
+    and a later message pass force and remove every pause row, including one
+    that already says finished. One pause row is the most a turn keeps.
     """
     try:
         chat = store.get_chat(bot_id, chat_id)
     except StoreError:
         return
+    incomplete = bool(getattr(turn_mod.slot_for(store, chat_id), "cut_unfinished", False))
     messages = [item for item in chat.get("messages") or [] if isinstance(item, dict)]
     ids: list[str] = []
     held = False
+    kept = False
     for index, message in enumerate(messages):
         if not _pause_status(message):
             continue
-        if _user_after(messages, index):
+        if force or not _user_after(messages, index):
+            _blank_pause_row(message, ids)
+            continue
+        offer = message.get("content") == PAUSED_SAY_CONTINUE
+        if incomplete or offer:
+            if not kept:
+                kept = True
+                continue
+            _blank_pause_row(message, ids)
+            continue
+        if not kept:
+            kept = True
             if message.get("content") != FINISHED_BEFORE_PAUSING:
                 message["content"] = FINISHED_BEFORE_PAUSING
                 message["kind"] = "status"
@@ -4481,14 +4514,7 @@ def _drop_pause_rows(store: Store, bot_id: str, chat_id: str) -> None:
                 message.pop("interrupted", None)
                 held = True
             continue
-        if not message.get("id"):
-            continue
-        ids.append(str(message["id"]))
-        message.pop("kind", None)
-        message.pop("interrupted", None)
-        message["role"] = "assistant"
-        message["content"] = ""
-        message["live"] = True
+        _blank_pause_row(message, ids)
     if held and not ids:
         chat["messages"] = messages
         chat["updated_at"] = now_iso()
@@ -4521,7 +4547,7 @@ def _park_side_answer(store: Store, bot_id: str, chat_id: str) -> dict | None:
         return None
     if slot.user_stop:
         slot.side_answer = False
-        _drop_pause_rows(store, bot_id, chat_id)
+        _drop_pause_rows(store, bot_id, chat_id, force=True)
         return None
     # A sealed final answer has nothing left to run. The row would be a lie.
     if slot.sealed_answer and not slot.cut_unfinished:
@@ -4597,6 +4623,20 @@ def _park_side_answer(store: Store, bot_id: str, chat_id: str) -> dict | None:
         return None
 
 
+def _later_than_pause(messages: list, index: int) -> bool:
+    """True when a person or an answer was saved after this pause row."""
+    for item in messages[index + 1 :]:
+        if not isinstance(item, dict):
+            continue
+        if item.get("role") == "user":
+            return True
+        if item.get("role") != "assistant" or item.get("kind") in {"status", "pickup"}:
+            continue
+        if str(item.get("content") or "").strip():
+            return True
+    return False
+
+
 def _replace_continue_prompt(
     store: Store,
     bot_id: str,
@@ -4605,19 +4645,26 @@ def _replace_continue_prompt(
     client_id: str = "",
     resume_cue: bool = False,
 ) -> dict | None:
-    """The pause row becomes the person's line, in the same place. A status row cannot be deleted."""
+    """Continue is the next line in time. A pause that is already last can change in place.
+
+    A pause that sits above the busy message stays a pause row. The caller
+    removes it and saves continue after that message, so the transcript reads
+    in the order the lines were sent.
+    """
     try:
         chat = store.get_chat(bot_id, chat_id)
     except StoreError:
         return None
     found: dict | None = None
-    for message in chat.get("messages") or []:
+    messages = [item for item in chat.get("messages") or [] if isinstance(item, dict)]
+    for index, message in enumerate(messages):
         if not (
-            isinstance(message, dict)
-            and message.get("kind") == "status"
+            message.get("kind") == "status"
             and message.get("content") == PAUSED_SAY_CONTINUE
         ):
             continue
+        if _later_than_pause(messages, index):
+            return None
         message["role"] = "user"
         message["content"] = line
         message.pop("kind", None)
@@ -7084,14 +7131,24 @@ async def _emit_run(store: Store, bot_id: str, chat_id: str, producer, *, resume
                 listeners.remove(queue)
 
 
-async def _stream_resume(store: Store, bot_id: str, chat_id: str, content: str, echoed: dict | None = None):
+async def _stream_resume(
+    store: Store,
+    bot_id: str,
+    chat_id: str,
+    content: str,
+    echoed: dict | None = None,
+    resume_cue: bool = False,
+    client_id: str = "",
+):
     async def produce():
-        # The pause row was already rewritten. Send that row before the answer
-        # so the screen does not keep a second copy under the reply.
+        # The pause row was already rewritten, or continue is saved after the
+        # busy message. Send that row before the answer.
         if echoed:
             yield _sse({"type": "user", "message": echoed})
         elif content:
-            message = _save_user_turn(store, bot_id, chat_id, content)
+            message = _save_user_turn(
+                store, bot_id, chat_id, content, client_id=client_id, resume_cue=resume_cue,
+            )
             yield _sse({"type": "user", "message": message})
         async for chunk in _stream_reply(store, bot_id, chat_id):
             yield chunk

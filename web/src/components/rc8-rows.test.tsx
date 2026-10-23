@@ -149,6 +149,7 @@ describe("rc8 one pause row", () => {
     const expected = ["check the east pier", PARTIAL, "Paused, you sent a message", "and the kiln"];
     expect(screenRows()).toEqual(expected);
     expect(pauseLines()).toEqual(["Paused, you sent a message"]);
+    expect(screen.getByText("Paused, you sent a message").className).toContain("sys-line-pause");
     expect(screen.getByTestId("run-state").textContent).toBe(PAUSE_TEXT);
     expect(screen.queryByText(PAUSE_TOOL_TEXT)).toBeNull();
     expect(screen.queryByText(RUNNING)).toBeNull();
@@ -221,6 +222,32 @@ async function measureFrames(frames: string[]): Promise<Array<Array<{ id: string
     await browser.close();
   }
 }
+
+it("keeps the pause row one line tall when the words change", async () => {
+  const css = readFileSync(resolve("src/index.css"), "utf8");
+  const row = (text: string) =>
+    `<div style="width:280px"><ol class="flex flex-col gap-4" data-testid="transcript">` +
+    `<li class="message-row"><p class="sys-line sys-line-pause" data-testid="status-note">${text}</p></li>` +
+    `<li class="message-row"><p data-testid="message-text">and the kiln</p></li>` +
+    `</ol></div>`;
+  const browser = await chromium.launch({ headless: true });
+  try {
+    const page = await browser.newPage({ viewport: { width: 320, height: 800 } });
+    const tops: number[] = [];
+    for (const text of ["Paused, you sent a message", "Paused, say continue to resume", "Finished before pausing"]) {
+      await page.setContent(`<!doctype html><style>${css}</style>${row(text)}`, { waitUntil: "load" });
+      tops.push(
+        await page.evaluate(() => {
+          const rows = [...document.querySelectorAll<HTMLElement>(".message-row")];
+          return rows[1].getBoundingClientRect().top - rows[0].getBoundingClientRect().top;
+        }),
+      );
+    }
+    expect(Math.max(...tops) - Math.min(...tops)).toBeLessThanOrEqual(2);
+  } finally {
+    await browser.close();
+  }
+});
 
 function assertStill(name: string, frames: Array<Array<{ id: string; top: number; text: string }>>, text: string) {
   const tops = frames.map((rows) => rowTops(rows, text));

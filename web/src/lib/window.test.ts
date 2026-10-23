@@ -110,6 +110,37 @@ describe("retainLocalTail", () => {
     expect(merged.filter((item) => item.id === "other")).toHaveLength(1);
   });
 
+  it("does not turn a resolved say-continue row into finished", () => {
+    const user = { id: "u2", role: "user" as const, content: "and the kiln" };
+    const say = {
+      id: "p",
+      role: "assistant" as const,
+      kind: "status" as const,
+      content: "Paused, say continue to resume",
+      client_id: "pause-you-sent",
+    };
+    const prior = [message("u1", "check the east pier"), say, user];
+    const incoming = [message("u1", "check the east pier"), user];
+    expect(retainLocalTail(prior, incoming, false).map((item) => item.content)).toEqual([
+      "check the east pier",
+      "Paused, say continue to resume",
+      "and the kiln",
+    ]);
+    expect(retainLocalTail(prior, incoming, true).map((item) => item.content)).toEqual([
+      "check the east pier",
+      "and the kiln",
+    ]);
+    const you = { ...say, content: "Paused, you sent a message" };
+    const retired = retainLocalTail([message("u1", "check the east pier"), you, user], incoming, true);
+    expect(retired.map((item) => item.content)).toEqual([
+      "check the east pier",
+      "Finished before pausing",
+      "and the kiln",
+    ]);
+    const stopped = retainLocalTail([message("u1", "check the east pier"), you, user], incoming, true, true);
+    expect(stopped.map((item) => item.content)).toEqual(["check the east pier", "and the kiln"]);
+  });
+
   it("replaces a row when its chip changes", () => {
     const first = [{ id: "u", role: "user", content: "hi", chip: "queued" }];
     const seen = [{ id: "u", role: "user", content: "hi", chip: "seen", seen_step: 2 }];

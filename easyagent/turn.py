@@ -510,6 +510,14 @@ def mark_pause_cut() -> None:
     slot.sealed_answer = False
 
 
+def clear_pause_cut() -> None:
+    """The step that just finished is the answer. It is not waiting to be resumed."""
+    slot = _slot.get()
+    if slot is None:
+        return
+    slot.cut_unfinished = False
+
+
 def pause_requested() -> bool:
     """True when a user message is waiting and this turn should stop after the safe point."""
     slot = _slot.get()

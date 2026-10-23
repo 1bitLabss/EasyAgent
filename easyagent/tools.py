@@ -7454,17 +7454,56 @@ def _partial_stream(text_bits: list[str]):
         yield "stage", body
 
 
+def _only_finish_calls(calls: list) -> bool:
+    """True when every native call in this step is the finish tool."""
+    if not calls:
+        return False
+    for call in calls:
+        name = str((call or {}).get("name") or "").strip()
+        if name != "finish":
+            return False
+    return True
+
+
+def _step_is_complete(text_bits: list[str]) -> bool:
+    """The model already gave the answer, including a finish call beside that text.
+
+    A finish tool in the same step as the answer is how a real model ends a turn.
+    It is not another step. Any other tool call, or text with no answer yet, is not.
+    """
+    _hidden, body = _partial_answer(text_bits)
+    prose = _drop_known_logs(_spoken(body or ""), []).strip()
+    if not prose:
+        return False
+    calls = list(llm._native_calls.get() or [])
+    if calls:
+        return _only_finish_calls(calls)
+    try:
+        found = parse_tools(body or "")
+    except ToolError:
+        return False
+    if not found:
+        return False
+    return all(item.kind == "finish" for item in found)
+
+
 def _pause_leaves_unfinished_work(text_bits: list[str]) -> bool:
     """True when this pause cut a tool chain or a reply that was still being written.
 
     A prose answer that is already whole, with no tool left to run, is not resumable.
+    A finish call in the same step as that answer is the end, not unfinished work.
     """
+    if _step_is_complete(text_bits):
+        return False
     slot = turn_mod.current_slot()
     if slot is not None and slot.cut_unfinished:
         return True
     if slot is not None and turn_mod._tool_in_progress(slot):
         return True
-    if list(llm._native_calls.get() or []):
+    calls = list(llm._native_calls.get() or [])
+    if calls and not _only_finish_calls(calls):
+        return True
+    if calls and not _partial_answer(text_bits)[1].strip():
         return True
     _hidden, body = _partial_answer(text_bits)
     if not (body or "").strip():
@@ -7472,9 +7511,10 @@ def _pause_leaves_unfinished_work(text_bits: list[str]) -> bool:
     if _cut_off_tool(body):
         return True
     try:
-        if parse_tools(body):
-            return True
+        found = parse_tools(body)
     except ToolError:
+        return True
+    if any(item.kind != "finish" for item in found):
         return True
     return False
 
@@ -8297,12 +8337,23 @@ async def run_turn(
         return sum(1 for item in narration_hits if _near_line(item, spoken))
 
     def _chain_is_resumable() -> bool:
-        """A longer chain, a command still running, or an open checklist still has work.
+        """True when this pause cut a turn that still has work.
 
-        The tool function has already returned by the time the loop asks. A flag
-        left true is not a running tool, so one finished step is the next turn.
+        One tool that already returned, with no report started and no other call
+        waiting, is the next turn. A second step, a report already started, a
+        command still running, or an open checklist is not finished.
         """
         if len(steps) > 1:
+            return True
+        pending = [
+            call for call in (llm._native_calls.get() or [])
+            if str((call or {}).get("name") or "").strip() != "finish"
+        ]
+        if pending:
+            return True
+        spoken = _drop_known_logs(_spoken(shown_answer or ""), lines).strip()
+        if steps and spoken:
+            # The model started the report and already used a tool. The rest is owed.
             return True
         slot = turn_mod.current_slot()
         if slot is not None and turn_mod._command_running(slot):
@@ -8446,13 +8497,18 @@ async def run_turn(
             _keep_partial_reply(store, bot_id, chat_id, text_bits)
             raise
         except turn_mod.TurnCancelled:
-            if turn_mod.pause_requested() and _pause_leaves_unfinished_work(text_bits):
+            if turn_mod.pause_requested() and _step_is_complete(text_bits):
+                # A later token that is only the finish call is not more work.
+                # The answer is sealed below. This is not a cancelled turn.
+                turn_mod.clear_pause_cut()
+                turn_mod.take_user_pause()
+            elif turn_mod.pause_requested() and _pause_leaves_unfinished_work(text_bits):
                 turn_mod.mark_pause_cut()
                 for event in _partial_stream(text_bits):
                     yield event
                 yield "pause", "Paused, reading your message"
                 return
-            if turn_mod.pause_requested():
+            elif turn_mod.pause_requested():
                 # The text already in hand is the whole answer. Seal it.
                 # The cancel flag has to drop too, or the streaming drain
                 # skips the message and a background call answers it instead.
@@ -8487,13 +8543,16 @@ async def run_turn(
                     for event in close(""):
                         yield event
                     return
-                if turn_mod.pause_requested() and _pause_leaves_unfinished_work(text_bits):
+                if turn_mod.pause_requested() and _step_is_complete(text_bits):
+                    turn_mod.clear_pause_cut()
+                    turn_mod.take_user_pause()
+                elif turn_mod.pause_requested() and _pause_leaves_unfinished_work(text_bits):
                     turn_mod.mark_pause_cut()
                     for event in _partial_stream(text_bits):
                         yield event
                     yield "pause", "Paused, reading your message"
                     return
-                if not turn_mod.pause_requested():
+                elif not turn_mod.pause_requested():
                     if turn_mod.take_redirect():
                         continue
                     if turn_mod.cancelled() or "incomplete chunked read" in str(exc).lower():
@@ -8505,9 +8564,10 @@ async def run_turn(
                     for event in _partial_stream(text_bits):
                         yield event
                     raise
-                # A pause after a whole prose answer seals that answer.
-                # Clear the cancel flag so the streaming drain can answer it.
-                turn_mod.take_user_pause()
+                else:
+                    # A pause after a whole prose answer seals that answer.
+                    # Clear the cancel flag so the streaming drain can answer it.
+                    turn_mod.take_user_pause()
         finally:
             if model_slot is not None:
                 model_slot._model_request_active.clear()

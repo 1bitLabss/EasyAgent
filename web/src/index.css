@@ -149,6 +149,16 @@ body {
   padding: 0.35rem 1rem;
 }
 
+/* Pause sentences share one line. Rewording the row must not grow it. */
+.sys-line-pause {
+  box-sizing: content-box;
+  height: 18px;
+  line-height: 18px;
+  white-space: nowrap;
+  overflow: hidden;
+  max-width: 100%;
+}
+
 .sys-line button,
 .sys-line p {
   display: inline-flex;

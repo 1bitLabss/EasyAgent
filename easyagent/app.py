@@ -7485,17 +7485,19 @@ async def _stream_reply(
             turn_mod.renew_cancel()
             slot.user_stop = False
             slot.reason = ""
-            await asyncio.sleep(0.05)
-            await _drain_queued_json(store, bot_id, chat_id)
+            slot.pause_for_user = False
+            # The line sent while this job ran is its own answer. Keep the
+            # status live and stream that answer; do not fold it into the stop.
+            slot.deliver_queue = True
             try:
                 chat = store.get_chat(bot_id, chat_id)
-            except StoreError:
-                chat = None
-            if chat is not None and (chat.get("run") or {}).get("status") == "error":
-                _apply_run(chat, status="stopped", reason=reason, step="")
+                _apply_run(chat, status="running", step="Waiting on model")
                 chat["updated_at"] = now_iso()
-                with suppress(Exception):
-                    store.save_chat(chat)
+                store.save_chat(chat)
+            except (StoreError, OSError, HTTPException):
+                pass
+            async for chunk in _continue_queued(store, bot_id, chat_id):
+                yield chunk
             if emit_done:
                 try:
                     yield _sse({"type": "done", "chat": _public_chat(store, store.get_chat(bot_id, chat_id))})

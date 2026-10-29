@@ -7479,7 +7479,10 @@ async def _stream_reply(
         from easyagent.plan import queued_items
 
         slot = turn_mod.slot_for(store, chat_id)
-        if slot.user_stop and queued_items(store, bot_id, chat_id):
+        # A queued line that never interrupted the model stays queued.
+        # One that paused the job is answered on this stream, after Stop.
+        owed = bool(slot.pause_for_user or getattr(slot, "paused_over_tool", False))
+        if slot.user_stop and queued_items(store, bot_id, chat_id) and owed:
             _settle_interrupted(store, bot_id, chat_id, reason)
             _drop_pause_rows(store, bot_id, chat_id, force=True)
             turn_mod.renew_cancel()

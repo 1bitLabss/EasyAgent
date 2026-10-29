@@ -155,7 +155,7 @@ export function ApprovalCard({ botId, botName, active }: { botId: string; botNam
           </>
         ) : (
           <>
-            <Button type="button" onClick={() => void decide("approve")}>Approve once</Button>
+            <Button type="button" data-testid="approve-once" onClick={() => void decide("approve")}>Approve once</Button>
             {lasting && card.class_label ? (
               <Button type="button" variant="outline" data-testid="approve-class" onClick={() => void decide("class")}>{card.class_label}</Button>
             ) : null}

@@ -503,8 +503,12 @@ export function ChatPane() {
                     message_count: Math.max(current.message_count ?? messages.length, messages.length) + 1,
                   };
                 });
-                // An empty chat has no live stream. The refetch is what replaces the welcome screen.
-                void queryClient.invalidateQueries({ queryKey: ["chat", botId, chatId] });
+                // An empty chat has no live stream. A refetch during a live reply would
+                // replace the growing transcript with a shorter saved copy.
+                const flight = flightFor(botId, chatId);
+                if (!flight || flight.settled || !flight.sending) {
+                  void queryClient.invalidateQueries({ queryKey: ["chat", botId, chatId] });
+                }
               }
             }
             split = buffer.indexOf("\n\n");

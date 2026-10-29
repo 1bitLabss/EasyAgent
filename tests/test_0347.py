@@ -455,17 +455,20 @@ def test_a_routine_line_reaches_an_open_empty_chat(tmp_path):
     assert "Tick once" in text
 
 
-def test_a_room_approval_is_shown_and_the_tool_runs(tmp_path):
+def test_a_room_approval_is_shown_and_the_tool_runs(tmp_path, monkeypatch):
     """A card raised in a room carries the room id, and approving it runs the tool."""
     from easyagent import safety, turn as turn_mod
     from easyagent.app import _room_pending
     from easyagent.tools import ToolRequest
 
+    # Earlier tests leave YOLO, unattended mode, and a short card timer behind.
     safety.reset_for_tests()
     safety._UNATTENDED.set(False)
-    import os
-    previous_wait = os.environ.get("EASYAGENT_APPROVAL_SECONDS")
-    os.environ["EASYAGENT_APPROVAL_SECONDS"] = "30"
+    monkeypatch.delenv("EASYAGENT_YOLO", raising=False)
+    monkeypatch.delenv("EASYAGENT_YOLO_FLOOR", raising=False)
+    monkeypatch.setattr("easyagent.yolo.passes", lambda *_args, **_kwargs: False)
+    monkeypatch.setattr("easyagent.safety.is_unattended", lambda: False)
+    monkeypatch.setenv("EASYAGENT_APPROVAL_SECONDS", "30")
     app = create_app(tmp_path)
     store = app.state.store
     endpoint = store.add_endpoint(name="local", base_url="http://127.0.0.1:9/v1", api_key=None)
@@ -497,10 +500,4 @@ def test_a_room_approval_is_shown_and_the_tool_runs(tmp_path):
         result = await asyncio.wait_for(task, timeout=10)
         assert "42" in str(result)
 
-    try:
-        asyncio.run(run())
-    finally:
-        if previous_wait is None:
-            os.environ.pop("EASYAGENT_APPROVAL_SECONDS", None)
-        else:
-            os.environ["EASYAGENT_APPROVAL_SECONDS"] = previous_wait
+    asyncio.run(run())

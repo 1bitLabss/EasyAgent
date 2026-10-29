@@ -1794,12 +1794,26 @@ def create_app(data_dir: str | Path | None = None) -> FastAPI:
                 request.state.typed_continue = content
                 request.state.typed_client_id = client_id
                 return await resume_chat(bot_id, chat_id, request)
-        async with turn_mod.boundary(store, chat_id):
-            if client_id and _message_by_client(store.get_chat(bot_id, chat_id), client_id):
-                return _public_chat(store, store.get_chat(bot_id, chat_id))
-            if not turn_mod.try_begin(store, chat_id):
+        started = False
+        for _ in range(2):
+            async with turn_mod.boundary(store, chat_id):
+                if client_id and _message_by_client(store.get_chat(bot_id, chat_id), client_id):
+                    return _public_chat(store, store.get_chat(bot_id, chat_id))
+                if turn_mod.try_begin(store, chat_id):
+                    turn_mod.slot_for(store, chat_id).drain_chains = 0
+                    started = True
+                    break
+                slot = turn_mod.slot_for(store, chat_id)
+                worker = turn_mod.current_worker(store, chat_id)
+                sealing = bool(slot.sealed_answer) and not bool(slot.cut_unfinished)
+            # The answer is already saved. Wait for that turn to leave, then start the next one.
+            # Do not hold the boundary lock while waiting: the finishing turn needs it.
+            if not sealing or worker is None or worker.done():
                 return await _answer_while_busy(store, bot_id, chat_id, content, attachment, request, client_id)
-            turn_mod.slot_for(store, chat_id).drain_chains = 0
+            with suppress(asyncio.TimeoutError):
+                await asyncio.wait_for(asyncio.shield(worker), timeout=3)
+        if not started:
+            return await _answer_while_busy(store, bot_id, chat_id, content, attachment, request, client_id)
         turn_mod.interrupt(store, chat_id, "a new message was sent in this chat")
         if attachment is None and _yolo_command(content):
             try:
@@ -2997,35 +3011,7 @@ def _persist_context(store: Store, chat: dict) -> dict:
     return _metered_stats(store, chat, prepared.stats)
 
 
-def _strip_idle_pause_rows(store: Store, chat: dict) -> dict:
-    """A finished chat does not keep a continue row. A paused cut still does.
-
-    Reload reads this. The row has to be gone from the saved transcript, not
-    only from the live screen.
-    """
-    run = chat.get("run") if isinstance(chat.get("run"), dict) else {}
-    if run.get("status") != "idle":
-        return chat
-    messages = [item for item in chat.get("messages") or [] if isinstance(item, dict)]
-    kept = [
-        item
-        for item in messages
-        if not (
-            item.get("kind") == "status"
-            and item.get("content") in {PAUSED_YOU_SENT, PAUSED_SAY_CONTINUE}
-        )
-    ]
-    if len(kept) == len(messages):
-        return chat
-    chat["messages"] = kept
-    chat["updated_at"] = now_iso()
-    with suppress(Exception):
-        store.save_chat(chat)
-    return chat
-
-
 def _public_chat(store: Store, chat: dict, window: int | None = None) -> dict:
-    chat = _strip_idle_pause_rows(store, chat)
     """Transcript plus the bounded view. Reading a chat does not write it.
 
     `window` returns only the recent tail. Omit it and every message is included.
@@ -4919,13 +4905,10 @@ def _park_side_answer(store: Store, bot_id: str, chat_id: str) -> dict | None:
         _drop_pause_rows(store, bot_id, chat_id, force=True)
         return None
     # A sealed final answer has nothing left to run. The row would be a lie.
-    if (slot.sealed_answer or getattr(slot, "finished_over_pause", False)) and not slot.cut_unfinished:
+    if slot.sealed_answer and not slot.cut_unfinished:
         slot.side_answer = False
         slot.sealed_answer = False
-        slot.finished_over_pause = False
-        slot.answer_closed = True
-        slot.busy = False
-        _drop_pause_rows(store, bot_id, chat_id, force=True)
+        _drop_pause_rows(store, bot_id, chat_id)
         try:
             chat = store.get_chat(bot_id, chat_id)
         except StoreError:
@@ -5615,12 +5598,10 @@ async def _drain_owned(store: Store, bot_id: str, chat_id: str) -> None:
         await _finish_turn(store, bot_id, chat_id)
 
 
-async def _finish_turn(store: Store, bot_id: str, chat_id: str, epoch: int | None = None) -> None:
+async def _finish_turn(store: Store, bot_id: str, chat_id: str) -> None:
     """Clear busy only when the inbox is empty. A message in the gap starts a drain."""
     async with turn_mod.boundary(store, chat_id):
         slot = turn_mod.slot_for(store, chat_id)
-        if epoch is not None and int(getattr(slot, "epoch", 0) or 0) != epoch:
-            return
         if slot.user_stop:
             from easyagent.plan import release_hold_for_send
 
@@ -7013,21 +6994,21 @@ def _finish_reply(
     _stick_turn_notes(store, chat)
     _save_chat_final(store, chat)
     slot = turn_mod.slot_for(store, chat_id)
-    if getattr(slot, "finished_over_pause", False):
-        slot.cut_unfinished = False
-        slot.finished_over_pause = False
-    run_now = chat.get("run") if isinstance(chat.get("run"), dict) else {}
-    # A loop stop stays paused. A normal saved answer closes the turn.
-    if (visible or "").strip() and not slot.cut_unfinished and run_now.get("status") != "paused":
+    if (visible or "").strip() and not slot.cut_unfinished:
         slot.sealed_answer = True
-        slot.side_answer = False
-        slot.pause_for_user = False
-        slot.answer_closed = True
-        slot.busy = False
-        _drop_pause_rows(store, bot_id, chat_id, force=True)
+    if getattr(slot, "finished_over_pause", False) and not slot.cut_unfinished:
+        slot.finished_over_pause = False
     if not slot.side_answer:
         _drop_pause_rows(store, bot_id, chat_id)
         chat = store.get_chat(bot_id, chat_id)
+    # An idle turn has finished. A continue row under it is leftover.
+    run_now = chat.get("run") if isinstance(chat.get("run"), dict) else {}
+    if run_now.get("status") == "idle" and not slot.cut_unfinished:
+        _drop_pause_rows(store, bot_id, chat_id, force=True)
+        try:
+            chat = store.get_chat(bot_id, chat_id)
+        except StoreError:
+            pass
     poke(store, "message")
     public = _public_chat(store, chat)
     public["context"] = stats
@@ -7507,12 +7488,9 @@ async def _emit_run(store: Store, bot_id: str, chat_id: str, producer, *, resume
     slot.notify = publish
 
     async def worker() -> None:
-        mine = int(getattr(slot, "epoch", 0) or 0)
         try:
             async with chat_lock(store, chat_id):
                 turn_mod.bind(store, chat_id, bot_id=bot_id, resume=resume)
-                mine = int(getattr(slot, "epoch", 0) or 0)
-                slot.owner_epoch = mine
                 print(
                     "heuristic isolation: this run belongs to one chat and keeps going if the viewer leaves",
                     flush=True,
@@ -7539,7 +7517,7 @@ async def _emit_run(store: Store, bot_id: str, chat_id: str, producer, *, resume
             with suppress(Exception):
                 await publish(_sse_stopped(store, bot_id, chat_id, _stopped_text(reason)))
         finally:
-            await _finish_turn(store, bot_id, chat_id, mine)
+            await _finish_turn(store, bot_id, chat_id)
             with suppress(Exception):
                 await publish(None)
             if getattr(slot, "notify", None) is publish:

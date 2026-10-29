@@ -77,9 +77,6 @@ class Slot:
         self.sealed_answer = False
         # The reply ended while a message was waiting. The row says finished, not continue.
         self.finished_over_pause = False
-        # Bumps when a new turn is claimed, so a turn that already saved its answer
-        # does not clear the next one.
-        self.epoch = 0
         self.listeners: list = []
         self.notify = None
 
@@ -391,15 +388,9 @@ def request_in_flight(store, chat_id: str) -> bool:
 
 
 def is_busy(store, chat_id: str) -> bool:
-    """True while this chat's turn is still the one that was started.
-
-    A turn that has already saved its answer is closed. The task may still be
-    flushing, and that must not make the next message look busy.
-    """
+    """True while this chat's turn is still the one that was started."""
     slot = slot_for(store, chat_id)
     with _GUARD:
-        if getattr(slot, "answer_closed", False) and not slot.busy:
-            return False
         worker = _forget_finished(slot)
         return bool(slot.busy or worker is not None)
 
@@ -409,14 +400,10 @@ def try_begin(store, chat_id: str) -> bool:
     slot = slot_for(store, chat_id)
     with _GUARD:
         worker = _forget_finished(slot)
-        if getattr(slot, "answer_closed", False) and not slot.busy:
-            worker = None
         if slot.busy or worker is not None:
             return False
         slot.busy = True
-        slot.epoch = int(getattr(slot, "epoch", 0) or 0) + 1
         slot.claimed_at = time.monotonic()
-        slot.answer_closed = False
         return True
 
 

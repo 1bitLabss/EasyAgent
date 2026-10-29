@@ -437,6 +437,8 @@ export function holdShownReply(chat: Chat, frozen: FrozenReply | undefined): Cha
 }
 
 function finish(flight: Flight, chat?: Chat) {
+  // A newer send owns this chat. The old turn's done must not replace its transcript.
+  if (flight.replaced) return;
   const runId = flight.runId || flight.live?.run?.id || chat?.run?.id || "";
   noteSettled(flight.botId, flight.chatId, runId);
   flight.settled = true;
@@ -1107,7 +1109,23 @@ function markNotSent(botId: string, chatId: string, clientId: string) {
   });
 }
 
+async function waitIfTheAnswerAlreadyStopped(existing: Flight | null) {
+  // A follow-up typed as the last tokens land must not share the dying reader.
+  // A reply that is still growing is a real busy send and is left alone.
+  if (!existing || !existing.sending || existing.settled) return;
+  const before = existing.live?.text?.length || 0;
+  if (!before) return;
+  await new Promise((resolve) => window.setTimeout(resolve, 150));
+  const after = existing.live?.text?.length || 0;
+  if (existing.settled || after !== before) return;
+  const started = Date.now();
+  while (!existing.settled && existing.sending && Date.now() - started < 2000) {
+    await new Promise((resolve) => window.setTimeout(resolve, 40));
+  }
+}
+
 export async function sendMessage(botId: string, chatId: string, text: string, file?: File | null, clientId?: string) {
+  await waitIfTheAnswerAlreadyStopped(flightFor(botId, chatId));
   const cached = queryClient.getQueryData<Chat>(["chat", botId, chatId]);
   const existing = flightFor(botId, chatId);
   // A settled flight has saved its answer. A stale "running" flag must not queue the next line.

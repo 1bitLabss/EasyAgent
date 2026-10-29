@@ -466,6 +466,56 @@ export function ChatPane() {
       return shareChat(prev, keepLoadedHistory(prev, settleIncoming(botId || "", chatId || "", incoming as Chat)));
     },
   });
+  useEffect(() => {
+    if (!botId || !chatId) return;
+    const control = new AbortController();
+    void (async () => {
+      try {
+        const response = await fetch(`/api/bots/${botId}/chats/${chatId}/feed`, {
+          headers: { Accept: "text/event-stream" },
+          signal: control.signal,
+        });
+        if (!response.ok || !response.body) return;
+        const reader = response.body.getReader();
+        const decoder = new TextDecoder();
+        let buffer = "";
+        while (true) {
+          const { value, done } = await reader.read();
+          if (done) break;
+          buffer += decoder.decode(value, { stream: true });
+          let split = buffer.indexOf("\n\n");
+          while (split >= 0) {
+            const raw = buffer.slice(0, split);
+            buffer = buffer.slice(split + 2);
+            const data = raw.split("\n").filter((line) => line.startsWith("data:")).map((line) => line.slice(5).trim()).join("\n");
+            if (data) {
+              const event = JSON.parse(data) as { type?: string; message?: ChatMessage };
+              if (event.type === "message" && event.message) {
+                const message = event.message;
+                queryClient.setQueryData<Chat>(["chat", botId, chatId], (current) => {
+                  if (!current) {
+                    void queryClient.invalidateQueries({ queryKey: ["chat", botId, chatId] });
+                    return current;
+                  }
+                  const messages = current.messages || [];
+                  if (message.id && messages.some((item) => item.id === message.id)) return current;
+                  return {
+                    ...current,
+                    messages: [...messages, message],
+                    message_count: Math.max(current.message_count ?? messages.length, messages.length) + 1,
+                  };
+                });
+              }
+            }
+            split = buffer.indexOf("\n\n");
+          }
+        }
+      } catch {
+        /* the next open chat attaches again */
+      }
+    })();
+    return () => control.abort();
+  }, [botId, chatId]);
   const [error, setError] = useState("");
   const [askId, setAskId] = useState("");
   const [menu, setMenu] = useState(false);

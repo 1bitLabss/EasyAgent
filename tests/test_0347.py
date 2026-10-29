@@ -140,6 +140,35 @@ def test_a_finished_one_shot_is_done(tmp_path):
     assert match["state"] == "done"
 
 
+def test_a_job_that_has_not_run_is_not_ok_and_pause_clears_next(tmp_path):
+    from easyagent.schedule import compile_routine, routine_views
+    from easyagent.store import Store
+
+    store = Store(tmp_path)
+    store.ensure()
+    endpoint = store.add_endpoint(name="local", base_url="http://127.0.0.1:9/v1", api_key=None)
+    bot = store.add_bot(name="Ada", endpoint_id=endpoint["id"], model=None)
+    record = compile_routine({
+        "name": "Inbox sweep",
+        "prompt": "Check the inbox.",
+        "cron": "*/5 * * * *",
+        "timezone": "UTC",
+        "created_at": "2026-10-01T00:00:00+00:00",
+    })
+    saved = store.add_schedule(bot["id"], record)
+    match = next(item for item in routine_views(store) if item["id"] == saved["id"])
+    assert match["state"] == "not run yet"
+    rows = store.list_schedules(bot["id"])
+    for row in rows:
+        if row["id"] == saved["id"]:
+            row["paused"] = True
+            row["next_run"] = "2026-10-29T13:45:00+00:00"
+    store.save_schedules(bot["id"], rows)
+    paused = next(item for item in routine_views(store) if item["id"] == saved["id"])
+    assert paused["state"] == "paused"
+    assert paused["next_run"] is None
+
+
 def test_room_streams_and_a_private_send_is_not_a_500(tmp_path, monkeypatch):
     calls = {"n": 0}
 

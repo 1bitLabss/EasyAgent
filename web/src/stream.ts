@@ -728,7 +728,7 @@ function apply(event: Record<string, unknown>, flight: Flight) {
   if (event.type === "done" && event.chat) finish(flight, event.chat as Chat);
 }
 
-const STREAM_QUIET_MS = 5000;
+const STREAM_QUIET_MS = 40000;
 
 function noteWatch(detail: string) {
   if (typeof window === "undefined") return;
@@ -843,7 +843,11 @@ async function readEvents(response: Response, flight: Flight) {
           .map((line) => line.slice(5).trim())
           .join("\n");
         if (!data && raw.split("\n").some((line) => line.startsWith(":"))) {
-          if (flight.live) flight.live.heardAt = Date.now();
+          const heardAt = Date.now();
+          if (flight.live) flight.live.heardAt = heardAt;
+          else {
+            flight.live = { phase: "thinking", label: "Waiting on model", text: "", reasoning: "", run: null, heardAt };
+          }
         }
         if (data) {
           saw = true;
@@ -1322,13 +1326,27 @@ export async function stopAndSendStored(botId: string, chatId: string, messageId
   }
 }
 
+function dropLocalPause(botId: string, chatId: string) {
+  queryClient.setQueryData<Chat>(["chat", botId, chatId], (chat) => {
+    if (!chat) return chat;
+    const messages = (chat.messages || []).filter(
+      (row) => row.content !== PAUSED_YOU_SENT && row.content !== PAUSED_SAY_CONTINUE,
+    );
+    if (messages.length === (chat.messages || []).length) return chat;
+    return { ...chat, messages };
+  });
+}
+
 export async function stopMessage(botId: string, chatId: string) {
+  dropLocalPause(botId, chatId);
   const flight = flightFor(botId, chatId);
-  if (flight?.control) {
-    flight.sending = false;
-    flight.control.abort();
-  }
   const chat = await api<Chat>(`/api/bots/${botId}/chats/${chatId}/stop`, { method: "POST" });
+  // The open stream draws the queued answer. Closing it here would hide that reply.
+  if (flight && flight.sending && !flight.settled) {
+    const prev = queryClient.getQueryData<Chat>(["chat", botId, chatId]);
+    queryClient.setQueryData(["chat", botId, chatId], mergeChat(prev, chat));
+    return;
+  }
   if (flight) finish(flight, chat);
   else {
     const prev = queryClient.getQueryData<Chat>(["chat", botId, chatId]);

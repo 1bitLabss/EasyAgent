@@ -1518,6 +1518,14 @@ def create_app(data_dir: str | Path | None = None) -> FastAPI:
         if match is None:
             raise HTTPException(404, "Schedule not found.")
         match["paused"] = bool(body.paused)
+        if match["paused"]:
+            match["next_run"] = None
+        else:
+            from datetime import datetime
+
+            from easyagent.schedule import stamp_next
+
+            stamp_next(match, datetime.now().astimezone())
         store.save_schedules(bot_id, schedules)
         if _snapshot_chats(store, bot_id) != chats_before or _snapshot_rooms(store) != rooms_before:
             raise HTTPException(500, "Pausing a schedule changed chats or rooms.")
@@ -1601,6 +1609,26 @@ def create_app(data_dir: str | Path | None = None) -> FastAPI:
     @app.get("/api/bots/{bot_id}/chats/{chat_id}")
     def get_chat(bot_id: str, chat_id: str, window: int | None = None):
         return _public_chat(store, store.get_chat(bot_id, chat_id), window=window)
+
+    @app.get("/api/bots/{bot_id}/chats/{chat_id}/feed")
+    async def chat_feed(bot_id: str, chat_id: str):
+        """An open chat hears a routine line as it is saved. Reloading is not required."""
+        store.get_chat(bot_id, chat_id)
+        from easyagent.chatfeed import subscribe, unsubscribe
+
+        queue = subscribe(bot_id, chat_id)
+
+        async def source():
+            try:
+                while True:
+                    payload = await queue.get()
+                    if not payload:
+                        return
+                    yield _sse(payload)
+            finally:
+                unsubscribe(bot_id, chat_id, queue)
+
+        return StreamingResponse(_serve_sse(source()), media_type="text/event-stream")
 
     @app.post("/api/bots/{bot_id}/chats/{chat_id}/live")
     async def attach_live(bot_id: str, chat_id: str):
@@ -4742,6 +4770,37 @@ def _blank_pause_row(message: dict, ids: list[str]) -> None:
     message["live"] = True
 
 
+def _note_finished_over_pause(chat: dict) -> None:
+    """A reply that finished as the message arrived keeps one row, in place.
+
+    The sentence is 'Finished before pausing', not 'say continue'. A real cut
+    does not call this.
+    """
+    messages = [item for item in chat.get("messages") or [] if isinstance(item, dict)]
+    for message in messages:
+        if message.get("kind") == "status" and message.get("content") in {PAUSED_YOU_SENT, PAUSED_SAY_CONTINUE}:
+            message["content"] = FINISHED_BEFORE_PAUSING
+            message["kind"] = "status"
+            message["role"] = "assistant"
+            message.pop("live", None)
+            message.pop("interrupted", None)
+            chat["messages"] = messages
+            return
+    last_assistant = -1
+    for index, message in enumerate(messages):
+        if message.get("role") != "assistant" or message.get("kind") in {"status", "pickup", "activity"}:
+            continue
+        if str(message.get("content") or "").strip():
+            last_assistant = index
+    if last_assistant < 0:
+        return
+    for index in range(last_assistant + 1, len(messages)):
+        if messages[index].get("role") == "user":
+            messages.insert(index, _status_line(FINISHED_BEFORE_PAUSING))
+            chat["messages"] = messages
+            return
+
+
 def _drop_pause_rows(store: Store, bot_id: str, chat_id: str, *, force: bool = False) -> None:
     """Remove pause sentences that are no longer true. Nothing is yielded between the two saves.
 
@@ -6909,6 +6968,9 @@ def _finish_reply(
     slot = turn_mod.slot_for(store, chat_id)
     if (visible or "").strip() and not slot.cut_unfinished:
         slot.sealed_answer = True
+    if getattr(slot, "finished_over_pause", False) and not slot.cut_unfinished:
+        _note_finished_over_pause(chat)
+        slot.finished_over_pause = False
     if not slot.side_answer:
         _drop_pause_rows(store, bot_id, chat_id)
         chat = store.get_chat(bot_id, chat_id)
@@ -7320,6 +7382,7 @@ async def _stream_reply(
         slot = turn_mod.slot_for(store, chat_id)
         if slot.user_stop and queued_items(store, bot_id, chat_id):
             _settle_interrupted(store, bot_id, chat_id, reason)
+            _drop_pause_rows(store, bot_id, chat_id, force=True)
             turn_mod.renew_cancel()
             slot.user_stop = False
             slot.reason = ""

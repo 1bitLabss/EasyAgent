@@ -39,9 +39,17 @@ export function JobsPanel() {
   const busy = rows.filter((row) => row.state === "running" || row.state === "queued").length;
 
   async function pause(row: JobRow) {
+    const pausing = row.state !== "paused" && row.state !== "done";
+    queryClient.setQueryData<JobRow[]>(["routines"], (current) =>
+      (current || []).map((item) =>
+        item.id === row.id && item.bot_id === row.bot_id
+          ? { ...item, state: pausing ? "paused" : item.last_run_at || item.last_status ? "ok" : "not run yet", paused: pausing, next_run: pausing ? null : item.next_run }
+          : item,
+      ),
+    );
     await api(`/api/bots/${row.bot_id}/schedules/${row.id}/pause`, {
       method: "POST",
-      json: { paused: row.state !== "paused" && row.state !== "done" },
+      json: { paused: pausing },
     });
     await queryClient.invalidateQueries({ queryKey: ["routines"] });
   }

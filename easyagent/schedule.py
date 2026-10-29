@@ -891,6 +891,8 @@ def routine_views(store: Store) -> list[dict]:
                 state = "done"
             elif schedule.get("paused"):
                 state = "paused"
+            elif not schedule.get("last_run_at") and not schedule.get("last_status"):
+                state = "not run yet"
             else:
                 state = str(schedule.get("last_status") or "ok")
             rows.append({
@@ -900,7 +902,7 @@ def routine_views(store: Store) -> list[dict]:
                 "name": schedule.get("name") or "Routine",
                 "kind": schedule.get("kind") or "",
                 "describe": plain_phrase(schedule),
-                "next_run": schedule.get("next_run"),
+                "next_run": None if schedule.get("paused") else schedule.get("next_run"),
                 "last_run_at": schedule.get("last_run_at"),
                 "last_status": schedule.get("last_status") or "",
                 "last_error": schedule.get("last_error") or "",

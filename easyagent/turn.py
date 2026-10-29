@@ -75,6 +75,8 @@ class Slot:
         # A sealed final answer sets sealed_answer and leaves this false.
         self.cut_unfinished = False
         self.sealed_answer = False
+        # The reply ended while a message was waiting. The row says finished, not continue.
+        self.finished_over_pause = False
         self.listeners: list = []
         self.notify = None
 
@@ -295,6 +297,7 @@ def bind(store, chat_id: str, bot_id: str = "", *, resume: bool = False) -> Slot
     slot.sealed = False
     slot.cut_unfinished = False
     slot.sealed_answer = False
+    slot.finished_over_pause = False
     slot.cancel = asyncio.Event()
     slot.client = None
     slot.proc = None
@@ -521,6 +524,7 @@ def mark_pause_cut() -> None:
         return
     slot.cut_unfinished = True
     slot.sealed_answer = False
+    slot.finished_over_pause = False
 
 
 def clear_pause_cut() -> None:

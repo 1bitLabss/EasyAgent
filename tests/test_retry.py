@@ -101,8 +101,12 @@ def test_pause_notices_stop_without_waiting_out_the_backoff():
     asyncio.run(run())
 
 
-def test_headers_that_never_arrive_time_out_before_the_body():
-    """Connect is allowed. Silence before the first byte is a timeout, and it is one attempt when the caller retries."""
+def test_headers_that_never_arrive_time_out_before_the_body(monkeypatch):
+    """Silence before the first byte uses the first-token wait. It is not cut and retried."""
+    from easyagent.generation import GenerationLimit, Limits
+
+    short = Limits(first_token_seconds=0.4)
+    monkeypatch.setattr("easyagent.generation.current_limits", lambda: short)
 
     async def run():
         handlers: list[asyncio.Task] = []
@@ -133,11 +137,11 @@ def test_headers_that_never_arrive_time_out_before_the_body():
                 task.cancel()
             server.close()
             await server.wait_closed()
+        assert len(handlers) == 1
 
-    with pytest.raises(ProviderError) as caught:
+    with pytest.raises(GenerationLimit) as caught:
         asyncio.run(run())
-    assert "Timed out calling" in str(caught.value)
-    assert "Retried for" not in str(caught.value)
+    assert caught.value.reason == "first_token"
 
 
 def test_a_flaky_connect_is_shown_as_reconnecting_and_then_answers(tmp_path, monkeypatch):

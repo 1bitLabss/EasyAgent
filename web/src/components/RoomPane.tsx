@@ -21,8 +21,28 @@ export function RoomPane() {
   const [draft, setDraft] = useState("");
   const [pending, setPending] = useState("");
   const [statuses, setStatuses] = useState<Status[]>([]);
+  const [approvals, setApprovals] = useState<{ bot_id: string; name: string }[]>([]);
   const [error, setError] = useState("");
   const data = room.data;
+
+  function rememberUser(message: ChatMessage) {
+    if (!roomId) return;
+    let placed = false;
+    queryClient.setQueryData(["room", roomId], (current: RoomView | undefined) => {
+      if (!current) return current;
+      placed = true;
+      const messages = current.messages || [];
+      if (message.id && messages.some((item) => item.id === message.id)) return current;
+      return { ...current, messages: [...messages, message] };
+    });
+    if (placed) setPending("");
+  }
+
+  function rememberApproval(botId: string, name: string) {
+    if (!botId) return;
+    setApprovals((current) => (current.some((item) => item.bot_id === botId) ? current : [...current, { bot_id: botId, name }]));
+    void queryClient.invalidateQueries({ queryKey: ["approvals", botId] });
+  }
 
   useEffect(() => {
     if (!roomId) return;
@@ -45,6 +65,8 @@ export function RoomPane() {
             const payload = raw.split("\n").filter((line) => line.startsWith("data:")).map((line) => line.slice(5).trim()).join("\n");
             if (payload) {
               const event = JSON.parse(payload) as { type?: string; room?: RoomView; bot_id?: string; name?: string; state?: string; label?: string; message?: ChatMessage };
+              if (event.type === "user" && event.message) rememberUser(event.message);
+              if (event.type === "approval" && event.bot_id) rememberApproval(event.bot_id, event.name || "");
               if (event.type === "bot_status" && event.bot_id) {
                 setStatuses((current) => {
                   const next = current.filter((item) => item.bot_id !== event.bot_id);
@@ -99,7 +121,9 @@ export function RoomPane() {
             continue;
           }
           const event = JSON.parse(payload) as { type?: string; room?: RoomView; message?: ChatMessage; bot_id?: string; name?: string; state?: string; label?: string };
-          if (event.type === "user") setPending("");
+          if (event.type === "user" && event.message) rememberUser(event.message);
+          else if (event.type === "user") setPending("");
+          if (event.type === "approval" && event.bot_id) rememberApproval(event.bot_id, event.name || "");
           if (event.type === "bot_status" && event.bot_id) {
             setStatuses((current) => {
               const next = current.filter((item) => item.bot_id !== event.bot_id);
@@ -165,6 +189,11 @@ export function RoomPane() {
             <ApprovalCard botId={card.bot_id} botName="" active />
           </div>
         ))}
+        {approvals.filter((card) => !(data.pending_approvals || []).some((item) => item.bot_id === card.bot_id)).map((card) => (
+          <div key={card.bot_id} data-testid="room-approval">
+            <ApprovalCard botId={card.bot_id} botName={card.name} active />
+          </div>
+        ))}
         {error ? <p className="text-sm text-danger" role="alert">{error}</p> : null}
       </div>
       <form className="border-t border-border p-3" onSubmit={(event) => { event.preventDefault(); void send(); }}>
@@ -172,8 +201,13 @@ export function RoomPane() {
           className="w-full rounded-lg border border-border bg-card p-2 text-sm"
           data-testid="room-draft"
           value={draft}
-          placeholder="Message the room. Use @Name to ask one member."
+          placeholder="Message the room. Enter to send. Use @Name to ask one member."
           onChange={(event) => setDraft(event.target.value)}
+          onKeyDown={(event) => {
+            if (event.nativeEvent.isComposing || event.key !== "Enter" || event.shiftKey) return;
+            event.preventDefault();
+            void send();
+          }}
         />
         <div className="mt-2 flex gap-2">
           <button type="submit" className="rounded-full bg-foreground px-3 py-1 text-sm text-background">Send</button>

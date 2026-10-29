@@ -2136,39 +2136,52 @@ async def _one_piece(body, wait: float):
         return None
 
 
+def _note_reply_ended() -> None:
+    """The socket closed with nothing left. The answer is whole, so the pause row is not 'say continue'."""
+    slot = turn_mod.current_slot()
+    if slot is None:
+        return
+    slot.finished_over_pause = True
+    turn_mod.clear_pause_cut()
+
+
+async def _peek_paused(body, grace: float):
+    """The next piece, or (None, ended) when this reply has nothing further.
+
+    A timeout means the model is still going. Closing the socket, or a clean
+    end, means the reply already finished.
+    """
+    try:
+        return await _one_piece(body, grace), False
+    except TimeoutError:
+        return None, True
+    except httpx.HTTPError:
+        return None, False
+
+
 async def _pause_unless_the_reply_ended(body) -> AsyncIterator[str]:
     """A pause on the last token finishes the reply. A later token still pauses.
 
     Nothing new is shown unless this read is the end of the reply. A buffer of
     later tokens would grow the bubble above the message the user just sent.
+    The peek waits past the socket-close delay, so a reply that has already
+    ended is not labeled a cut.
     """
-    try:
-        piece = await _one_piece(body, 0.08)
-    except TimeoutError:
-        turn_mod.raise_if_cancelled()
+    grace = turn_mod._PAUSE_CLOSE_DELAY + 0.03
+    piece, stalled = await _peek_paused(body, grace)
+    if stalled:
         turn_mod.mark_pause_cut()
         raise turn_mod.TurnCancelled()
-    except httpx.HTTPError:
-        turn_mod.raise_if_cancelled()
-        raise
     if piece is None:
+        _note_reply_ended()
         return
-    try:
-        nxt = await _one_piece(body, 0.08)
-    except TimeoutError:
-        turn_mod.raise_if_cancelled()
+    nxt, stalled = await _peek_paused(body, grace)
+    if stalled or nxt is not None:
         turn_mod.mark_pause_cut()
         raise turn_mod.TurnCancelled()
-    except httpx.HTTPError:
-        turn_mod.raise_if_cancelled()
-        raise
-    if nxt is None:
-        if piece:
-            yield piece
-        return
-    turn_mod.mark_pause_cut()
-    turn_mod.raise_if_cancelled()
-    raise turn_mod.TurnCancelled()
+    _note_reply_ended()
+    if piece:
+        yield piece
 
 
 async def _stream_attempt(
@@ -2206,9 +2219,14 @@ async def _stream_attempt(
     try:
         turn_mod.raise_if_cancelled()
         opened = client.stream("POST", url, json=payload, headers=headers)
+        # Headers can sit until the first token. A local model gets the long
+        # wait. This is one live connection: it is not cut at 120s and retried.
+        header_wait = max(float(timeout), float(watch.limits.first_token_seconds))
         try:
-            response = await asyncio.wait_for(opened.__aenter__(), timeout)
-        except (httpx.HTTPError, asyncio.TimeoutError) as exc:
+            response = await asyncio.wait_for(opened.__aenter__(), header_wait)
+        except asyncio.TimeoutError as exc:
+            raise GenerationLimit("first_token") from exc
+        except httpx.HTTPError as exc:
             _raise_transport(exc, base_url)
         try:
             if response.status_code >= 400:

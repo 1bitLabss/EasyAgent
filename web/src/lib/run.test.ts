@@ -46,6 +46,12 @@ describe("run tone", () => {
     })).toEqual({ kind: "waiting", text: "Model is reading the prompt… 8s" });
     expect(runPresence({
       active: true,
+      step: "Waiting on model",
+      startedAt: "2026-10-08T12:00:00Z",
+      now: start + 125_000,
+    })).toEqual({ kind: "waiting", text: "Model is busy/slow… 2m 5s" });
+    expect(runPresence({
+      active: true,
       step: "Queued: waiting for local (busy with Wire)",
       startedAt: "2026-10-08T12:00:00Z",
       now: start + 8_000,

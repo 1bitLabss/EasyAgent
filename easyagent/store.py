@@ -1373,6 +1373,10 @@ class Store:
             chat["messages"] = messages
             chat["updated_at"] = now_iso()
             atomic_write_json(self._chat_path(chat["bot_id"], chat["id"]), chat)
+            saved = messages[-1]
+        from easyagent.chatfeed import publish
+
+        publish(bot_id, chat["id"], {"type": "message", "message": saved})
         return chat
 
     def read_host(self) -> dict:

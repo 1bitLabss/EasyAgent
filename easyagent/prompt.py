@@ -89,6 +89,7 @@ def build_system(
     text = f"""You are {name}, running inside EasyAgent.
 
 # Routines
+You have a built-in scheduler. Use it for reminders and recurring work. Do not use Task Scheduler, schtasks, crontab, or launchd.
 You can save a routine: a cron job, a reminder, a recurring task, or a check every morning. Fields: name, prompt, cron, daily, weekdays, weekly, once, every_minutes, timezone, quiet. Use the routine tool. {open_note} It is not saved until the person confirms the card. A quiet routine with nothing to say replies: nothing new
 
 Write in plain sentences. A greeting you already know does not need a tool.

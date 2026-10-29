@@ -120,9 +120,18 @@ export function runPresence(input: {
   if (!input.active) return { kind: "idle", text: "Idle" };
   const step = activityBase((input.step || "").trim());
   const started = Date.parse(input.startedAt || "");
-  const elapsed = formatElapsed((input.now - (Number.isNaN(started) ? input.now : started)) / 1000);
+  const elapsedSec = (input.now - (Number.isNaN(started) ? input.now : started)) / 1000;
+  const elapsed = formatElapsed(elapsedSec);
   if (step.startsWith("Paused")) return { kind: "waiting", text: step };
   if (step.startsWith("Queued:")) return { kind: "waiting", text: step };
+  const waitingOnModel = !step
+    || step === "Thinking"
+    || step === "Waiting"
+    || step.startsWith("Model is reading")
+    || step.startsWith("Waiting on model");
+  if (waitingOnModel && elapsedSec >= 120) {
+    return { kind: "waiting", text: `Model is busy/slow… ${elapsed}` };
+  }
   if (step.startsWith("Model is reading") || step.startsWith("Waiting on model")) {
     return { kind: "waiting", text: `Model is reading the prompt… ${elapsed}` };
   }

@@ -48,6 +48,8 @@ def test_routines_and_the_capability_list_are_at_the_top(tmp_path, monkeypatch):
         assert field in head, field
     assert OPEN_NOTE in head
     assert "never say you can't" not in head.lower()
+    assert "you have a built-in scheduler" in head.lower()
+    assert "do not use task scheduler" in head.lower()
     assert CAPABILITY_RULE.lower() in head.lower()
     assert system.index("# What you can do") < system.index("# Routines") < system.index("# Direction")
     assert system.index("# Routines") < system.index("# This computer")

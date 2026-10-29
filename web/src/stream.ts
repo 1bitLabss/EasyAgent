@@ -1109,23 +1109,9 @@ function markNotSent(botId: string, chatId: string, clientId: string) {
   });
 }
 
-async function waitIfTheAnswerAlreadyStopped(existing: Flight | null) {
-  // A follow-up typed as the last tokens land must not share the dying reader.
-  // A reply that is still growing is a real busy send and is left alone.
-  if (!existing || !existing.sending || existing.settled) return;
-  const before = existing.live?.text?.length || 0;
-  if (!before) return;
-  await new Promise((resolve) => window.setTimeout(resolve, 150));
-  const after = existing.live?.text?.length || 0;
-  if (existing.settled || after !== before) return;
-  const started = Date.now();
-  while (!existing.settled && existing.sending && Date.now() - started < 2000) {
-    await new Promise((resolve) => window.setTimeout(resolve, 40));
-  }
-}
-
 export async function sendMessage(botId: string, chatId: string, text: string, file?: File | null, clientId?: string) {
-  await waitIfTheAnswerAlreadyStopped(flightFor(botId, chatId));
+  // The person's bubble is drawn before any wait. A finished turn is sorted out
+  // on the server, after this insert, not by holding the row off the screen.
   const cached = queryClient.getQueryData<Chat>(["chat", botId, chatId]);
   const existing = flightFor(botId, chatId);
   // A settled flight has saved its answer. A stale "running" flag must not queue the next line.

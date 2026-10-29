@@ -3088,8 +3088,18 @@ async def _heartbeat(source):
                 break
             yield item
     finally:
-        if pending is not None and not pending.done():
-            pending.cancel()
+        task = pending
+        pending = None
+        if task is None:
+            return
+        if not task.done():
+            task.cancel()
+        try:
+            await task
+        except (asyncio.CancelledError, StopAsyncIteration):
+            return
+        except Exception:
+            return
 
 
 def _serve_sse(source):

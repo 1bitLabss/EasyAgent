@@ -2055,6 +2055,8 @@ async def _stream_once(
             ):
                 yield piece
             return
+        except StopAsyncIteration:
+            return
         except _ToolParseAgain as exc:
             last_excerpt = exc.excerpt or last_excerpt
             if exc.drop_flag:
@@ -2221,11 +2223,16 @@ async def _stream_attempt(
         opened = client.stream("POST", url, json=payload, headers=headers)
         # Headers can sit until the first token. A local model gets the long
         # wait. This is one live connection: it is not cut at 120s and retried.
+        # Stay in this task. wait_for() would run the enter in another task,
+        # and that task's StopAsyncIteration is never retrieved — the lane stays held.
         header_wait = max(float(timeout), float(watch.limits.first_token_seconds))
         try:
-            response = await asyncio.wait_for(opened.__aenter__(), header_wait)
-        except asyncio.TimeoutError as exc:
+            async with asyncio.timeout(header_wait):
+                response = await opened.__aenter__()
+        except TimeoutError as exc:
             raise GenerationLimit("first_token") from exc
+        except StopAsyncIteration as exc:
+            raise ProviderError(EMPTY_TOOL_TEXT) from exc
         except httpx.HTTPError as exc:
             _raise_transport(exc, base_url)
         try:
@@ -2276,10 +2283,13 @@ async def _stream_attempt(
                     except GenerationLimit:
                         raise
                 finally:
-                    release.cancel()
+                    # Closing the socket can finish the body with StopAsyncIteration.
+                    # Retrieve it here. Leaving it on the task holds the lane.
+                    if not release.done():
+                        release.cancel()
                     try:
                         await release
-                    except asyncio.CancelledError:
+                    except (asyncio.CancelledError, StopAsyncIteration):
                         pass
                 watch.observe(piece or "")
                 if piece:
@@ -2288,15 +2298,24 @@ async def _stream_attempt(
                     yield piece
         except GenerationLimit:
             raise
+        except StopAsyncIteration:
+            pass
         except (httpx.HTTPError, asyncio.TimeoutError) as exc:
             _raise_transport(exc, base_url)
         finally:
-            await opened.__aexit__(None, None, None)
-            opened = None
+            if opened is not None:
+                try:
+                    await opened.__aexit__(None, None, None)
+                except (StopAsyncIteration, asyncio.CancelledError):
+                    pass
+                opened = None
     finally:
         _mark_model_read(False)
         turn_mod.detach_client(client)
-        await client.aclose()
+        try:
+            await client.aclose()
+        except (StopAsyncIteration, asyncio.CancelledError):
+            pass
     if not yielded:
         # A name this computer cannot fence is still a call. The turn answers
         # it with the valid tool list. A reply with no call stays empty.
@@ -2338,6 +2357,12 @@ async def _stream_window(
                     retry.charge_unreachable()
                     yield piece
                 retry.charge_unreachable()
+                return
+            except StopAsyncIteration:
+                return
+            except RuntimeError as exc:
+                if "StopAsyncIteration" not in str(exc):
+                    raise
                 return
             except turn_mod.TurnCancelled:
                 raise
@@ -2410,6 +2435,12 @@ async def stream_complete(
             ):
                 produced = True
                 yield piece
+            return
+        except StopAsyncIteration:
+            return
+        except RuntimeError as exc:
+            if "StopAsyncIteration" not in str(exc):
+                raise
             return
         except turn_mod.TurnCancelled:
             raise

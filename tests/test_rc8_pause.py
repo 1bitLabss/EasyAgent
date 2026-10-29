@@ -110,8 +110,8 @@ def test_a_finished_answer_drops_say_continue_on_screen_and_after_reload(tmp_pat
     client.close()
 
 
-def test_a_mid_text_cut_still_says_continue_after_reload(tmp_path, monkeypatch):
-    """Text that stopped before the model finished is still resumable."""
+def test_a_prose_cut_does_not_stay_say_continue_after_the_next_answer(tmp_path, monkeypatch):
+    """A prose cut that already has the next answer is not left as say-continue."""
     import easyagent.llm as llm
     from easyagent import turn as turn_mod
     from easyagent.hermes_busy import _hm_handle_running_session_message
@@ -153,10 +153,11 @@ def test_a_mid_text_cut_still_says_continue_after_reload(tmp_path, monkeypatch):
     stored = _visible(saved["messages"])
     assert stored == screen
     assert partial in stored
-    assert PAUSED_SAY_CONTINUE in stored
+    assert "The kiln is warm." in stored
+    assert PAUSED_SAY_CONTINUE not in stored
     assert PAUSED_YOU_SENT not in stored
-    assert stored.count(PAUSED_SAY_CONTINUE) == 1
-    assert saved["run"]["status"] == "paused"
+    assert FINISHED_BEFORE_PAUSING not in stored
+    assert saved["run"]["status"] != "paused"
     again = client.get(f"/api/bots/{bot['id']}/chats/{chat['id']}").json()
     assert _visible(again["messages"]) == stored
     client.close()

@@ -4890,6 +4890,55 @@ def _drop_pause_rows(store: Store, bot_id: str, chat_id: str, *, force: bool = F
     _omit_live_ids(store, bot_id, chat_id, ids)
 
 
+def _prose_cut_was_answered(store: Store, bot_id: str, chat_id: str) -> bool:
+    """The pause cut the model's own text, and the new message already has an answer."""
+    slot = turn_mod.slot_for(store, chat_id)
+    if not slot.cut_unfinished or getattr(slot, "paused_over_tool", False):
+        return False
+    try:
+        chat = store.get_chat(bot_id, chat_id)
+    except StoreError:
+        return False
+    messages = [item for item in chat.get("messages") or [] if isinstance(item, dict)]
+    last_user = -1
+    for index, message in enumerate(messages):
+        if message.get("role") == "user":
+            last_user = index
+    if last_user < 0:
+        return False
+    for message in messages[last_user + 1:]:
+        if message.get("role") != "assistant" or message.get("kind") in {"status", "pickup", "activity"}:
+            continue
+        if _assistant_has_body(message):
+            return True
+    return False
+
+
+def _retire_prose_cut(store: Store, bot_id: str, chat_id: str) -> dict | None:
+    """Drop the continue row. The prose that was cut stays; it is not the current job."""
+    slot = turn_mod.slot_for(store, chat_id)
+    slot.side_answer = False
+    slot.cut_unfinished = False
+    slot.paused_over_tool = False
+    _drop_pause_rows(store, bot_id, chat_id, force=True)
+    try:
+        chat = store.get_chat(bot_id, chat_id)
+    except StoreError:
+        return None
+    run = chat.get("run") if isinstance(chat.get("run"), dict) else {}
+    if run.get("status") in {"paused", "running"} and not _transcript_has_queued(chat):
+        _apply_run(chat, status="idle", step="")
+        chat["updated_at"] = now_iso()
+        try:
+            store.save_chat(chat)
+        except (StoreError, OSError, HTTPException):
+            _log.warning("Could not clear a prose pause.")
+    try:
+        return _public_chat(store, store.get_chat(bot_id, chat_id))
+    except StoreError:
+        return None
+
+
 def _park_side_answer(store: Store, bot_id: str, chat_id: str) -> dict | None:
     """The first job stopped so this message could be answered. Say so, once.
 
@@ -4926,6 +4975,11 @@ def _park_side_answer(store: Store, bot_id: str, chat_id: str) -> dict | None:
             return _public_chat(store, store.get_chat(bot_id, chat_id))
         except StoreError:
             return None
+    # A prose reply was cut so this message could be answered. The new answer
+    # is in. "Say continue" would claim the old sentence is still the job.
+    # A tool that was in flight is different: continue still resumes that work.
+    if _prose_cut_was_answered(store, bot_id, chat_id):
+        return _retire_prose_cut(store, bot_id, chat_id)
     try:
         chat = store.get_chat(bot_id, chat_id)
     except StoreError:

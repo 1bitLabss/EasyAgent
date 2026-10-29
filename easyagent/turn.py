@@ -75,6 +75,9 @@ class Slot:
         # A sealed final answer sets sealed_answer and leaves this false.
         self.cut_unfinished = False
         self.sealed_answer = False
+        # A message that arrived during a tool. Continue still has work to resume.
+        # A message during the model's own text does not.
+        self.paused_over_tool = False
         # The reply ended while a message was waiting. The row says finished, not continue.
         self.finished_over_pause = False
         self.listeners: list = []
@@ -314,6 +317,7 @@ def bind(store, chat_id: str, bot_id: str = "", *, resume: bool = False) -> Slot
     slot.cut_unfinished = False
     slot.sealed_answer = False
     slot.finished_over_pause = False
+    slot.paused_over_tool = False
     slot.cancel = asyncio.Event()
     slot.client = None
     slot.proc = None
@@ -493,6 +497,7 @@ def request_user_pause(store, chat_id: str) -> None:
         return
     slot.pause_for_user = True
     if _tool_in_progress(slot):
+        slot.paused_over_tool = True
         _announce_tool_pause(slot)
         return
     # No model socket yet: the step finishes, and the next model call sees the pause.

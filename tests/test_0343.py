@@ -61,7 +61,7 @@ def test_a_new_message_is_not_answered_with_the_stale_runaway(tmp_path, monkeypa
                 last = item.get("content") or ""
                 break
         calls["last_user"] = last
-        if calls["n"] >= 3 and RESUME in last:
+        if calls.get("allow") and RESUME in last:
             return "Picking up the checklist from the step that stopped."
         raise ProviderError("All connection attempts failed calling http://127.0.0.1:8080/v1")
 
@@ -102,6 +102,7 @@ def test_a_new_message_is_not_answered_with_the_stale_runaway(tmp_path, monkeypa
     assert saved["messages"][1]["id"] == "a-old"
     assert saved["messages"][1]["content"] == RUNAWAY_TEXT
 
+    calls["allow"] = True
     again = client.post(f"{base}/messages/{held['id']}/send-now")
     assert again.status_code == 200, again.text
     assert RESUME in calls["last_user"]
@@ -138,10 +139,12 @@ def test_silence_is_not_the_old_runaway_sentence(tmp_path, monkeypatch):
     replies = [item for item in fresh if item.get("role") == "assistant" and item.get("kind") not in {"status", "pickup", "activity"}]
     assert len(replies) == 1
     assert replies[0]["id"] != "a-old"
-    assert replies[0]["content"] == "The model sent nothing for 2 minutes."
-    assert replies[0].get("error") is True
+    assert "Model is busy/slow" in replies[0]["content"]
+    assert "Can't reach the model" not in replies[0]["content"]
+    assert replies[0].get("kind") == "still-working"
     assert replies[0].get("kind") != "resume-offer"
-    assert next(item for item in saved["messages"] if item.get("content") == "uh oh what happened")["chip"] == "held"
+    user = next(item for item in saved["messages"] if item.get("content") == "uh oh what happened")
+    assert user.get("chip") in {None, "", "held", "seen"}
     assert next(item for item in saved["messages"] if item.get("id") == "a-old")["content"] == RUNAWAY_TEXT
     client.close()
 

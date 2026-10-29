@@ -64,7 +64,8 @@ _READ_CAP = 12000
 _WRITE_CAP = 100_000
 _SCAN_CAP = 4000
 _MODEL_NAMES = 24
-_MODEL_CHARS = 1200
+_MODEL_CHARS = 8000
+_WIDE_KINDS = {"search", "fetch", "research", "browser", "mcp", "memory"}
 _COMMAND_TIMEOUT = 30
 
 _FILES_FENCE = re.compile(r"```files[ \t]*\r?\n(.*?)```", re.DOTALL | re.IGNORECASE)
@@ -1093,6 +1094,27 @@ def _request_from_call(data: dict) -> ToolRequest:
         if not isinstance(listed, list):
             listed = []
         return ToolRequest(kind="delegate", body=task, command=json.dumps([str(item) for item in listed]))
+    if name == "python":
+        code = str(raw_args.get("code") or content or "").strip()
+        if not code:
+            raise ToolError("python needs code. Nothing was run.")
+        return ToolRequest(kind="python", body=code, timeout=_int_arg(raw_args.get("timeout"), -1))
+    if name == "ask_bot":
+        who = str(raw_args.get("name") or raw_args.get("bot") or "").strip()
+        task = str(raw_args.get("message") or raw_args.get("task") or content or "").strip()
+        if not who or not task:
+            raise ToolError("ask_bot needs a bot name and a message. Nothing was sent.")
+        return ToolRequest(kind="ask_bot", path=who, body=task)
+    if name == "helper":
+        task = str(raw_args.get("task") or content or "").strip()
+        if not task:
+            raise ToolError("helper needs a task. Nothing was started.")
+        return ToolRequest(
+            kind="delegate",
+            path=str(raw_args.get("name") or "helper").strip(),
+            body=task,
+            command=str(raw_args.get("tools") or ""),
+        )
     if name == "finish":
         status = str(raw_args.get("status") or action or "proven").strip().lower()
         if status not in {"proven", "unproven", "blocked"}:
@@ -2692,7 +2714,9 @@ def _shell_workdir(store: Store, workdir: str) -> str:
             raise ToolError(f"{path} is a secret folder. The command was not run.")
         roots = _workspace_roots(store, bot_id or None, "")
         if roots and not _inside(path, roots):
-            raise ToolError(f"{path} is outside this bot's folders. The command was not run.")
+            from easyagent.safety import _not_run
+
+            raise ToolError(_not_run(f"{path} is outside this bot's folders. The command was not run."))
     if slot is not None:
         slot.cwd = str(path)
     return str(path)
@@ -2852,7 +2876,10 @@ def _run_shell(store: Store, command: str, *, timeout: int = -1, workdir: str = 
                 proc.communicate(timeout=2)
             except subprocess.TimeoutExpired:
                 pass
-            raise ToolError(f"The command timed out after {wait} s. Nothing else was changed.") from exc
+            raise ToolError(
+                f"The command timed out after {wait} s. Nothing else was changed. "
+                "Re-run with timeout up to 900, or run it in the background and poll."
+            ) from exc
     finally:
         turn_mod.detach_proc(proc)
     if turn_mod.cancelled():
@@ -3498,7 +3525,17 @@ async def _routine_proposal(store: Store, request: ToolRequest, bot_id: str | No
         "pause": "Pause this routine?",
         "resume": "Resume this routine?",
     }.get(action, "Confirm this routine?")
-    detail = confirm_detail(name, shown, prompt)
+    single_slot = False
+    if bot_id:
+        try:
+            endpoint = store.get_endpoint(store.get_bot(bot_id).get("endpoint_id"))
+        except Exception:
+            endpoint = None
+        if isinstance(endpoint, dict):
+            from easyagent.gate import clamp_parallel
+
+            single_slot = clamp_parallel(endpoint.get("max_parallel")) <= 1
+    detail = confirm_detail(name, shown, prompt, single_slot=single_slot)
     from easyagent.yolo import passes
 
     if bot_id and passes(store, bot_id):
@@ -3517,9 +3554,11 @@ async def _routine_proposal(store: Store, request: ToolRequest, bot_id: str | No
             },
         )
         try:
-            return apply_confirmed(store, bot_id or "", spec)
+            saved = apply_confirmed(store, bot_id or "", spec)
         except (ScheduleError, StoreError) as exc:
             raise ToolError(str(exc)) from exc
+        _queue_turn_note("routine", f"Routine {name} saved. View jobs.")
+        return f"Saved. {saved}"
     card = _make_card(
         bot_id,
         Verdict("ask", "routine", why, detail, ""),
@@ -3534,12 +3573,18 @@ async def _routine_proposal(store: Store, request: ToolRequest, bot_id: str | No
     decision = await _wait(card)
     _PENDING.pop(card.id, None)
     _audit(store, bot_id, {"at": now_iso(), "decision": decision or "deny", "rule": "routine", "why": why, "detail": name})
+    if decision == "expired":
+        _queue_turn_note("routine", f"Routine {name} was not saved. The card expired. Try again.")
+        raise ToolError("Not saved: the card expired. Try again.")
     if decision not in {"approve", "always"}:
-        raise ToolError("You did not confirm that routine. It was not saved.")
+        _queue_turn_note("routine", f"Routine {name} was not saved. You denied the card.")
+        raise ToolError("Not saved: you denied that routine.")
     try:
-        return apply_confirmed(store, bot_id or "", spec)
+        saved = apply_confirmed(store, bot_id or "", spec)
     except (ScheduleError, StoreError) as exc:
         raise ToolError(str(exc)) from exc
+    _queue_turn_note("routine", f"Routine {name} saved. View jobs.")
+    return f"Saved. {saved}"
 
 
 async def execute(store: Store, request: ToolRequest, bot_id: str | None = None) -> str:
@@ -3568,6 +3613,46 @@ async def execute(store: Store, request: ToolRequest, bot_id: str | None = None)
     return honesty.after_tool(request, result, ok=True)
 
 
+async def _run_python(store: Store, request: ToolRequest, bot_id: str | None) -> str:
+    """Write the script in the workspace and run it. The terminal's safety rules still apply."""
+    import sys
+    import uuid
+    from pathlib import Path
+
+    code = (request.body or "").strip()
+    if not code:
+        raise ToolError("python needs code. Nothing was run.")
+    try:
+        from easyagent.workspace import bot_workspace
+
+        root = Path(bot_workspace(store, bot_id or "", create=True))
+    except Exception:
+        root = Path(turn_mod.tool_cwd())
+    folder = root / ".ea-run"
+    folder.mkdir(parents=True, exist_ok=True)
+    path = folder / f"run-{uuid.uuid4().hex[:8]}.py"
+    path.write_text(code + "\n", encoding="utf-8")
+    wait = request.timeout if request.timeout and request.timeout > 0 else 120
+    if wait > 900:
+        wait = 900
+    command = f'"{sys.executable}" "{path}"'
+    return await _execute_now(store, ToolRequest(kind="shell", command=command, timeout=wait), bot_id)
+
+
+async def _run_ask_bot(store: Store, bot_id: str, name: str, message: str) -> str:
+    from easyagent.app import _ask_named
+
+    slot = turn_mod.current_slot()
+    chat_id = slot.chat_id if slot is not None else ""
+    if not chat_id:
+        raise ToolError("ask_bot needs an open chat. Nothing was sent.")
+    result = await _ask_named(store, bot_id, chat_id, name, message)
+    reply = ""
+    if isinstance(result, dict):
+        reply = str(result.get("reply") or "")
+    return reply or f"Asked {name}."
+
+
 async def _execute_now(store: Store, request: ToolRequest, bot_id: str | None = None) -> str:
     _refuse_disabled(request)
     turn_mod.raise_if_cancelled()
@@ -3578,6 +3663,10 @@ async def _execute_now(store: Store, request: ToolRequest, bot_id: str | None = 
     limited = scope_block(request.kind)
     if limited:
         raise ToolError(limited + " It was not run.")
+    if request.kind == "python":
+        return await _run_python(store, request, bot_id)
+    if request.kind == "ask_bot":
+        return await _run_ask_bot(store, bot_id or "", request.path, request.body)
     if request.kind == "skill":
         from easyagent.botskills import SkillError, read_skill, visible_skills, write_skill
 
@@ -3924,8 +4013,8 @@ def model_slice(store: Store, request: ToolRequest, result: str, messages: list[
         lines = "\n".join(shown)
         note = f"\n{more} more names are not included." if more else ""
         text = f"Listed {request.path}. {len(names)} names.\n{lines}{note}".strip()
-        if len(text) > _MODEL_CHARS:
-            text = text[: _MODEL_CHARS - 30].rstrip() + "\n(more names not included)"
+        if len(text) > 1200:
+            text = text[: 1170].rstrip() + "\n(more names not included)"
         return text
     if request.kind == "files" and request.action == "list" and _wants_largest(messages):
         try:
@@ -3950,8 +4039,8 @@ def model_slice(store: Store, request: ToolRequest, result: str, messages: list[
         lines = "\n".join(shown)
         note = f"\n{more} more names are not included." if more else ""
         text = f"Listed {folder}. {len(names)} names.\n{lines}{note}".strip()
-        if len(text) > _MODEL_CHARS:
-            text = text[: _MODEL_CHARS - 30].rstrip() + "\n(more names not included)"
+        if len(text) > 1200:
+            text = text[: 1170].rstrip() + "\n(more names not included)"
         return text
     body = result or ""
     if _full_page_read(request, body):
@@ -3967,8 +4056,12 @@ def model_slice(store: Store, request: ToolRequest, result: str, messages: list[
         from easyagent.truncate import truncate_head_tail
 
         return truncate_head_tail(body, 60_000, label="RESULT")
-    if len(body) > _MODEL_CHARS:
-        body = body[: _MODEL_CHARS - 24].rstrip() + "\n[result truncated]"
+    if request.kind in _WIDE_KINDS and len(body) > _MODEL_CHARS:
+        from easyagent.context import clip_head_tail
+
+        return clip_head_tail(body, _MODEL_CHARS)
+    if len(body) > 1200:
+        body = body[: 1200 - 24].rstrip() + "\n[result truncated]"
     return body
 
 
@@ -6885,7 +6978,7 @@ def _continue_messages(
                 "Continue the account in your own words from this result. "
                 "One step, not a wrap-up: what you just checked, what you expected, what you found, "
                 "and the next change, including the line you will change. "
-                f"{_LINK_CHECK} "
+                f"{_LINK_CHECK} A CSS gradient is not a picture. "
                 "If you have not looked at the rest of the file, look at it before you stop. "
                 "After a read comes back, say what you found before you stop. "
                 "A status line is not that account. "
@@ -6923,8 +7016,16 @@ def _continue_messages(
                 "name": call["function"]["name"],
                 "content": item if item is not None else "",
             })
-    if note:
-        out.append({"role": "user", "content": note})
+    if note and out and isinstance(out[-1], dict) and out[-1].get("role") == "tool":
+        prior = str(out[-1].get("content") or "")
+        out[-1]["content"] = (prior + "\n\n" + note).strip()
+    elif note:
+        out.append({
+            "role": "tool",
+            "tool_call_id": "note",
+            "name": "note",
+            "content": note,
+        })
     try:
         from easyagent.browser import take_vision_shot
 
@@ -9877,7 +9978,11 @@ async def finish_honesty(
         return final or ""
     allow = honesty.live_model_allowed() and trace.model_calls == 0
     outcome = await honesty.settle(final or "", allow_model=allow)
-    if outcome.needs_verify:
+    proved = any(
+        isinstance(item, dict) and item.get("role") == "tool" and str(item.get("content") or "").strip()
+        for item in messages or []
+    )
+    if outcome.needs_verify and not proved:
         trace.model_calls += 1
         try:
             extra = await llm.complete(

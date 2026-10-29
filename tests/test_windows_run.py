@@ -210,7 +210,7 @@ def test_windows_shell_is_powershell_and_empty_output_names_the_exit_code(tmp_pa
     tools = native_tools()
     terminal = next(item for item in tools if item["function"]["name"] == "terminal")
     assert "Invoke-RestMethod" in terminal["function"]["description"]
-    assert "python -c" in terminal["function"]["description"]
+    assert "python tool" in terminal["function"]["description"]
     prompt = build_system(bot_name="Ada", direction="", summary="", skills_text="")
     assert "Invoke-RestMethod" in prompt
     assert "ConvertFrom-Json" in prompt

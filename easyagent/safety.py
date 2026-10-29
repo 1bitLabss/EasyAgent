@@ -223,6 +223,7 @@ class Pending:
     action_class: str = ""
     action_tool: str = ""
     class_label: str = ""
+    chat_id: str = ""
 
 
 _PENDING: dict[str, Pending] = {}
@@ -3859,6 +3860,7 @@ def _public_card(card: Pending) -> dict:
         "action_class": card.action_class,
         "action_tool": card.action_tool,
         "class_label": card.class_label,
+        "chat_id": card.chat_id,
     }
 
 
@@ -3923,6 +3925,39 @@ async def _wait(card: Pending) -> str:
         card.decision = "expired"
         card.event.set()
     return card.decision or "deny"
+
+
+def _workspace_hint() -> str:
+    """Where the person meant by 'your folder'. Empty when this turn has no bot."""
+    try:
+        from easyagent import turn as turn_mod
+        from easyagent.workspace import bot_workspace
+    except Exception:
+        return ""
+    slot = turn_mod.current_slot()
+    if slot is None or not getattr(slot, "bot_id", "") or getattr(slot, "store", None) is None:
+        return ""
+    try:
+        path = bot_workspace(slot.store, slot.bot_id, create=False)
+    except Exception:
+        return ""
+    return f"Your folder is {path}; use that path."
+
+
+def _not_run(why: str) -> str:
+    """One refusal. 'It was not run.' is not repeated, and a data-dir block names the workspace."""
+    text = " ".join((why or "").split())
+    if "It was not run." not in text:
+        text = text.rstrip(".") + ". It was not run."
+    data = any(
+        phrase in text
+        for phrase in ("saved data", "saved chats", "off-limits", "outside this bot", "EasyAgent's saved")
+    )
+    if data and "Your folder is" not in text:
+        hint = _workspace_hint()
+        if hint:
+            text = text + " " + hint
+    return text
 
 
 def _notify(why: str) -> None:
@@ -4220,7 +4255,7 @@ async def guard(store: Store, request, bot_id: str | None):
         return await _hand_browser(store, request, bot_id, verdict, proposal)
     if verdict.tier == BLOCK:
         _audit(store, bot_id, {"at": now_iso(), "decision": "block", "rule": verdict.rule, "why": verdict.why, "detail": verdict.detail})
-        raise ToolError(verdict.why + " It was not run.")
+        raise ToolError(_not_run(verdict.why))
     if verdict.tier == ASK and is_unattended():
         exact = (getattr(request, "command", "") or getattr(request, "path", "") or "").strip()
         card = _make_card(bot_id, verdict, exact, proposal)
@@ -4349,6 +4384,9 @@ def _make_card(bot_id: str | None, verdict: Verdict, exact: str, proposal: dict 
         created=time.time(),
         proposal=proposal,
     )
+    slot = turn_mod.current_slot()
+    if slot is not None and slot.chat_id:
+        card.chat_id = slot.chat_id
     if verdict.rule in _NEVER_ALWAYS:
         card.offer_always = False
     return card

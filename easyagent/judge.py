@@ -136,6 +136,7 @@ async def grade_text(
                 {"role": "user", "content": user},
             ],
             tools=False,
+            yield_to_chats=True,
             timeout=llm.grade_timeout(endpoint.get("base_url") or ""),
             long_wait=True,
         )

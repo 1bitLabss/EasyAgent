@@ -66,7 +66,7 @@ def test_the_prompt_names_real_paths_and_the_memory_file_is_created(world):
     chat_file = world.path / "bots" / world.bot["id"] / "chats" / f"{world.chat['id']}.json"
     assert display_path(chat_file.resolve()) in system
     assert display_path((world.path / "skills").resolve()) in system
-    assert "This bot's workspace, where a file goes when no folder is named:" in system
+    assert "- Your folder:" in system
     assert "%LOCALAPPDATA%\\EasyAgent" not in system
     workspace = world.path / "bots" / world.bot["id"] / "workspace"
     assert display_path(workspace.resolve()) in system

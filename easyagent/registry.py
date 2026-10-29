@@ -74,6 +74,8 @@ _KIND_TOOLS = {
     "question": "question",
     "finish": "finish",
     "delegate": "delegate_task",
+    "python": "python",
+    "ask_bot": "ask_bot",
     "skill": "skill",
     "routine": "routine",
 }

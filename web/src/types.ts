@@ -105,6 +105,8 @@ export type ChatMessage = {
   client_id?: string;
   before_id?: string;
   interrupted?: boolean;
+  limit_stop?: boolean;
+  limit_label?: string;
   queued?: boolean;
   about?: string;
 };

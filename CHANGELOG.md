@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.3.47
+- A local model waits 600 seconds for the first word and for retries. A slow or busy model says "Model is busy/slow". "Can't reach the model" is only for a connection that was refused or failed. Learning, replay, and the judge step aside while a chat is running or queued.
+- Your folder is the workspace. The bot's data directory is named as off-limits, and a refusal that blocks that directory says where to go instead. "It was not run." is not repeated.
+- A finish that a tool result in the same turn already proves does not start another check. Nudges sit on the tool message.
+- The python, ask_bot, and helper tools are native. Page-building rules are not in every prompt. The system prompt stays under 8,000 characters.
+- A blocked search falls back instead of failing the turn. Web, fetch, research, browser, memory, and connector results keep the start and the end, up to 8,000 characters. The chat budget uses the model server's context size when the bot has not set one.
+- Wait longer tries the same turn again with twice the first-word wait. A whole reply on a local model may run 900 seconds. A length stop says it hit the length limit. It does not say you sent a message. The status while the model is still reading says so, and a quiet wait is not "No activity for a while".
+- Quiet streams send a heartbeat every 15 seconds, so a long tool call does not reconnect every 5 seconds. The relay forwards those chunks as they arrive and answers other requests at the same time. Offline means the home computer is actually gone.
+- The terminal tool says its timeout defaults to 120 seconds and can be raised to 900. A timeout tells the model to raise it or poll.
+- Each scheduled job is its own task. A chat can pass a waiting job once, and not after 60 seconds. The job's time limit starts when it has the model. The chat and the Jobs list say who they are waiting for. A finished one-shot shows as done. The Jobs panel lists every bot's jobs.
+- A room opens as a full chat. Replies arrive one by one with a speaker, a status line, and approval cards. A private chat during a room turn does not fail the room.
+- Asking another bot from a message sent during a reply still runs that ask. A finished answer does not keep "say continue". After Stop, the queued message's answer is on the stream before the turn goes idle.
+- Help can copy a diagnostics zip. The desktop app restarts a server that has exited.
+
 ## 0.3.46
 - When a message arrives during a turn, that turn is either finished or not, and the choice is not changed later. Finished means the model already gave the answer, including a finish call in the same step as the text, or the reply is already being saved, and no other tool or step is waiting. Anything else, including another tool step or a report still to write, stays "Paused, say continue to resume" until continue, resume, Stop, or a later message. Continue picks up the original question. A finished turn does not say continue: a pause row that was already drawn becomes "Finished before pausing" in place, and one that was not drawn is not added. "Finished before pausing" is never used for a turn that still has work. Those three pause sentences stay one line tall, so changing the words does not move the message under the row. A turn keeps one pause row. Continue, resume, Stop, and a later message remove it, including a row that already says finished. Continue is saved after the message that interrupted the job, then the resumed answer.
 - A message sent during a tool step stays where it was drawn. The answer to it is drawn under it from the first token to idle, and that message does not jump when the turn settles. A tool step that simply finished does not leave "Paused, say continue to resume". That row stays only when the chain was cut with work left.

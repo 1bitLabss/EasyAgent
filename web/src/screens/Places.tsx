@@ -1,6 +1,7 @@
 import { useQuery } from "@tanstack/react-query";
 import { useEffect, useState, type ReactNode } from "react";
 import { api, queryClient, saveToken } from "@/api";
+import { CopyDiagnostics } from "@/components/Diagnostics";
 import { Face } from "@/components/Face";
 import { ThinkingBox } from "@/components/ThinkingBox";
 import { Markdown } from "@/components/Markdown";
@@ -66,14 +67,14 @@ export function ConnectionsScreen() {
           <label className="block text-sm">Model name <span className="text-muted">optional</span>
             <Input name="model" maxLength={120} defaultValue={editing?.model || ""} className="mt-1" />
           </label>
-          <label className="block text-sm">At once <span className="text-muted">1–32</span>
+          <label className="block text-sm">Requests at a time <span className="text-muted">1–32. Local servers usually handle 1. Raise it if yours runs several.</span>
             <Input name="max_parallel" type="number" min={1} max={32} required defaultValue={editing?.max_parallel || 1} className="mt-1" />
           </label>
           <label className="block text-sm">Reply length <span className="text-muted">tokens, default 4096</span>
             <Input name="max_tokens" type="number" min={256} max={32768} required defaultValue={editing?.max_tokens || 4096} className="mt-1" />
           </label>
-          <label className="block text-sm">First token <span className="text-muted">seconds, default 120</span>
-            <Input name="first_token_seconds" type="number" min={5} max={600} required defaultValue={editing?.first_token_seconds || 120} className="mt-1" />
+          <label className="block text-sm">Max wait for first word <span className="text-muted">seconds. Local models default to 300.</span>
+            <Input name="first_token_seconds" type="number" min={5} max={600} required defaultValue={editing?.first_token_seconds || 600} className="mt-1" />
           </label>
           <label className="block text-sm">Silence between tokens <span className="text-muted">seconds, default 45</span>
             <Input name="stall_seconds" type="number" min={5} max={600} required defaultValue={editing?.stall_seconds || 45} className="mt-1" />
@@ -505,6 +506,7 @@ export function AboutScreen() {
       ) : <p className="mt-4 text-sm text-muted">Open at login is a setting in the desktop app. This browser tab stays as it is.</p>}
       {note ? <p className="mt-2 text-sm text-danger">{note}</p> : null}
       <p className="mt-4 text-xs text-muted">Theme is {theme}. Ctrl or Cmd K switches bots. Ctrl or Cmd N starts a new chat.</p>
+      <div className="mt-6 w-full max-w-lg"><CopyDiagnostics /></div>
     </div>
   );
 }

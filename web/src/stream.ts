@@ -1,5 +1,5 @@
 import { useSyncExternalStore } from "react";
-import { api, queryClient, streamPost } from "@/api";
+import { api, queryClient, reportClientEvent, streamPost } from "@/api";
 import { noteActivity, settleActivity, type ActivityStep } from "@/lib/activity";
 import { activityLine, isToolStatus } from "@/lib/run";
 import { mergeChat, sameRun } from "@/lib/window";
@@ -736,6 +736,7 @@ function noteWatch(detail: string) {
   if (!host.__eaWatch) host.__eaWatch = [];
   host.__eaWatch.push(detail);
   console.warn(detail);
+  reportClientEvent("resync", detail);
 }
 
 function armStreamWatch(flight: Flight) {
@@ -841,6 +842,9 @@ async function readEvents(response: Response, flight: Flight) {
           .filter((line) => line.startsWith("data:"))
           .map((line) => line.slice(5).trim())
           .join("\n");
+        if (!data && raw.split("\n").some((line) => line.startsWith(":"))) {
+          if (flight.live) flight.live.heardAt = Date.now();
+        }
         if (data) {
           saw = true;
           const event = JSON.parse(data) as Record<string, unknown>;

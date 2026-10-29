@@ -2,6 +2,8 @@ import { useQuery } from "@tanstack/react-query";
 import { useEffect, useLayoutEffect } from "react";
 import { api } from "@/api";
 import { ChatPane } from "@/components/ChatPane";
+import { JobsPanel } from "@/components/JobsPanel";
+import { RoomPane } from "@/components/RoomPane";
 import { ConfirmDialog } from "@/components/ConfirmDialog";
 import { Sheet } from "@/components/Sheet";
 import { Sidebar } from "@/components/Sidebar";
@@ -30,6 +32,7 @@ export function App() {
   const setSwitcher = useApp((state) => state.setSwitcher);
   const offline = useApp((state) => state.offline);
   const botId = useApp((state) => state.botId);
+  const jobsOpen = useApp((state) => state.jobsOpen);
   const selectBot = useApp((state) => state.selectBot);
   const bots = useQuery({ queryKey: ["bots"], queryFn: () => api<Bot[]>("/api/bots") });
   useUnreadWatch();
@@ -94,9 +97,10 @@ export function App() {
       <div className="app-body flex min-h-0 flex-1">
         <aside className="app-rail w-20 shrink-0"><Sidebar /></aside>
         <main className="relative flex min-h-0 min-w-0 flex-1 flex-col">
-          {bots.isLoading ? <p className="p-6 text-sm text-muted">Loading bots…</p> : <ChatPane />}
-          {screen !== "chat" ? <Sheet title={sheetTitle} onClose={() => setScreen("chat")}>{main}</Sheet> : null}
+          {bots.isLoading ? <p className="p-6 text-sm text-muted">Loading bots…</p> : screen === "room" ? <RoomPane /> : <ChatPane />}
+          {screen !== "chat" && screen !== "room" ? <Sheet title={sheetTitle} onClose={() => setScreen("chat")}>{main}</Sheet> : null}
         </main>
+        {jobsOpen ? <JobsPanel /> : null}
       </div>
       <Switcher />
       <ConfirmDialog />

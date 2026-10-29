@@ -14,7 +14,7 @@ import threading
 from contextvars import ContextVar
 from dataclasses import dataclass
 
-CAPABILITY_RULE = "Never say you can't do something on this list; propose it."
+CAPABILITY_RULE = "Use one of these when the task needs it."
 _MARK = "# What you can do"
 _OFFER: ContextVar[dict | None] = ContextVar("easyagent_routine_offer", default=None)
 

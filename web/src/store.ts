@@ -8,7 +8,8 @@ export type Screen =
   | "projects"
   | "computers"
   | "direction"
-  | "about";
+  | "about"
+  | "room";
 
 export type ConfirmRequest = {
   title: string;
@@ -41,6 +42,10 @@ type AppState = {
   openBot: (botId: string, chatId: string | null) => void;
   selectChat: (chatId: string | null) => void;
   setRoom: (roomId: string | null) => void;
+  openRoom: (roomId: string) => void;
+  jobsOpen: boolean;
+  setJobs: (open: boolean) => void;
+  highlightJob: string;
   setProject: (projectId: string | null) => void;
   setInfo: (open: boolean) => void;
   setRail: (open: boolean) => void;
@@ -107,6 +112,10 @@ export const useApp = create<AppState>((set) => ({
   },
   selectChat: (chatId) => set({ chatId, screen: "chat", railOpen: false }),
   setRoom: (roomId) => set({ roomId }),
+  openRoom: (roomId) => set({ roomId, screen: "room", railOpen: false }),
+  jobsOpen: false,
+  highlightJob: "",
+  setJobs: (jobsOpen) => set({ jobsOpen }),
   setProject: (projectId) => set({ projectId }),
   setInfo: (infoOpen) => set({ infoOpen }),
   setRail: (railOpen) => set({ railOpen }),

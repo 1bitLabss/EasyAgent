@@ -36,12 +36,33 @@ class Offline(Exception):
     pass
 
 
+class Idle(Exception):
+    """The home socket is still up, but no chunk arrived."""
+
+
+_END = object()
+_FAILED = object()
+
+
+class _Flight:
+    def __init__(self) -> None:
+        self.queue: asyncio.Queue = asyncio.Queue()
+        self.status = 200
+        self.headers: dict[str, str] = {}
+        self.started = False
+
+    def fail(self, exc: BaseException) -> None:
+        del exc
+        self.queue.put_nowait(_FAILED)
+
+
 class Hub:
     """One home connection and the in-flight replies waiting on it."""
 
     def __init__(self):
         self.socket: WebSocket | None = None
         self.pending: dict[str, asyncio.Future] = {}
+        self.flights: dict[str, "_Flight"] = {}
         self._send_lock = asyncio.Lock()
 
     @property
@@ -68,14 +89,27 @@ class Hub:
             if not future.done():
                 future.set_exception(Offline())
         self.pending.clear()
+        for flight in self.flights.values():
+            flight.fail(Offline())
+        self.flights.clear()
 
     async def forward(self, method: str, path: str, headers: dict, body: bytes):
+        """Collect one reply. Idle gaps refresh the wait. The socket being gone is offline."""
+        status, resp_headers, chunks = 502, {}, []
+        async for kind, payload in self.iter_response(method, path, headers, body):
+            if kind == "start":
+                status, resp_headers = payload
+            elif kind == "chunk" and payload:
+                chunks.append(payload)
+        return status, resp_headers, b"".join(chunks)
+
+    async def iter_response(self, method: str, path: str, headers: dict, body: bytes):
         socket = self.socket
         if socket is None:
             raise Offline()
         request_id = uuid.uuid4().hex
-        future: asyncio.Future = asyncio.get_running_loop().create_future()
-        self.pending[request_id] = future
+        flight = _Flight()
+        self.flights[request_id] = flight
         payload = {
             "type": "http",
             "id": request_id,
@@ -89,24 +123,79 @@ class Hub:
                 if self.socket is not socket:
                     raise Offline()
                 await socket.send_json(payload)
-            status, resp_headers, resp_body = await asyncio.wait_for(future, timeout=130)
-        except (Offline, asyncio.TimeoutError, WebSocketDisconnect):
-            raise Offline()
+            while True:
+                try:
+                    item = await asyncio.wait_for(flight.queue.get(), timeout=60)
+                except asyncio.TimeoutError as exc:
+                    raise TimeoutError("The home computer sent nothing for 60 s.") from exc
+                if item is _END:
+                    if not flight.started:
+                        raise Offline()
+                    return
+                if item is _FAILED:
+                    raise Offline()
+                if isinstance(item, tuple) and item and item[0] == "start":
+                    flight.started = True
+                    yield "start", (flight.status, flight.headers)
+                    continue
+                if isinstance(item, (bytes, bytearray)):
+                    yield "chunk", bytes(item)
         finally:
-            self.pending.pop(request_id, None)
-        return status, resp_headers, resp_body
+            self.flights.pop(request_id, None)
 
     def finish(self, message: dict) -> None:
-        future = self.pending.get(message.get("id") or "")
-        if future is None or future.done():
+        """A whole reply in one frame, or a start / chunk / end / ping frame."""
+        request_id = str(message.get("id") or "")
+        flight = self.flights.get(request_id)
+        future = self.pending.get(request_id)
+        kind = str(message.get("type") or "http")
+        if flight is None and future is None:
+            return
+        if kind == "ping":
+            if flight is not None:
+                flight.queue.put_nowait(b"")
+            return
+        if kind == "start":
+            if flight is None:
+                return
+            flight.status = int(message.get("status") or 502)
+            headers = message.get("headers") if isinstance(message.get("headers"), dict) else {}
+            flight.headers = {str(key).lower(): str(value) for key, value in headers.items()}
+            flight.queue.put_nowait(("start", None))
+            return
+        if kind == "chunk":
+            if flight is None:
+                return
+            try:
+                body = base64.b64decode(message.get("body") or "", validate=True)
+            except Exception:
+                flight.fail(Offline())
+                return
+            flight.queue.put_nowait(body)
+            return
+        if kind == "end":
+            if flight is not None:
+                flight.queue.put_nowait(_END)
             return
         try:
             body = base64.b64decode(message.get("body") or "", validate=True)
         except Exception:
-            future.set_exception(Offline())
+            if flight is not None:
+                flight.fail(Offline())
+            if future is not None and not future.done():
+                future.set_exception(Offline())
             return
         headers = message.get("headers") if isinstance(message.get("headers"), dict) else {}
-        future.set_result((int(message.get("status") or 502), headers, body))
+        status = int(message.get("status") or 502)
+        if future is not None and not future.done():
+            future.set_result((status, headers, body))
+        if flight is not None:
+            flight.status = status
+            flight.headers = {str(key).lower(): str(value) for key, value in headers.items()}
+            flight.queue.put_nowait(("start", None))
+            if body:
+                flight.queue.put_nowait(body)
+            flight.queue.put_nowait(_END)
 
 
 def create_relay() -> FastAPI:
@@ -135,7 +224,7 @@ def create_relay() -> FastAPI:
         try:
             while True:
                 message = await socket.receive_json()
-                if isinstance(message, dict) and message.get("type") == "http":
+                if isinstance(message, dict) and message.get("type") in {"http", "start", "chunk", "end", "ping"}:
                     app.state.hub.finish(message)
         except WebSocketDisconnect:
             pass
@@ -200,17 +289,44 @@ async def handle_phone(hub: Hub, request: Request):
         "content-type": request.headers.get("content-type", ""),
     }
     try:
-        status, resp_headers, resp_body = await hub.forward(request.method, target, forwarded, body)
+        stream = hub.iter_response(request.method, target, forwarded, body)
+        kind, payload = await stream.__anext__()
+    except StopAsyncIteration:
+        return _offline(request)
     except Offline:
         return _offline(request)
-    if len(resp_body) > MAX_BODY:
-        resp_body = b""
-        return JSONResponse({"detail": "Response is too large for the relay."}, status_code=502, headers=headers)
+    except TimeoutError:
+        return JSONResponse(
+            {"detail": "EasyAgent is quiet. The computer at home did not send the next part."},
+            status_code=504,
+            headers=headers,
+        )
+    if kind != "start":
+        return _offline(request)
+    status, resp_headers = payload
     safe = {"cache-control": "no-store"}
     for key, value in resp_headers.items():
         if str(key).lower() == "content-type" and value:
             safe["content-type"] = str(value)
-    return Response(content=resp_body, status_code=status, headers=safe)
+
+    async def chunks():
+        sent = 0
+        try:
+            async for part_kind, part in stream:
+                if part_kind != "chunk" or not part:
+                    continue
+                sent += len(part)
+                if sent > MAX_BODY:
+                    return
+                yield part
+        except Offline:
+            return
+        except TimeoutError:
+            return
+
+    from fastapi.responses import StreamingResponse
+
+    return StreamingResponse(chunks(), status_code=status, headers=safe)
 
 
 def _html(request: Request) -> bool:

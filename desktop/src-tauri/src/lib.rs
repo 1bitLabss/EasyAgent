@@ -191,6 +191,7 @@ fn begin_start(app: &tauri::AppHandle) {
                 if let Some(window) = app.get_webview_window("main") {
                     let _ = open_server_page(&window, port);
                 }
+                watch_server(app.clone(), port);
                 Ok(())
             }
             Err(message) => {
@@ -206,6 +207,42 @@ fn begin_start(app: &tauri::AppHandle) {
         }
         if let Some(target) = smoke {
             finish_smoke(&app, port, &log, result, &target);
+        }
+    });
+}
+
+fn watch_server(app: tauri::AppHandle, port: u16) {
+    std::thread::spawn(move || {
+        let mut misses = 0;
+        let mut restarted = false;
+        loop {
+            std::thread::sleep(Duration::from_secs(10));
+            let ok = host::http_get(port, "/api/health", Duration::from_secs(3)).is_ok();
+            if ok {
+                misses = 0;
+                continue;
+            }
+            misses += 1;
+            if misses < 3 || restarted {
+                continue;
+            }
+            let exited = app
+                .try_state::<OwnedServer>()
+                .and_then(|state| state.0.lock().ok())
+                .and_then(|mut slot| slot.as_mut().and_then(|child| child.try_wait().ok().flatten().map(|status| status.to_string())));
+            if let Some(status) = exited {
+                eprintln!("EasyAgent server exited ({status}). Restarting once.");
+                restarted = true;
+                misses = 0;
+                if let Some(state) = app.try_state::<Startup>() {
+                    state.busy.store(false, Ordering::SeqCst);
+                }
+                begin_start(&app);
+                if let Some(window) = app.get_webview_window("main") {
+                    let _ = window.eval("document.title = document.title");
+                    let _ = window.eval("window.__eaRestarted = 'EasyAgent restarted after a crash'");
+                }
+            }
         }
     });
 }

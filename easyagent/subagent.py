@@ -133,6 +133,26 @@ def plain_consult_turn(text: str) -> bool:
     return False
 
 
+def consult_target(text: str, names=None) -> tuple[str, str] | None:
+    """The bot and the task, when the person asked for another bot by name."""
+    if not user_asked_to_consult(text, names):
+        return None
+    ordered = sorted((name for name in (names or []) if name), key=len, reverse=True)
+    raw = text or ""
+    for name in ordered:
+        match = re.search(
+            rf"(?i)\b(?:ask|tell|ping|consult|message|delegate)\s+(?:the\s+)?(?:bot\s+)?{re.escape(name)}(?:\s+bot)?\s*(?::|to)\s+(.+)",
+            raw,
+            re.S,
+        )
+        if not match:
+            continue
+        task = " ".join(match.group(1).split())
+        if task:
+            return name, task
+    return None
+
+
 def automatic_ask_allowed(text: str, names=None) -> bool:
     """A subagent fence sends on its own only outside a plain question.
 

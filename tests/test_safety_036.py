@@ -908,7 +908,7 @@ def test_workspace_is_never_the_install_and_a_bare_file_lands_there(tmp_path, mo
     with pytest.raises(StoreError):
         store.update_bot(bot["id"], workspace=str(package_dir()), workspace_set=True)
     prompt = own_files_prompt(store, bot["id"])
-    assert "This bot's workspace, where a file goes when no folder is named:" in prompt
+    assert "- Your folder:" in prompt
     assert "%LOCALAPPDATA%" not in prompt
     assert str(fresh) in prompt or str(fresh.resolve()) in prompt
     slot = turn_mod.slot_for(store, "chat-files")

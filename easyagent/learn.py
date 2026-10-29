@@ -797,6 +797,12 @@ def chats_active(store: Store) -> bool:
             run = chat.get("run") if isinstance(chat.get("run"), dict) else {}
             if run.get("status") == "running":
                 return True
+            step = str(run.get("current_step") or "")
+            if step.startswith("Queued:"):
+                return True
+            for item in chat.get("messages") or []:
+                if isinstance(item, dict) and item.get("chip") == "queued":
+                    return True
     return False
 
 

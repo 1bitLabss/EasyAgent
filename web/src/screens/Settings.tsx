@@ -2,6 +2,7 @@ import { useQuery } from "@tanstack/react-query";
 import { useEffect, useState, type FormEvent, type ReactNode } from "react";
 import { api, queryClient } from "@/api";
 import { ApprovalCard } from "@/components/ApprovalCard";
+import { CopyDiagnostics } from "@/components/Diagnostics";
 import { FACE_PALETTE, Face } from "@/components/Face";
 import { Button } from "@/components/ui/button";
 import { Input, Textarea } from "@/components/ui/input";
@@ -550,6 +551,7 @@ export function SettingsScreen() {
       <div className="h-full space-y-4 overflow-y-auto p-6">
         <PhoneAccess />
         <GlobalYolo />
+        <CopyDiagnostics />
         <section>
           <h1 className="text-2xl font-semibold">Pick a bot first.</h1>
           <p className="mt-2 text-sm text-muted">The rest of Settings belongs to one bot. Chats are not changed here.</p>
@@ -587,6 +589,7 @@ export function SettingsScreen() {
       <div className="space-y-4 px-6 pt-5">
         <PhoneAccess />
         <GlobalYolo />
+        <CopyDiagnostics />
       </div>
       <header className="px-6 py-5">
         <p className="text-xs uppercase tracking-wide text-muted">Bot settings</p>

@@ -91,12 +91,46 @@ function headers(extra?: HeadersInit, json = false): Headers {
   return result;
 }
 
+let lastClientNote = 0;
+
+export function reportClientEvent(kind: string, detail: string) {
+  const now = Date.now();
+  if (now - lastClientNote < 5000) return;
+  lastClientNote = now;
+  void fetch("/api/diag/client-event", {
+    method: "POST",
+    headers: headers(undefined, true),
+    body: JSON.stringify({ kind, detail }),
+  }).catch(() => undefined);
+}
+
+async function lostConnection(error: unknown): Promise<never> {
+  const raw = error instanceof Error ? error.message : String(error || "");
+  if (!/failed to fetch|networkerror|load failed/i.test(raw)) throw error;
+  reportClientEvent("fetch-failed", raw);
+  let up = false;
+  try {
+    up = (await fetch("/api/health", { cache: "no-store" })).ok;
+  } catch {
+    up = false;
+  }
+  if (!up || (typeof navigator !== "undefined" && navigator.onLine === false)) {
+    throw new ApiError("Lost connection to EasyAgent · Reconnecting…", 0);
+  }
+  throw error;
+}
+
 export async function api<T>(path: string, options: { method?: string; json?: unknown; body?: BodyInit; headers?: HeadersInit } = {}): Promise<T> {
-  const response = await fetch(path, {
+  let response: Response;
+  try {
+    response = await fetch(path, {
     method: options.method || (options.json !== undefined ? "POST" : "GET"),
     headers: headers(options.headers, options.json !== undefined),
     body: options.json !== undefined ? JSON.stringify(options.json) : options.body,
   });
+  } catch (error) {
+    return lostConnection(error);
+  }
   const text = await response.text();
   let data: unknown = null;
   if (text) {
@@ -119,12 +153,17 @@ export async function api<T>(path: string, options: { method?: string; json?: un
 }
 
 export async function streamPost(path: string, json: unknown, signal: AbortSignal): Promise<Response> {
-  const response = await fetch(path, {
+  let response: Response;
+  try {
+    response = await fetch(path, {
     method: "POST",
     headers: headers({ Accept: "text/event-stream" }, true),
     body: JSON.stringify(json ?? {}),
     signal,
   });
+  } catch (error) {
+    return lostConnection(error);
+  }
   if (!response.ok) {
     let message = response.statusText;
     try {

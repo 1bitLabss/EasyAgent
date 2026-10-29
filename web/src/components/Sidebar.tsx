@@ -203,6 +203,9 @@ export function Sidebar() {
   const adding = useApp((state) => state.adding);
   const setAdding = useApp((state) => state.setAdding);
   const bots = useQuery({ queryKey: ["bots"], queryFn: () => api<Bot[]>("/api/bots") });
+  const rooms = useQuery({ queryKey: ["rooms"], queryFn: () => api<{ id: string; name: string }[]>("/api/rooms") });
+  const openRoom = useApp((state) => state.openRoom);
+  const roomId = useApp((state) => state.roomId);
   const [menu, setMenu] = useState(false);
   const [templates, setTemplates] = useState(false);
   const menuRef = useRef<HTMLDivElement>(null);
@@ -240,6 +243,20 @@ export function Sidebar() {
         <div className="rail-divider my-2 h-px w-8 bg-black/10 dark:bg-white/15" />
         <div className="rail-bots flex min-h-0 w-full flex-1 flex-col items-center gap-1 overflow-y-auto py-1">
           {(bots.data || []).map((bot) => <BotTile key={bot.id} bot={bot} />)}
+          {(rooms.data || []).length ? <div className="my-1 h-px w-8 bg-black/10 dark:bg-white/15" /> : null}
+          {(rooms.data || []).map((room) => (
+            <button
+              key={room.id}
+              type="button"
+              data-testid="room-rail"
+              title={room.name}
+              aria-label={room.name}
+              className={cn("flex h-10 w-10 items-center justify-center rounded-full text-[10px]", roomId === room.id && screen === "room" && "bg-[#ececec] dark:bg-white/10")}
+              onClick={() => openRoom(room.id)}
+            >
+              {room.name.slice(0, 2)}
+            </button>
+          ))}
         </div>
         <div className="rail-tools mt-2 flex flex-col items-center gap-1 pb-1">
           <button type="button" aria-label="Add bot" title="Add bot" className="flex h-10 w-10 items-center justify-center rounded-full text-foreground hover:bg-black/5 dark:hover:bg-white/10" onClick={() => setAdding(true)}>

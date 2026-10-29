@@ -129,6 +129,19 @@ def raise_if_cancelled() -> None:
         raise TurnCancelled()
 
 
+def renew_cancel() -> None:
+    """Keep the current stop flag for the call that is already running.
+
+    The next call in this task gets a clear flag, so a queued message after
+    Stop can run. The in-flight call still sees the old flag and exits.
+    """
+    slot = _slot.get()
+    fresh = asyncio.Event()
+    if slot is not None:
+        slot.cancel = fresh
+    _cancel.set(fresh)
+
+
 def stop_process(proc: subprocess.Popen | None) -> None:
     if proc is None or proc.poll() is not None:
         return

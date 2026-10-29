@@ -140,10 +140,21 @@ def describe(schedule: dict) -> str:
     return plain_phrase(schedule) or (schedule.get("cron") or "cron")
 
 
-async def run_due_schedules(store: Store, now: datetime | None = None) -> list[dict]:
+async def _tracked_run(store: Store, bot: dict, schedule: dict, slot: str, moment: datetime) -> dict:
+    entry = await _run_one(store, bot, schedule, slot)
+    store.append_job(bot["id"], entry)
+    _remember_run(store, bot["id"], schedule, entry, moment)
+    if entry.get("status") == "error":
+        poke(store, "job_failed")
+    return entry
+
+
+async def run_due_schedules(store: Store, now: datetime | None = None, *, background: bool = False) -> list[dict]:
     """Fire each due slot once. Paused schedules skip the slot without calling the endpoint.
 
     A slot older than the catch-up window is marked and not run. There is no backlog.
+    Each claimed routine is its own task. The scheduler tick does not wait for it.
+    A direct call still waits, so a test sees the finished rows.
     """
     moment = now.astimezone() if now is not None else datetime.now().astimezone()
     if moment.tzinfo is None:
@@ -152,8 +163,8 @@ async def run_due_schedules(store: Store, now: datetime | None = None) -> list[d
     if lock is None:
         lock = asyncio.Lock()
         _RUN_LOCKS[str(store.root)] = lock
+    claimed_work: list[tuple[dict, dict, str]] = []
     async with lock:
-        fired: list[dict] = []
         window = catchup_seconds()
         for bot in store.list_bots():
             schedules = store.list_schedules(bot["id"])
@@ -183,20 +194,22 @@ async def run_due_schedules(store: Store, now: datetime | None = None) -> list[d
             if changed:
                 store.save_schedules(bot["id"], schedules)
             for schedule, slot in claimed:
-                entry = await _run_one(store, bot, schedule, slot)
-                store.append_job(bot["id"], entry)
-                _remember_run(store, bot["id"], schedule, entry, moment)
-                if entry.get("status") == "error":
-                    poke(store, "job_failed")
-                fired.append(entry)
-        return fired
+                claimed_work.append((bot, schedule, slot))
+    tasks = [
+        asyncio.create_task(_tracked_run(store, bot, schedule, slot, moment))
+        for bot, schedule, slot in claimed_work
+    ]
+    if background or not tasks:
+        return []
+    rows = await asyncio.gather(*tasks)
+    return list(rows)
 
 
 async def schedule_loop(store: Store, stop: asyncio.Event) -> None:
     tick = float(os.environ.get("EASYAGENT_SCHEDULE_TICK", "5"))
     while not stop.is_set():
         try:
-            await run_due_schedules(store)
+            await run_due_schedules(store, background=True)
         except Exception:
             # A bad schedule file must not kill the loop. The next tick tries again.
             pass
@@ -262,6 +275,19 @@ async def _run_one(store: Store, bot: dict, schedule: dict, slot: str) -> dict:
         _RUNNING[schedule_id] = {"bot_id": bot.get("id"), "name": routine_name, "schedule_id": schedule_id}
     token = unattended()
     conn = gate.bind_connection(endpoint, name, store=store)
+    wait_token = None
+
+    def _queued(label: str) -> None:
+        row = _RUNNING.get(schedule_id)
+        if not isinstance(row, dict):
+            return
+        row["state"] = "queued"
+        row["label"] = label
+        marker = "busy with "
+        waiting = label.split(marker, 1)[1].rstrip(")") if marker in label else ""
+        row["waiting_for"] = waiting.strip()
+
+    wait_token = gate.bind_wait_note(_queued)
     status = "ok"
     error = ""
     visible = ""
@@ -273,6 +299,7 @@ async def _run_one(store: Store, bot: dict, schedule: dict, slot: str) -> dict:
                 endpoint,
                 messages,
                 cancel,
+                schedule_id,
             )
         except _Stopped as exc:
             status = "stopped"
@@ -320,6 +347,8 @@ async def _run_one(store: Store, bot: dict, schedule: dict, slot: str) -> dict:
         return entry
     finally:
         attend(token)
+        if wait_token is not None:
+            gate.reset_wait_note(wait_token)
         gate.reset_connection(conn)
         if schedule_id:
             _CANCEL.pop(schedule_id, None)
@@ -641,8 +670,11 @@ def _remember_run(store: Store, bot_id: str, schedule: dict, entry: dict, now: d
         if row.get("id") != schedule.get("id"):
             continue
         row["last_run_at"] = entry.get("finished_at")
+        row["last_status"] = entry.get("status") or ""
+        row["last_error"] = entry.get("error") or ""
         if schedule.get("kind") == "once":
             row["paused"] = True
+            row["finished"] = True
         stamp_next(row, now)
     store.save_schedules(bot_id, rows)
 
@@ -826,13 +858,59 @@ def plain_phrase(schedule: dict) -> str:
     return expression or "cron"
 
 
-def confirm_detail(name: str, shown: str, prompt: str) -> str:
+def confirm_detail(name: str, shown: str, prompt: str, *, single_slot: bool = False) -> str:
     """What the routine card shows, including the open-app note and a zone-data warning."""
     parts = [name, shown, prompt, OPEN_NOTE]
+    if single_slot:
+        parts.append("Runs when this connection is free.")
     warn = tzdata_warning()
     if warn:
         parts.append(warn)
     return "\n".join(part for part in parts if part)
+
+
+def routine_views(store: Store) -> list[dict]:
+    """Every bot's jobs, including a queue wait the chat can see."""
+    rows: list[dict] = []
+    for bot in store.list_bots():
+        try:
+            schedules = store.list_schedules(bot["id"])
+        except Exception:
+            continue
+        for schedule in schedules:
+            schedule_id = str(schedule.get("id") or "")
+            live = _RUNNING.get(schedule_id) if schedule_id else None
+            live = live if isinstance(live, dict) else {}
+            if live.get("state") == "queued":
+                state = "queued"
+            elif schedule_id and schedule_id in _RUNNING:
+                state = "running"
+            elif schedule.get("finished") or (
+                schedule.get("kind") == "once" and schedule.get("paused") and schedule.get("last_run_at")
+            ):
+                state = "done"
+            elif schedule.get("paused"):
+                state = "paused"
+            else:
+                state = str(schedule.get("last_status") or "ok")
+            rows.append({
+                "id": schedule_id,
+                "bot_id": bot.get("id"),
+                "bot_name": bot.get("name") or "",
+                "name": schedule.get("name") or "Routine",
+                "kind": schedule.get("kind") or "",
+                "describe": plain_phrase(schedule),
+                "next_run": schedule.get("next_run"),
+                "last_run_at": schedule.get("last_run_at"),
+                "last_status": schedule.get("last_status") or "",
+                "last_error": schedule.get("last_error") or "",
+                "paused": bool(schedule.get("paused")),
+                "finished": bool(schedule.get("finished")),
+                "running": state == "running",
+                "queued_for": live.get("waiting_for") or "",
+                "state": state,
+            })
+    return rows
 
 
 def preview(schedule: dict, now: datetime | None = None) -> str:
@@ -1174,91 +1252,122 @@ def apply_confirmed(store: Store, bot_id: str, spec: dict) -> str:
     raise ScheduleError("A routine action is create, edit, or delete.")
 
 
-async def _routine_loop(store: Store, bot: dict, endpoint: dict, messages: list[dict], cancel: asyncio.Event) -> str:
+async def _routine_loop(
+    store: Store, bot: dict, endpoint: dict, messages: list[dict], cancel: asyncio.Event, schedule_id: str = ""
+) -> str:
     from easyagent.search import SearchError
     from easyagent.tools import ToolError, execute, parse_tools, redact
     import easyagent.search as search_mod
 
     search_mod.bind_store(store)
-    started = asyncio.get_running_loop().time()
     steps = 0
     limit = routine_step_budget()
     seconds = routine_second_budget()
-    deadline = started + seconds
+    # The 600 s budget starts when this routine holds the model, not while it waits.
+    armed: dict[str, float | None] = {"deadline": None}
+
+    def _arm() -> None:
+        if armed["deadline"] is None:
+            armed["deadline"] = asyncio.get_running_loop().time() + seconds
+        row = _RUNNING.get(schedule_id)
+        if isinstance(row, dict):
+            row["state"] = "running"
+            row["waiting_for"] = ""
+
+    lane_token = gate.bind_on_lane(_arm)
     visible = ""
-    while steps < limit:
-        if cancel.is_set():
-            raise _Stopped("Stopped.")
-        if asyncio.get_running_loop().time() >= deadline:
-            raise _Stopped("Stopped. The routine ran past its time limit.")
-        text = await _complete_yielding(endpoint, bot, messages, cancel, deadline)
-        visible = text
-        try:
-            requests = parse_tools(text)
-        except ToolError as exc:
-            return redact(store, str(exc))
-        if not requests:
-            return text
-        steps += 1
-        if steps >= limit:
-            raise _Stopped("Stopped. The routine ran past its step limit.")
-        for request in requests:
+    try:
+        while steps < limit:
             if cancel.is_set():
                 raise _Stopped("Stopped.")
+            deadline = armed["deadline"]
+            if deadline is not None and asyncio.get_running_loop().time() >= deadline:
+                raise _Stopped("Stopped. The routine ran past its time limit.")
+            text = await _complete_yielding(endpoint, bot, messages, cancel, armed)
+            visible = text
             try:
-                if request.kind == "search":
-                    result = await search_mod.web_search(request.body)
-                else:
-                    result = await execute(store, request, bot.get("id"))
-            except (ToolError, SearchError) as exc:
-                result = str(exc)
-            messages.append({"role": "assistant", "content": text})
-            messages.append({"role": "user", "content": redact(store, result)})
-            text = ""
-    raise _Stopped("Stopped. The routine ran past its step limit.")
+                requests = parse_tools(text)
+            except ToolError as exc:
+                return redact(store, str(exc))
+            if not requests:
+                return text
+            steps += 1
+            if steps >= limit:
+                raise _Stopped("Stopped. The routine ran past its step limit.")
+            for request in requests:
+                if cancel.is_set():
+                    raise _Stopped("Stopped.")
+                try:
+                    if request.kind == "search":
+                        result = await search_mod.web_search(request.body)
+                    else:
+                        result = await execute(store, request, bot.get("id"))
+                except (ToolError, SearchError) as exc:
+                    result = str(exc)
+                messages.append({"role": "assistant", "content": text})
+                messages.append({"role": "user", "content": redact(store, result)})
+                text = ""
+        raise _Stopped("Stopped. The routine ran past its step limit.")
+    finally:
+        gate.reset_on_lane(lane_token)
 
 
 async def _complete_yielding(
-    endpoint: dict, bot: dict, messages: list[dict], cancel: asyncio.Event, deadline: float
+    endpoint: dict, bot: dict, messages: list[dict], cancel: asyncio.Event, armed: dict
 ) -> str:
-    """One model call. The routine time limit cancels the call, not only the next step."""
+    """One model call. The routine time limit cancels the call, not only the next step.
+
+    A missing deadline means the routine is still waiting for the connection.
+    That wait does not spend the wall budget.
+    """
     while True:
         if cancel.is_set():
             raise _Stopped("Stopped.")
-        remaining = deadline - asyncio.get_running_loop().time()
-        if remaining <= 0:
+        deadline = armed.get("deadline")
+        if deadline is not None and asyncio.get_running_loop().time() >= deadline:
             raise _Stopped("Stopped. The routine ran past its time limit.")
-        purpose = llm.bind_purpose("routine")
+        permit = await gate.reserve(background=True)
         try:
-            task = asyncio.create_task(llm.complete(
-                base_url=endpoint["base_url"],
-                api_key=endpoint.get("api_key") or None,
-                model=_chosen_model(bot, endpoint),
-                messages=messages,
-                yield_to_chats=True,
-            ))
-        finally:
-            llm.reset_purpose(purpose)
-        waiter = asyncio.create_task(cancel.wait())
-        done, _pending = await asyncio.wait(
-            {task, waiter}, timeout=remaining, return_when=asyncio.FIRST_COMPLETED
-        )
-        if task not in done:
-            task.cancel()
+            await permit.acquire()
+            deadline = armed.get("deadline")
+            remaining = None
+            if deadline is not None:
+                remaining = deadline - asyncio.get_running_loop().time()
+                if remaining <= 0:
+                    raise _Stopped("Stopped. The routine ran past its time limit.")
+            purpose = llm.bind_purpose("routine")
+            try:
+                task = asyncio.create_task(llm.complete(
+                    base_url=endpoint["base_url"],
+                    api_key=endpoint.get("api_key") or None,
+                    model=_chosen_model(bot, endpoint),
+                    messages=messages,
+                    yield_to_chats=False,
+                ))
+            finally:
+                llm.reset_purpose(purpose)
+            waiter = asyncio.create_task(cancel.wait())
+            done, _pending = await asyncio.wait(
+                {task, waiter}, timeout=remaining, return_when=asyncio.FIRST_COMPLETED
+            )
+            if task not in done:
+                task.cancel()
+                waiter.cancel()
+                try:
+                    await task
+                except (asyncio.CancelledError, Exception):
+                    pass
+                if cancel.is_set():
+                    raise _Stopped("Stopped.")
+                raise _Stopped("Stopped. The routine ran past its time limit.")
             waiter.cancel()
             try:
-                await task
-            except (asyncio.CancelledError, Exception):
-                pass
-            if cancel.is_set():
-                raise _Stopped("Stopped.")
-            raise _Stopped("Stopped. The routine ran past its time limit.")
-        waiter.cancel()
-        try:
-            return await task
-        except llm.YieldLater:
-            await asyncio.sleep(0.05)
-            continue
+                return await task
+            except llm.YieldLater:
+                await asyncio.sleep(0.05)
+                continue
+        finally:
+            await permit.release()
 
 
 def _chosen_model(bot: dict, endpoint: dict) -> str | None:

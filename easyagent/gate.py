@@ -7,7 +7,9 @@ start when a slot is free. Stop while waiting leaves the line.
 from __future__ import annotations
 
 import asyncio
+import os
 import threading
+import time
 from contextvars import ContextVar
 
 from easyagent import turn as turn_mod
@@ -19,6 +21,57 @@ _inside: ContextVar[bool] = ContextVar("easyagent_connection_hold", default=Fals
 _inner_retry: ContextVar[bool] = ContextVar("easyagent_inner_retry", default=True)
 _lanes: dict[str, "_Lane"] = {}
 _lanes_guard = threading.Lock()
+_wait_note: ContextVar = ContextVar("easyagent_wait_note", default=None)
+_on_lane: ContextVar = ContextVar("easyagent_on_lane", default=None)
+
+
+def max_yield_seconds() -> float:
+    """How long a routine stays jumpable. `EASYAGENT_ROUTINE_MAX_YIELD_SECONDS` overrides 60."""
+    raw = os.environ.get("EASYAGENT_ROUTINE_MAX_YIELD_SECONDS", "").strip()
+    if not raw:
+        return 60.0
+    try:
+        return max(0.0, float(raw))
+    except ValueError:
+        return 60.0
+
+
+def bind_wait_note(callback):
+    """This task hears the queue sentence when it is waiting for the connection."""
+    return _wait_note.set(callback)
+
+
+def reset_wait_note(token) -> None:
+    _wait_note.reset(token)
+
+
+def bind_on_lane(callback):
+    """Called once this task holds the connection. A routine starts its budget here."""
+    return _on_lane.set(callback)
+
+
+def reset_on_lane(token) -> None:
+    _on_lane.reset(token)
+
+
+def _tell_wait(label: str) -> None:
+    callback = _wait_note.get()
+    if callback is None or not label:
+        return
+    try:
+        callback(label)
+    except Exception:
+        return
+
+
+def _tell_lane() -> None:
+    callback = _on_lane.get()
+    if callback is None:
+        return
+    try:
+        callback()
+    except Exception:
+        return
 
 
 def clamp_parallel(value) -> int:
@@ -103,8 +156,11 @@ def reset_lanes() -> None:
 
 
 class _Seat:
-    def __init__(self, bot_name: str) -> None:
+    def __init__(self, bot_name: str, *, background: bool = False) -> None:
         self.bot_name = bot_name
+        self.background = background
+        self.overtaken = False
+        self.queued_at = time.monotonic()
         self.ready = asyncio.Event()
         self.holding = False
         self.waiting = False
@@ -114,21 +170,22 @@ class _Seat:
 
     async def acquire(self) -> None:
         self._inside = _inside.set(True)
-        if self.holding or self.lane is None:
-            return
         try:
-            while not self.ready.is_set():
+            if not self.holding and self.lane is not None:
+                while not self.ready.is_set():
+                    if turn_mod.cancelled():
+                        raise turn_mod.TurnCancelled()
+                    try:
+                        await asyncio.wait_for(self.ready.wait(), 0.05)
+                    except asyncio.TimeoutError:
+                        continue
                 if turn_mod.cancelled():
                     raise turn_mod.TurnCancelled()
-                try:
-                    await asyncio.wait_for(self.ready.wait(), 0.05)
-                except asyncio.TimeoutError:
-                    continue
-            if turn_mod.cancelled():
-                raise turn_mod.TurnCancelled()
         except BaseException:
             await self.release()
             raise
+        if self.holding:
+            _tell_lane()
 
     async def release(self) -> None:
         lane = self.lane
@@ -144,7 +201,10 @@ class _Seat:
                     _grant(lane)
             self.lane = None
         if self._inside is not None:
-            _inside.reset(self._inside)
+            try:
+                _inside.reset(self._inside)
+            except ValueError:
+                pass
             self._inside = None
 
 
@@ -155,6 +215,7 @@ class _Open:
     label = ""
 
     async def acquire(self) -> None:
+        _tell_lane()
         return
 
     async def release(self) -> None:
@@ -185,6 +246,27 @@ def _grant(lane: _Lane) -> None:
         seat.holding = True
         lane.holders.append(seat)
         seat.ready.set()
+
+
+def _yieldable(seat: _Seat, now: float) -> bool:
+    """A background seat a new chat may pass, once, during the first minute."""
+    if not seat.background or seat.overtaken:
+        return False
+    return (now - seat.queued_at) < max_yield_seconds()
+
+
+def _place(lane: _Lane, seat: _Seat) -> None:
+    if seat.background:
+        lane.queue.append(seat)
+        return
+    now = time.monotonic()
+    insert_at = len(lane.queue)
+    for index, existing in enumerate(lane.queue):
+        if _yieldable(existing, now):
+            existing.overtaken = True
+            insert_at = index
+            break
+    lane.queue.insert(insert_at, seat)
 
 
 class BusyLane(Exception):
@@ -222,7 +304,7 @@ def queued_label(connection: str, holders: list[str]) -> str:
     return f"Queued: waiting for {who} (busy with {busy})"
 
 
-async def reserve(*, step_aside: bool = False):
+async def reserve(*, step_aside: bool = False, background: bool = False):
     """Take a slot, or return a seat that is waiting at the back of the line.
 
     A background call passes step_aside so it leaves the line when a chat is
@@ -232,20 +314,27 @@ async def reserve(*, step_aside: bool = False):
     if not info or _inside.get() or not info.get("id"):
         return _Open()
     lane = _lane(info["id"])
-    seat = _Seat(info["bot"])
+    seat = _Seat(info["bot"], background=background)
     seat.lane = lane
+    announced = ""
     with lane.lock:
         lane.limit = clamp_parallel(info["max_parallel"])
-        if step_aside and (lane.holders or lane.queue):
-            raise BusyLane()
         busy = [item.bot_name for item in lane.holders]
+        if step_aside and not background and (lane.holders or lane.queue):
+            raise BusyLane()
         if len(lane.holders) < lane.limit and not lane.queue:
             seat.holding = True
             lane.holders.append(seat)
             seat.ready.set()
         else:
             seat.waiting = True
-            lane.queue.append(seat)
+            _place(lane, seat)
             seat.label = queued_label(info["name"], busy)
             print(f"heuristic queue: {seat.label}", flush=True)
+            if len(lane.holders) < lane.limit:
+                _grant(lane)
+            if seat.waiting:
+                announced = seat.label
+    if announced:
+        _tell_wait(announced)
     return seat

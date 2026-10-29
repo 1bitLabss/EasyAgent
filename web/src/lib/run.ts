@@ -122,6 +122,10 @@ export function runPresence(input: {
   const started = Date.parse(input.startedAt || "");
   const elapsed = formatElapsed((input.now - (Number.isNaN(started) ? input.now : started)) / 1000);
   if (step.startsWith("Paused")) return { kind: "waiting", text: step };
+  if (step.startsWith("Queued:")) return { kind: "waiting", text: step };
+  if (step.startsWith("Model is reading") || step.startsWith("Waiting on model")) {
+    return { kind: "waiting", text: `Model is reading the prompt… ${elapsed}` };
+  }
   if (step === "Writing" || step.startsWith("Writing,")) return { kind: "working", text: step.startsWith("Writing,") ? step : `Writing, ${elapsed}` };
   const waiting = !step
     || step === "Thinking"

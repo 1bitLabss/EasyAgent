@@ -10,14 +10,17 @@ from __future__ import annotations
 import time
 from contextvars import ContextVar
 from dataclasses import dataclass
+from urllib.parse import urlparse
 
 RUNAWAY_TEXT = "The model kept generating without finishing; stopped it. Try again or lower the length."
 
 DEFAULT_MAX_TOKENS = 4096
 DEFAULT_STALL_SECONDS = 45.0
 DEFAULT_FIRST_TOKEN_SECONDS = 120.0
+LOCAL_FIRST_TOKEN_SECONDS = 600.0
 DEFAULT_WALL_SECONDS = 180.0
 DEFAULT_HARD_SECONDS = 480.0
+LOCAL_HARD_SECONDS = 900.0
 DEFAULT_TOOL_TEMPERATURE = 0.6
 MIN_MAX_TOKENS = 256
 MAX_MAX_TOKENS = 32768
@@ -97,15 +100,57 @@ def tool_try_temperature(base: float, index: int) -> float:
     return 0.1
 
 
+def is_local_base(url: str) -> bool:
+    """A model on this machine or the private network. Cloud hosts stay on the shorter waits."""
+    raw = (url or "").strip()
+    if not raw:
+        return False
+    try:
+        parsed = urlparse(raw if "://" in raw else "//" + raw)
+    except ValueError:
+        return False
+    host = (parsed.hostname or "").lower().rstrip(".")
+    if host in {"localhost", "127.0.0.1", "::1"} or host.endswith(".local"):
+        return True
+    parts = host.split(".")
+    if len(parts) == 4 and all(part.isdigit() for part in parts):
+        first, second = int(parts[0]), int(parts[1])
+        if first == 10 or (first == 192 and second == 168):
+            return True
+        if first == 172 and 16 <= second <= 31:
+            return True
+    return False
+
+
+def still_working_text(seconds: float) -> str:
+    """The socket is open. The model has not written a first word yet."""
+    minutes = max(1, int(round(float(seconds) / 60.0)))
+    return f"Model is busy/slow. No first word after {minutes} min. Wait longer or retry."
+
+
+def is_still_working(detail: str) -> bool:
+    text = detail or ""
+    return text.startswith("Model is busy/slow") or text.startswith(
+        "The model is connected but hasn't started answering"
+    )
+
+
 def limits_from_endpoint(endpoint: dict | None) -> Limits:
-    """Connection settings, or the defaults. A missing length is 4096."""
+    """Connection settings, or the defaults. A missing length is 4096.
+
+    A local or private-network address waits 300 s for the first word and 900 s
+    for the whole reply when those fields were left blank.
+    """
     source = endpoint if isinstance(endpoint, dict) else {}
+    local = is_local_base(str(source.get("base_url") or ""))
+    first_default = LOCAL_FIRST_TOKEN_SECONDS if local and source.get("first_token_seconds") in (None, "") else DEFAULT_FIRST_TOKEN_SECONDS
+    hard_default = LOCAL_HARD_SECONDS if local and source.get("hard_seconds") in (None, "") else DEFAULT_HARD_SECONDS
     stall = _whole(source.get("stall_seconds"), DEFAULT_STALL_SECONDS, 5.0, 600.0)
-    first = _whole(source.get("first_token_seconds"), DEFAULT_FIRST_TOKEN_SECONDS, 5.0, 600.0)
+    first = _whole(source.get("first_token_seconds"), first_default, 5.0, 1200.0)
     if first < stall:
         first = stall
     wall = _whole(source.get("wall_seconds"), DEFAULT_WALL_SECONDS, 5.0, 3600.0)
-    hard = _whole(source.get("hard_seconds"), DEFAULT_HARD_SECONDS, wall, 7200.0)
+    hard = _whole(source.get("hard_seconds"), hard_default, wall, 7200.0)
     return Limits(
         max_tokens=effective_max_tokens(source),
         stall_seconds=stall,
@@ -117,6 +162,7 @@ def limits_from_endpoint(endpoint: dict | None) -> Limits:
 
 
 _limits: ContextVar[Limits | None] = ContextVar("easyagent_generation_limits", default=None)
+_first_scale: ContextVar[float] = ContextVar("easyagent_first_scale", default=1.0)
 
 
 def bind_limits(endpoint: dict | None):
@@ -128,11 +174,39 @@ def reset_limits(token) -> None:
     _limits.reset(token)
 
 
+def bind_first_scale(scale: float):
+    """This turn may wait longer for the first word. 1 keeps the connection setting."""
+    try:
+        number = float(scale)
+    except (TypeError, ValueError):
+        number = 1.0
+    if number < 1:
+        number = 1.0
+    return _first_scale.set(number)
+
+
+def reset_first_scale(token) -> None:
+    _first_scale.reset(token)
+
+
 def current_limits() -> Limits:
     found = _limits.get()
     if found is None:
-        return limits_from_endpoint(None)
-    return found
+        found = limits_from_endpoint(None)
+    scale = _first_scale.get()
+    if scale <= 1:
+        return found
+    first = min(600.0, found.first_token_seconds * scale)
+    if first <= found.first_token_seconds:
+        return found
+    return Limits(
+        max_tokens=found.max_tokens,
+        stall_seconds=found.stall_seconds,
+        first_token_seconds=first,
+        wall_seconds=found.wall_seconds,
+        hard_seconds=found.hard_seconds,
+        tool_temperature=found.tool_temperature,
+    )
 
 
 class GenerationWatch:

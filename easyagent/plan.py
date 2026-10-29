@@ -232,6 +232,9 @@ def elapsed_seconds(run: dict, now: datetime | None = None) -> int:
 def is_stuck(run: dict, now: datetime | None = None) -> bool:
     if not isinstance(run, dict) or run.get("status") != "running":
         return False
+    step = str(run.get("current_step") or "")
+    if step.startswith("Queued:") or step.startswith("Model is reading") or step.startswith("Waiting on model"):
+        return False
     last = _parse_time(run.get("last_activity_at"))
     if last is None:
         return False

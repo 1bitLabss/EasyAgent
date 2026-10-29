@@ -231,7 +231,18 @@ class Window:
     """
 
     def __init__(self, budget: float | None = None, base_url: str = "", long_wait: bool = False) -> None:
-        self.budget = budget_seconds() if budget is None else max(0.0, float(budget))
+        if budget is None:
+            from easyagent.generation import is_local_base
+
+            # A local model may sit in a queue for minutes. Tests that set
+            # EASYAGENT_MODEL_RETRY_SECONDS keep that shorter clock.
+            base = budget_seconds()
+            if is_local_base(base_url or "") and abs(base - DEFAULT_BUDGET) < 0.1:
+                self.budget = 600.0
+            else:
+                self.budget = base
+        else:
+            self.budget = max(0.0, float(budget))
         self.base_url = base_url or ""
         self.long_wait = bool(long_wait)
         self.started = now()

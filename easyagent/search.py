@@ -647,10 +647,24 @@ async def research(question: str, store: Store | None = None, bot_id: str | None
     """Search, then read the top results. The answer has to cite those numbers."""
     from easyagent.safety import mark_untrusted
 
-    findings = await web_search(question, store=store)
+    note = ""
+    try:
+        findings = await web_search(question, store=store)
+    except SearchError as exc:
+        if _BLOCKED not in str(exc):
+            raise
+        try:
+            items = await _duckduckgo_html_items(question)
+        except SearchError:
+            items = []
+        if items:
+            findings = format_results(items)
+            note = "(provider DuckDuckGo blocked; used DuckDuckGo HTML)"
+        else:
+            return mark_untrusted("(provider blocked; no results were returned)")
     sources = sources_from_text(findings)[:3]
     if not sources:
-        return findings
+        return mark_untrusted((note + "\n" + findings).strip()) if note else findings
     blocks = [
         "Cite each claim with the source number in brackets, like [1]. A claim with no source number is not done."
     ]
@@ -662,7 +676,10 @@ async def research(question: str, store: Store | None = None, bot_id: str | None
         source["text"] = page
         date = f"\n{source['date']}" if source.get("date") else ""
         blocks.append(f"[{index}] {source['title']}\n{source['url']}{date}\n{page}")
-    return mark_untrusted("\n\n".join(blocks))
+    body = "\n\n".join(blocks)
+    if note:
+        body = note + "\n\n" + body
+    return mark_untrusted(body)
 
 
 def _sentence_with(answer: str, number: int) -> str:

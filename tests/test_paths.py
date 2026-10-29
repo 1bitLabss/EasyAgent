@@ -105,7 +105,7 @@ def test_prompt_follows_the_running_system(monkeypatch):
     assert "ConvertTo-Json" in windows
     assert "ConvertFrom-Json" in windows
     assert ".ps1" in windows
-    assert "python -c" in windows
+    assert "python tool" in windows
     assert "C:\\work" not in windows
 
 

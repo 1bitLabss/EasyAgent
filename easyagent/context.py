@@ -85,23 +85,37 @@ def context_window(context_chars: int | None) -> tuple[int, int, int]:
     return budget, summary_cap, per_message
 
 
-def bot_context_tokens(bot: dict | None) -> int:
-    """The token budget saved on a bot, or the default.
+def bot_context_tokens(bot: dict | None, endpoint: dict | None = None) -> int:
+    """The token budget saved on a bot, the server's n_ctx, or the default.
 
     A bot saved before budgets were counted in tokens has only context_chars,
     capped at 7,200 characters. That old value is ignored, so the bot gets the
-    default token budget instead of a tiny window.
+    server window, or the default, instead of a tiny window.
     """
     if bot:
         value = clean_tokens(bot.get("context_tokens"))
         if value is not None:
             return value
+    if isinstance(endpoint, dict):
+        try:
+            from easyagent.nctx import resolve_n_ctx
+
+            found = resolve_n_ctx(endpoint, None, endpoint.get("model"))
+        except Exception:
+            found = 0
+        if found and found > 2048:
+            room = found - 2048
+            if room < MIN_CONTEXT_TOKENS:
+                room = MIN_CONTEXT_TOKENS
+            if room > MAX_CONTEXT_TOKENS:
+                room = MAX_CONTEXT_TOKENS
+            return room
     return default_context_tokens()
 
 
-def bot_context_chars(bot: dict | None) -> int:
+def bot_context_chars(bot: dict | None, endpoint: dict | None = None) -> int:
     """The bot's chat budget in characters, for the character-based fold."""
-    budget, _, _ = context_window(tokens_to_chars(bot_context_tokens(bot)))
+    budget, _, _ = context_window(tokens_to_chars(bot_context_tokens(bot, endpoint)))
     return budget
 
 

@@ -4428,7 +4428,7 @@ def test_a_gradient_only_page_stays_open(tmp_path, monkeypatch):
     nudge = "\n".join(
         item.get("content") or ""
         for item in recorder.seen[before + 2]
-        if item.get("role") == "user"
+        if item.get("role") in {"user", "tool"}
     )
     assert "A CSS gradient is not a picture." in nudge
     text = (folder / "landing.html").read_text(encoding="utf-8")

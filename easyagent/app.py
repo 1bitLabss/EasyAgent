@@ -54,6 +54,7 @@ from easyagent.schedule import (
     parse_cron,
     pause_all,
     preview,
+    routine_views,
     run_routine_now,
     schedule_loop,
     template_records,
@@ -75,6 +76,7 @@ from easyagent.vault import seal
 from easyagent.subagent import (
     automatic_ask_allowed,
     child_messages,
+    consult_target,
     error_line,
     parse_subagent,
     short_result,
@@ -549,6 +551,7 @@ class MessageIn(BaseModel):
     content: str = ""
     attachment_id: str | None = None
     client_id: str | None = None
+    wait_longer: bool = False
 
 
 class YoloIn(BaseModel):
@@ -840,6 +843,28 @@ def create_app(data_dir: str | Path | None = None) -> FastAPI:
     @app.get("/api/health")
     def health():
         return {"ok": True, "data_dir": str(store.root), "version": __version__}
+
+    @app.get("/api/routines")
+    def all_routines():
+        return routine_views(store)
+
+    @app.post("/api/diag/client-event")
+    async def client_event(request: Request):
+        from easyagent.diag import append_client_event
+
+        try:
+            body = await request.json()
+        except Exception:
+            body = {}
+        append_client_event(store.root, body if isinstance(body, dict) else {})
+        return {"ok": True}
+
+    @app.get("/api/diag/bundle")
+    def diag_bundle():
+        from easyagent.diag import build_bundle
+
+        payload = build_bundle(store.root)
+        return Response(content=payload, media_type="application/zip", headers={"Content-Disposition": "attachment; filename=easyagent-diagnostics.zip"})
 
     @app.get("/api/sandbox")
     def sandbox_status():
@@ -1608,11 +1633,7 @@ def create_app(data_dir: str | Path | None = None) -> FastAPI:
                 if watched in slot.listeners:
                     slot.listeners.remove(watched)
 
-        return StreamingResponse(
-            gen(),
-            media_type="text/event-stream",
-            headers={"Cache-Control": "no-store", "X-Accel-Buffering": "no"},
-        )
+        return _serve_sse(gen())
 
     @app.get("/api/bots/{bot_id}/chats/{chat_id}/messages")
     def chat_messages(bot_id: str, chat_id: str, before: int = 0, limit: int = 80):
@@ -1750,11 +1771,7 @@ def create_app(data_dir: str | Path | None = None) -> FastAPI:
             finally:
                 await _finish_turn(store, bot_id, chat_id)
         if _wants_stream(request):
-            return StreamingResponse(
-                _stream_new_message(store, bot_id, chat_id, content, attachment, client_id),
-                media_type="text/event-stream",
-                headers={"Cache-Control": "no-store", "X-Accel-Buffering": "no"},
-            )
+            return _serve_sse(_stream_new_message(store, bot_id, chat_id, content, attachment, client_id))
         try:
             async with chat_lock(store, chat_id):
                 turn_mod.bind(store, chat_id, bot_id=bot_id)
@@ -1776,11 +1793,8 @@ def create_app(data_dir: str | Path | None = None) -> FastAPI:
             raise HTTPException(409, "This job is still running. Stop is what cancels it.")
         turn_mod.interrupt(store, chat_id, "the reply is being tried again")
         if _wants_stream(request):
-            return StreamingResponse(
-                _stream_retry(store, bot_id, chat_id),
-                media_type="text/event-stream",
-                headers={"Cache-Control": "no-store", "X-Accel-Buffering": "no"},
-            )
+            scale = 2.0 if request.headers.get("x-easyagent-wait-longer") == "1" else 1.0
+            return _serve_sse(_stream_retry(store, bot_id, chat_id, first_scale=scale))
         async with chat_lock(store, chat_id):
             turn_mod.bind(store, chat_id, bot_id=bot_id)
             before = len(store.get_chat(bot_id, chat_id).get("messages") or [])
@@ -1822,6 +1836,9 @@ def create_app(data_dir: str | Path | None = None) -> FastAPI:
         from easyagent.plan import queued_items, release_hold_for_send, release_uncovered
 
         chat = store.get_chat(bot_id, chat_id)
+        # The stream already answered the queue before it went idle. Do not run it again.
+        if not queued_items(store, bot_id, chat_id) and (chat.get("run") or {}).get("status") == "idle":
+            return _public_chat(store, chat)
         for message in chat.get("messages") or []:
             if isinstance(message, dict) and message.get("role") == "assistant" and message.get("live"):
                 message["interrupted"] = True
@@ -1874,11 +1891,7 @@ def create_app(data_dir: str | Path | None = None) -> FastAPI:
             raise HTTPException(400, str(exc)) from exc
         turn_mod.slot_for(store, chat_id).resend_id = message_id
         if _wants_stream(request):
-            return StreamingResponse(
-                _stream_reply_only(store, bot_id, chat_id),
-                media_type="text/event-stream",
-                headers={"Cache-Control": "no-store", "X-Accel-Buffering": "no"},
-            )
+            return _serve_sse(_stream_reply_only(store, bot_id, chat_id))
         try:
             async with chat_lock(store, chat_id):
                 turn_mod.bind(store, chat_id, bot_id=bot_id)
@@ -1918,11 +1931,7 @@ def create_app(data_dir: str | Path | None = None) -> FastAPI:
             raise HTTPException(400, str(exc)) from exc
         turn_mod.slot_for(store, chat_id).resend_id = message_id
         if _wants_stream(request):
-            return StreamingResponse(
-                _stream_reply_only(store, bot_id, chat_id),
-                media_type="text/event-stream",
-                headers={"Cache-Control": "no-store", "X-Accel-Buffering": "no"},
-            )
+            return _serve_sse(_stream_reply_only(store, bot_id, chat_id))
         try:
             async with chat_lock(store, chat_id):
                 turn_mod.bind(store, chat_id, bot_id=bot_id)
@@ -1964,13 +1973,9 @@ def create_app(data_dir: str | Path | None = None) -> FastAPI:
         slot.user_stop = False
         slot.drain_chains = 0
         if _wants_stream(request):
-            return StreamingResponse(
-                _stream_resume(
-                    store, bot_id, chat_id, spoken, echoed=echoed, resume_cue=bool(typed), client_id=typed_client,
-                ),
-                media_type="text/event-stream",
-                headers={"Cache-Control": "no-store", "X-Accel-Buffering": "no"},
-            )
+            return _serve_sse(_stream_resume(
+                store, bot_id, chat_id, spoken, echoed=echoed, resume_cue=bool(typed), client_id=typed_client,
+            ))
         try:
             async with chat_lock(store, chat_id):
                 turn_mod.bind(store, chat_id, bot_id=bot_id, resume=True)
@@ -2058,6 +2063,37 @@ def create_app(data_dir: str | Path | None = None) -> FastAPI:
     def get_room(room_id: str):
         return _public_room(store, store.get_room(room_id))
 
+    @app.get("/api/rooms/{room_id}/live")
+    async def room_live(room_id: str):
+        store.get_room(room_id)
+        run = _ROOM_RUNS.get(room_id)
+
+        async def gen():
+            if run is None or run.get("task") is None or run["task"].done():
+                yield _sse({"type": "done", "room": _public_room(store, store.get_room(room_id))})
+                return
+            watched: asyncio.Queue = asyncio.Queue()
+            run["listeners"].append(watched)
+            try:
+                yield _sse({"type": "sync", "room": _public_room(store, store.get_room(room_id)), "statuses": run.get("statuses") or {}})
+                while True:
+                    item = await watched.get()
+                    if item is None:
+                        break
+                    yield item
+            finally:
+                if watched in run["listeners"]:
+                    run["listeners"].remove(watched)
+
+        return _serve_sse(gen())
+
+    @app.post("/api/rooms/{room_id}/stop")
+    def stop_room(room_id: str):
+        run = _ROOM_RUNS.get(room_id)
+        if run is not None and run.get("cancel") is not None:
+            run["cancel"].set()
+        return _public_room(store, store.get_room(room_id))
+
     @app.post("/api/rooms/{room_id}/read")
     def read_room(room_id: str, body: ReadIn | None = None):
         through = None if body is None else body.through
@@ -2084,64 +2120,39 @@ def create_app(data_dir: str | Path | None = None) -> FastAPI:
         return _public_room(store, room)
 
     @app.post("/api/rooms/{room_id}/messages")
-    async def post_room_message(room_id: str, body: MessageIn):
+    async def post_room_message(room_id: str, body: MessageIn, request: Request):
         content = (body.content or "").strip()
         if not content:
             raise HTTPException(400, "Write a message first.")
         if len(content) > MAX_STORED_MESSAGE_CHARS:
             raise HTTPException(400, f"Message is too long ({MAX_STORED_MESSAGE_CHARS} characters max).")
+        room = store.get_room(room_id)
+        member_ids = list(room.get("bot_ids") or [])
+        if not member_ids:
+            raise HTTPException(400, "Add a bot to this room first. Nothing was written.")
+        user_message = {
+            "id": new_id(),
+            "role": "user",
+            "speaker": "user",
+            "speaker_name": "You",
+            "content": content,
+            "created_at": now_iso(),
+        }
         async with chat_lock(store, room_id):
             room = store.get_room(room_id)
-            member_ids = list(room.get("bot_ids") or [])
-            if not member_ids:
-                raise HTTPException(400, "Add a bot to this room first. Nothing was written.")
-            bots_before = _snapshot_bots(store)
-            room["messages"].append(
-                {
-                    "id": new_id(),
-                    "role": "user",
-                    "speaker": "user",
-                    "speaker_name": "You",
-                    "content": content,
-                    "created_at": now_iso(),
-                }
-            )
+            room["messages"].append(user_message)
             _persist_room(room)
             room["updated_at"] = now_iso()
             store.save_room(room)
-            # Every bot answers this same transcript. A same-turn reply is not
-            # fed to the next bot, so one failure cannot change what the others see.
-            snapshot = store.get_room(room_id)
-            for bot_id in member_ids:
-                visible, saved, error, choices, reacted = await _complete_for_room_bot(store, snapshot, bot_id)
-                if not error and not (visible or "").strip() and not choices and reacted:
-                    continue
-                room = store.get_room(room_id)
-                try:
-                    speaker_name = store.get_bot(bot_id)["name"]
-                except StoreError:
-                    speaker_name = "Missing bot"
-                message = {
-                    "id": new_id(),
-                    "role": "assistant",
-                    "speaker": bot_id,
-                    "speaker_name": speaker_name,
-                    "content": error or visible,
-                    "created_at": now_iso(),
-                }
-                if error:
-                    message["error"] = True
-                if choices and not error:
-                    message["choices"] = choices
-                if saved:
-                    message["skills_saved"] = saved
-                room["messages"].append(message)
-                _persist_room(room)
-                room["updated_at"] = now_iso()
-                store.save_room(room)
-            if _snapshot_bots(store) != bots_before:
-                raise HTTPException(500, "A room turn changed a bot's private chats.")
-            return _public_room(store, store.get_room(room_id))
+        targets = _room_targets(store, room_id, content)
+        if _wants_stream(request):
+            return _serve_sse(_stream_room_turn(store, room_id, user_message, targets))
+        # Every bot answers this same transcript. A same-turn reply is not
+        # fed to the next bot, so one failure cannot change what the others see.
+        snapshot = store.get_room(room_id)
+        for bot_id in targets:
+            await _save_room_bot_reply(store, room_id, snapshot, bot_id)
+        return _public_room(store, store.get_room(room_id))
 
     @app.post("/api/rooms/{room_id}/messages/{message_id}/reaction")
     async def react_to_room_message(room_id: str, message_id: str, body: ReactionIn):
@@ -2868,7 +2879,12 @@ def _chat_budget(store: Store, chat: dict) -> int:
         bot = store.get_bot(chat["bot_id"])
     except StoreError:
         return bot_context_chars(None)
-    return bot_context_chars(bot)
+    endpoint = None
+    try:
+        endpoint = store.get_endpoint(bot.get("endpoint_id"))
+    except Exception:
+        endpoint = None
+    return bot_context_chars(bot, endpoint)
 
 
 def _window_for(store: Store, chat: dict) -> int:
@@ -2996,6 +3012,65 @@ def _sse(payload: dict) -> str:
     return "data: " + json.dumps(payload, ensure_ascii=False) + "\n\n"
 
 
+_HEARTBEAT_SECONDS = 15.0
+
+
+async def _heartbeat(source):
+    """Keep a quiet SSE socket alive. A comment is not an event."""
+    agen = source.__aiter__()
+    pending: asyncio.Task | None = None
+    try:
+        while True:
+            if pending is None:
+                pending = asyncio.ensure_future(agen.__anext__())
+            done, _waiting = await asyncio.wait({pending}, timeout=_HEARTBEAT_SECONDS)
+            if not done:
+                yield ": ping\n\n"
+                continue
+            pending = None
+            try:
+                item = done.pop().result()
+            except StopAsyncIteration:
+                break
+            yield item
+    finally:
+        if pending is not None and not pending.done():
+            pending.cancel()
+
+
+def _serve_sse(source):
+    """SSE with a 15 s heartbeat and one log line when the stream ends."""
+
+    async def logged():
+        reason = "done"
+        try:
+            async for chunk in _heartbeat(source):
+                if isinstance(chunk, str) and chunk.startswith("data:"):
+                    if '"type": "error"' in chunk or '"type":"error"' in chunk:
+                        reason = "error"
+                    elif '"type": "stopped"' in chunk or '"type":"stopped"' in chunk:
+                        reason = "stopped"
+                    elif "kept generating without finishing" in chunk:
+                        reason = "runaway"
+                    elif '"type": "done"' in chunk or '"type":"done"' in chunk:
+                        reason = "done"
+                yield chunk
+        except (asyncio.CancelledError, GeneratorExit):
+            reason = "client-closed"
+            raise
+        except Exception:
+            reason = "error"
+            raise
+        finally:
+            print(f"stream end: {reason}", flush=True)
+
+    return StreamingResponse(
+        logged(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-store", "X-Accel-Buffering": "no"},
+    )
+
+
 def _can_retry(messages: list) -> bool:
     """True when some user line still has no real reply. A finished answer hides Retry.
 
@@ -3015,7 +3090,7 @@ def _can_retry(messages: list) -> bool:
         text = (message.get("content") or "").strip()
         if text == "Stopped." or text.startswith("Stopped:"):
             return True
-        if kind in {"resume-offer", "connection"}:
+        if kind in {"resume-offer", "connection", "still-working"}:
             return True
         return False
     return False
@@ -3723,6 +3798,198 @@ def _persist_room(room: dict) -> dict:
     return prepared.stats
 
 
+_ROOM_RUNS: dict[str, dict] = {}
+
+
+def _room_pending(room: dict) -> list[dict]:
+    from easyagent.safety import list_pending
+
+    room_id = str(room.get("id") or "")
+    rows = []
+    for bot_id in room.get("bot_ids") or []:
+        for card in list_pending(bot_id):
+            if str(card.get("chat_id") or "") == room_id:
+                rows.append(card)
+    return rows
+
+
+def _room_targets(store: Store, room_id: str, content: str) -> list[str]:
+    room = store.get_room(room_id)
+    members = []
+    for bot_id in room.get("bot_ids") or []:
+        try:
+            bot = store.get_bot(bot_id)
+        except StoreError:
+            continue
+        members.append(bot)
+    lowered = content.lower()
+    named = [bot["id"] for bot in members if f"@{bot.get('name', '')}".lower() in lowered]
+    if named:
+        return named
+    return [bot["id"] for bot in members]
+
+
+def _room_status(bot_id: str, name: str, state: str, label: str) -> str:
+    return _sse({"type": "bot_status", "bot_id": bot_id, "name": name, "state": state, "label": label})
+
+
+async def _save_room_bot_reply(store: Store, room_id: str, snapshot: dict, bot_id: str) -> dict | None:
+    visible, saved, error, choices, reacted = await _complete_for_room_bot(store, snapshot, bot_id)
+    if not error and not (visible or "").strip() and not choices and reacted:
+        return None
+    try:
+        speaker_name = store.get_bot(bot_id)["name"]
+    except StoreError:
+        speaker_name = "Missing bot"
+    message = {
+        "id": new_id(),
+        "role": "assistant",
+        "speaker": bot_id,
+        "speaker_name": speaker_name,
+        "content": error or visible,
+        "created_at": now_iso(),
+    }
+    if error:
+        message["error"] = True
+    if choices and not error:
+        message["choices"] = choices
+    if saved:
+        message["skills_saved"] = saved
+    async with chat_lock(store, room_id):
+        room = store.get_room(room_id)
+        room["messages"].append(message)
+        _persist_room(room)
+        room["updated_at"] = now_iso()
+        store.save_room(room)
+    return message
+
+
+async def _stream_room_turn(store: Store, room_id: str, user_message: dict, targets: list[str]):
+    cancel = asyncio.Event()
+    listeners: list[asyncio.Queue] = []
+    run = {"cancel": cancel, "listeners": listeners, "task": asyncio.current_task(), "statuses": {}}
+    _ROOM_RUNS[room_id] = run
+
+    async def publish(item: str) -> None:
+        for queue in list(listeners):
+            with suppress(Exception):
+                queue.put_nowait(item)
+
+    def bot_name(bot_id: str) -> str:
+        try:
+            return store.get_bot(bot_id)["name"]
+        except StoreError:
+            return "Missing bot"
+
+    try:
+        yield _sse({"type": "user", "message": user_message})
+        await publish(_sse({"type": "user", "message": user_message}))
+        snapshot = store.get_room(room_id)
+
+        async def one(bot_id: str, index: int) -> None:
+            name = bot_name(bot_id)
+            state = "queued" if index else "thinking"
+            label = f"{name} is thinking…" if state == "thinking" else f"{name} queued"
+            run["statuses"][bot_id] = {"state": state, "label": label, "name": name}
+            await publish(_room_status(bot_id, name, state, label))
+            if cancel.is_set():
+                run["statuses"][bot_id] = {"state": "error", "label": f"{name} stopped", "name": name}
+                return
+            from easyagent.safety import list_pending
+
+            task = asyncio.create_task(_complete_for_room_bot(store, snapshot, bot_id))
+            announced = False
+            while not task.done():
+                if cancel.is_set():
+                    task.cancel()
+                    break
+                cards = [card for card in list_pending(bot_id) if str(card.get("chat_id") or "") == room_id]
+                if cards and not announced:
+                    announced = True
+                    run["statuses"][bot_id] = {"state": "waiting_approval", "label": f"{name} waiting for approval", "name": name}
+                    note = _room_status(bot_id, name, "waiting_approval", f"{name} waiting for approval")
+                    card = cards[0]
+                    approval = _sse({"type": "approval", "bot_id": bot_id, "card": card})
+                    await publish(note)
+                    await publish(approval)
+                try:
+                    await asyncio.wait_for(asyncio.shield(task), timeout=0.4)
+                except asyncio.TimeoutError:
+                    continue
+            if cancel.is_set() and not task.done():
+                run["statuses"][bot_id] = {"state": "error", "label": f"{name} stopped", "name": name}
+                await publish(_room_status(bot_id, name, "error", f"{name} stopped"))
+                return
+            try:
+                visible, saved, error, choices, reacted = task.result()
+            except Exception as exc:
+                visible, saved, error, choices, reacted = "", [], str(exc), [], False
+            if not error and not (visible or "").strip() and not choices and reacted:
+                run["statuses"][bot_id] = {"state": "done", "label": f"{name} finished", "name": name}
+                await publish(_room_status(bot_id, name, "done", f"{name} finished"))
+                return
+            message = {
+                "id": new_id(),
+                "role": "assistant",
+                "speaker": bot_id,
+                "speaker_name": name,
+                "content": error or visible,
+                "created_at": now_iso(),
+            }
+            if error:
+                message["error"] = True
+            if choices and not error:
+                message["choices"] = choices
+            if saved:
+                message["skills_saved"] = saved
+            async with chat_lock(store, room_id):
+                room = store.get_room(room_id)
+                room["messages"].append(message)
+                _persist_room(room)
+                room["updated_at"] = now_iso()
+                store.save_room(room)
+            state = "error" if error else "done"
+            label = f"{name} could not reply" if error else f"{name} replied"
+            run["statuses"][bot_id] = {"state": state, "label": label, "name": name}
+            event = _sse({"type": "message", "message": message})
+            await publish(event)
+            await publish(_room_status(bot_id, name, state, label))
+
+        mine: asyncio.Queue = asyncio.Queue()
+        listeners.append(mine)
+        tasks = [asyncio.create_task(one(bot_id, index)) for index, bot_id in enumerate(targets)]
+        for bot_id in targets:
+            name = bot_name(bot_id)
+            state = "thinking" if bot_id == targets[0] else "queued"
+            label = f"{name} is thinking…" if state == "thinking" else f"{name} queued"
+            yield _room_status(bot_id, name, state, label)
+        pending = set(tasks)
+        while pending or not mine.empty():
+            try:
+                item = await asyncio.wait_for(mine.get(), timeout=0.5)
+            except asyncio.TimeoutError:
+                pending = {task for task in pending if not task.done()}
+                if not pending and mine.empty():
+                    break
+                continue
+            if item:
+                yield item
+            pending = {task for task in pending if not task.done()}
+        for task in tasks:
+            with suppress(Exception):
+                await task
+        done = _sse({"type": "done", "room": _public_room(store, store.get_room(room_id))})
+        await publish(done)
+        yield done
+    finally:
+        for queue in list(listeners):
+            with suppress(Exception):
+                queue.put_nowait(None)
+        current = _ROOM_RUNS.get(room_id)
+        if current is run:
+            _ROOM_RUNS.pop(room_id, None)
+
+
 def _public_room(store: Store, room: dict) -> dict:
     """Full room transcript. Reading a room does not write it or any bot chat."""
     prepared = _prepare_room(room)
@@ -3745,6 +4012,7 @@ def _public_room(store: Store, room: dict) -> dict:
         "summarized_through": prepared.summarized_through,
         "messages": room.get("messages") or [],
         "context": prepared.stats,
+        "pending_approvals": _room_pending(room),
     }
 
 
@@ -5012,6 +5280,11 @@ def _pause_for_runaway(store: Store, bot_id: str, chat_id: str) -> dict:
         target["content"] = RUNAWAY_TEXT
         target["kind"] = "resume-offer"
     target["interrupted"] = True
+    target["limit_stop"] = True
+    from easyagent.generation import current_limits
+
+    minutes = max(1, int(round(current_limits().hard_seconds / 60.0)))
+    target["limit_label"] = f"{minutes} min"
     target.pop("live", None)
     target.pop("error", None)
     release_uncovered(chat)
@@ -5343,11 +5616,7 @@ async def _answer_while_busy(
             "chat_id": chat_id,
         })
 
-    return StreamingResponse(
-        gen(),
-        media_type="text/event-stream",
-        headers={"Cache-Control": "no-store", "X-Accel-Buffering": "no"},
-    )
+    return _serve_sse(gen())
 
 
 def _follow_capped(store: Store, chat_id: str) -> bool:
@@ -5897,6 +6166,12 @@ def _stick_turn_notes(store: Store, chat: dict) -> None:
 SILENCE_TEXT = "The model sent nothing for 2 minutes."
 
 
+def _still_working_line() -> str:
+    from easyagent.generation import current_limits, still_working_text
+
+    return still_working_text(current_limits().first_token_seconds)
+
+
 def _silence_text(store: Store, bot_id: str) -> str:
     """No token arrived. An unreachable server keeps the connection sentence."""
     if retry.saw_unreachable():
@@ -5974,12 +6249,15 @@ def _append_error(store: Store, bot_id: str, chat_id: str, detail: str) -> dict:
     _drop_activity(chat)
     before = len(chat.get("messages") or [])
     cleaned = " ".join((redact(store, detail) or "").split())
+    from easyagent.generation import is_still_working
+
     harness = retry.is_unreachable_message(cleaned)
     malformed = llm.is_resumable_model_error(cleaned)
     plain = cleaned == SILENCE_TEXT
+    working = is_still_working(cleaned)
     if malformed:
         shown = llm.resumable_shown(cleaned)
-    elif harness or plain:
+    elif harness or plain or working:
         shown = cleaned
     else:
         shown = _stopped_text(cleaned)
@@ -5989,6 +6267,9 @@ def _append_error(store: Store, bot_id: str, chat_id: str, detail: str) -> dict:
         message.pop("live", None)
         if malformed:
             message["kind"] = "resume-offer"
+            message.pop("error", None)
+        elif working:
+            message["kind"] = "still-working"
             message.pop("error", None)
         else:
             message["error"] = True
@@ -6023,9 +6304,11 @@ def _append_error(store: Store, bot_id: str, chat_id: str, detail: str) -> dict:
     }
     if malformed:
         fresh["kind"] = "resume-offer"
+    elif working:
+        fresh["kind"] = "still-working"
     else:
         fresh["error"] = True
-    if harness:
+    if harness and not working:
         fresh["kind"] = "connection"
     chat["messages"].append(fresh)
     _record_turn_meter(chat, detail=detail)
@@ -6123,7 +6406,10 @@ async def _finish_and_maybe_ask(
             child_chat_id=None,
         )
     if not ask:
-        return finished
+        named = consult_target(user_text, names)
+        if not named:
+            return finished
+        ask = named
     if len(ask[1]) > 8000:
         return _append_parent_result(
             store,
@@ -6662,6 +6948,8 @@ async def _reply_json(store: Store, bot_id: str, chat_id: str, *, continue_run: 
         if getattr(exc, "reason", "") == "first_token" or _stale_stop_closed(
             store.get_chat(bot_id, chat_id).get("messages") or []
         ):
+            if getattr(exc, "reason", "") == "first_token":
+                return _append_error(store, bot_id, chat_id, _still_working_line())
             return _append_error(store, bot_id, chat_id, _silence_text(store, bot_id))
         return _pause_for_runaway(store, bot_id, chat_id)
     except turn_mod.UserPause:
@@ -6689,6 +6977,7 @@ async def _stream_reply(
     continue_run: bool = False,
     drain: bool = True,
     emit_done: bool = True,
+    first_scale: float = 1,
 ):
     """Yield SSE for one reply. The caller holds the chat lock. The user turn is already stored."""
     bot = store.get_bot(bot_id)
@@ -6703,10 +6992,11 @@ async def _stream_reply(
         yield _sse({"type": "run", "run": opened})
     yield _sse({"type": "status", "text": "Waiting on model"})
     conn = gate.bind_connection(endpoint, bot.get("name") or "", store=store)
-    from easyagent.generation import GenerationLimit, bind_limits, reset_limits
+    from easyagent.generation import GenerationLimit, bind_first_scale, bind_limits, reset_first_scale, reset_limits
     from easyagent.llm import drop_answer_leak
 
     length = bind_limits(endpoint)
+    scale_token = bind_first_scale(first_scale)
     try:
         final = None
         choices: list[str] = []
@@ -6985,7 +7275,8 @@ async def _stream_reply(
     except GenerationLimit as exc:
         closed = _stale_stop_closed(store.get_chat(bot_id, chat_id).get("messages") or [])
         if getattr(exc, "reason", "") == "first_token" or closed:
-            failed = _append_error(store, bot_id, chat_id, _silence_text(store, bot_id))
+            detail = _still_working_line() if getattr(exc, "reason", "") == "first_token" else _silence_text(store, bot_id)
+            failed = _append_error(store, bot_id, chat_id, detail)
             yield _sse({"type": "error", "detail": failed["reply"], "chat": failed["chat"]})
             return
         saved = _pause_for_runaway(store, bot_id, chat_id)
@@ -7024,6 +7315,31 @@ async def _stream_reply(
                 yield extra
             return
         reason = turn_mod.cancel_reason() or "the reply stopped before it finished."
+        from easyagent.plan import queued_items
+
+        slot = turn_mod.slot_for(store, chat_id)
+        if slot.user_stop and queued_items(store, bot_id, chat_id):
+            _settle_interrupted(store, bot_id, chat_id, reason)
+            turn_mod.renew_cancel()
+            slot.user_stop = False
+            slot.reason = ""
+            await asyncio.sleep(0.05)
+            await _drain_queued_json(store, bot_id, chat_id)
+            try:
+                chat = store.get_chat(bot_id, chat_id)
+            except StoreError:
+                chat = None
+            if chat is not None and (chat.get("run") or {}).get("status") == "error":
+                _apply_run(chat, status="stopped", reason=reason, step="")
+                chat["updated_at"] = now_iso()
+                with suppress(Exception):
+                    store.save_chat(chat)
+            if emit_done:
+                try:
+                    yield _sse({"type": "done", "chat": _public_chat(store, store.get_chat(bot_id, chat_id))})
+                except StoreError:
+                    pass
+            return
         _settle_interrupted(store, bot_id, chat_id, reason)
         yield _sse_stopped(store, bot_id, chat_id, _stopped_text(reason))
         return
@@ -7045,6 +7361,7 @@ async def _stream_reply(
         _settle_interrupted(store, bot_id, chat_id, reason)
         yield _sse_stopped(store, bot_id, chat_id, _stopped_text(reason))
     finally:
+        reset_first_scale(scale_token)
         reset_limits(length)
         gate.reset_connection(conn)
         reason = turn_mod.cancel_reason()
@@ -7188,13 +7505,13 @@ async def _stream_reply_only(store: Store, bot_id: str, chat_id: str):
         yield chunk
 
 
-async def _stream_retry(store: Store, bot_id: str, chat_id: str):
+async def _stream_retry(store: Store, bot_id: str, chat_id: str, *, first_scale: float = 1):
     async def produce():
         chat = store.get_chat(bot_id, chat_id)
         if not _can_retry(chat.get("messages") or []):
             yield _sse({"type": "done", "chat": _public_chat(store, chat)})
             return
-        async for chunk in _stream_reply(store, bot_id, chat_id):
+        async for chunk in _stream_reply(store, bot_id, chat_id, first_scale=first_scale):
             yield chunk
 
     async for chunk in _emit_run(store, bot_id, chat_id, produce):

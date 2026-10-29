@@ -94,23 +94,20 @@ def own_files_prompt(store: Store, bot_id: str, chat_id: str | None = None) -> s
         paths = bot_paths(store, bot_id, chat_id)
     except StoreError:
         return ""
+    workspace = _show(_workspace(store, bot_id))
     rows = [
+        f"- Your folder: {workspace}",
+        f"- EasyAgent's internal data for this bot (off-limits): {_show(paths['bot'])}",
         f"- EasyAgent data folder: {_show(paths['data'])}",
-        f"- Your folder: {_show(paths['bot'])}",
-        f"- Your chat transcripts: {_show(paths['chats'])} (one .json file per chat, every message kept)",
+        f"- Chat transcripts (off-limits): {_show(paths['chats'])}",
+        f"- Your memory file: {_show(paths['memory_md'])}",
+        f"- Notes about the person: {_show(paths['user_md'])}",
+        f"- Memory topics: {_show(paths['memory_index'])}",
+        f"- Skills: {_show(paths['skills'])}",
+        f"- Direction: {_show(paths['direction'])}",
     ]
     if "chat" in paths:
         rows.append(f"- This chat's transcript: {_show(paths['chat'])}")
-    rows += [
-        f"- Your memory file: {_show(paths['memory_md'])} (lessons and facts you keep)",
-        f"- Notes about the person: {_show(paths['user_md'])}",
-        "- Notes you keep while idle, in that same notes folder: MISTAKES.md, PROMISES.md, UNKNOWNS.md, "
-        "PREDICTIONS.md, HABITS.md, PLAYBOOK.md, WORLD.md, and DREAMS.md",
-        f"- Your memory topics: {_show(paths['memory_index'])} names the topic files in {_show(paths['memory_dir'])}",
-        f"- Skills (shared by every bot): {_show(paths['skills'])} (one .md file per skill)",
-        f"- Direction: {_show(paths['direction'])}",
-        f"- This bot's workspace, where a file goes when no folder is named: {_show(_workspace(store, bot_id))}",
-    ]
     return "\n".join(rows)
 
 

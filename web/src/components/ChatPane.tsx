@@ -110,7 +110,7 @@ const LiveStatus = memo(function LiveStatus({
             return <span data-testid="run-state" data-state={line.kind}>{line.text}</span>;
           }}
         </Elapsed>
-        {active && stuck ? <span>No activity for a while</span> : null}
+        {active && stuck && !step.startsWith("Queued:") && !step.startsWith("Waiting on model") && !step.startsWith("Model is reading") ? <span>No activity for a while</span> : null}
         {active && queued ? <span data-testid="queued-badge">Queued</span> : null}
       </p>
     </div>
@@ -364,8 +364,26 @@ const MessageRow = memo(function MessageRow({
           ) : null}
         </div>
       ) : null}
-      {(message.role === "assistant" && message.interrupted) || pauseNote ? (
+      {message.limit_stop ? (
+        <p className="pause-mark" data-testid="paused-mark">Stopped after {message.limit_label || "8 min"} (length limit) · Continue</p>
+      ) : (message.role === "assistant" && message.interrupted) || pauseNote ? (
         <p className={cn("pause-mark", pauseNote && "pause-mark-above")} data-testid="paused-mark">paused — you sent a message</p>
+      ) : null}
+      {message.kind === "still-working" ? (
+        <p className="mt-2 flex flex-wrap gap-2 text-sm" data-testid="still-working">
+          <button type="button" className="rounded-full border border-border px-3 py-1" data-testid="wait-longer" onClick={() => {
+            const bot = useApp.getState().botId;
+            const chat = useApp.getState().chatId;
+            if (!bot || !chat) return;
+            void fetch(`/api/bots/${bot}/chats/${chat}/retry`, { method: "POST", headers: { Accept: "text/event-stream", "X-EasyAgent-Wait-Longer": "1" } });
+          }}>Wait longer</button>
+          <button type="button" className="rounded-full border border-border px-3 py-1" data-testid="retry-reply" onClick={() => {
+            const bot = useApp.getState().botId;
+            const chat = useApp.getState().chatId;
+            if (!bot || !chat) return;
+            void fetch(`/api/bots/${bot}/chats/${chat}/retry`, { method: "POST", headers: { Accept: "text/event-stream" } });
+          }}>Retry</button>
+        </p>
       ) : null}
     </li>
   );
@@ -720,6 +738,14 @@ export function ChatPane() {
     <section ref={sectionRef} className="relative flex h-full min-h-0 flex-1 flex-col">
       <div className="title-drag relative z-10 flex h-14 shrink-0 items-center justify-center" data-tauri-drag-region>
       <WindowControls />
+      <button
+        type="button"
+        className="absolute right-3 top-3 z-20 rounded-full border border-border bg-background px-3 py-1 text-sm"
+        data-testid="open-jobs"
+        onClick={() => useApp.getState().setJobs(true)}
+      >
+        Jobs
+      </button>
       <div className="relative z-20 flex items-center justify-center gap-2" data-testid="bot-pill">
         <div className="relative">
           <button

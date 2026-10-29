@@ -277,6 +277,21 @@ def reset_for_tests() -> None:
     _PENDING.clear()
     _UNTRUSTED.clear()
     _SNIFF_CACHE.clear()
+    _UNATTENDED.set(False)
+    try:
+        from easyagent import turn as turn_mod
+
+        # bind() leaves the turn on this thread. The next test must not inherit it.
+        turn_mod._slot.set(None)
+        turn_mod._room_chat.set("")
+    except Exception:
+        pass
+    try:
+        from easyagent.strictshell import clear_exec_session
+
+        clear_exec_session()
+    except Exception:
+        pass
     try:
         from easyagent.features import reset_routine_turn
 

@@ -334,3 +334,173 @@ def test_heartbeat_comment_is_not_an_event():
     rows = asyncio.run(run())
     assert any("status" in item for item in rows)
     assert not any(item.startswith("data:") and "ping" in item for item in rows)
+
+
+def test_a_follow_up_after_a_finished_answer_is_live_and_has_no_pause_row(tmp_path, monkeypatch):
+    """The next message after a saved answer is its own turn. It is not queued or paused."""
+    import easyagent.llm as llm
+
+    calls = {"n": 0}
+
+    async def stream_complete(**_kwargs):
+        calls["n"] += 1
+        yield f"Answer {calls['n']}."
+
+    async def complete(**_kwargs):
+        calls["n"] += 1
+        return f"Answer {calls['n']}."
+
+    monkeypatch.setattr(llm, "stream_complete", stream_complete)
+    monkeypatch.setattr(llm, "complete", complete)
+    app = create_app(tmp_path)
+    client = TestClient(app)
+    endpoint = client.post("/api/endpoints", json={"name": "local", "base_url": "http://127.0.0.1:9/v1"}).json()
+    bot = client.post("/api/bots", json={"name": "Ada", "endpoint_id": endpoint["id"]}).json()
+    client.patch(f"/api/bots/{bot['id']}", json={"check_enabled": False})
+    chat = client.post(f"/api/bots/{bot['id']}/chats").json()
+    url = f"/api/bots/{bot['id']}/chats/{chat['id']}/messages"
+    headers = {"Accept": "text/event-stream"}
+    with client.stream("POST", url, json={"content": "one"}, headers=headers) as response:
+        assert response.status_code == 200, response.read()
+        response.read()
+    with client.stream("POST", url, json={"content": "two"}, headers=headers) as response:
+        assert response.status_code == 200, response.read()
+        second = response.read().decode()
+    saved = client.get(f"/api/bots/{bot['id']}/chats/{chat['id']}").json()
+    texts = [item.get("content") for item in saved["messages"]]
+    assert "Answer 1." in texts
+    assert "Answer 2." in texts
+    for stale in ("Paused, say continue to resume", "Paused, you sent a message", "Finished before pausing"):
+        assert stale not in texts
+    assert saved["run"]["status"] != "paused"
+    done = [item for item in _events(second) if item.get("type") == "done"]
+    assert done
+    live = [item.get("content") for item in done[-1]["chat"]["messages"]]
+    assert "Answer 2." in live
+    assert "Paused, say continue to resume" not in live
+    client.close()
+
+
+def test_a_routine_line_reaches_an_open_empty_chat(tmp_path):
+    """A chat with no live turn still hears the routine on /feed."""
+    import socket
+    import threading
+    import urllib.request
+
+    import uvicorn
+
+    app = create_app(tmp_path)
+    store = app.state.store
+    sock = socket.socket()
+    sock.bind(("127.0.0.1", 0))
+    port = sock.getsockname()[1]
+    sock.close()
+
+    def serve() -> None:
+        uvicorn.run(app, host="127.0.0.1", port=port, log_level="error")
+
+    thread = threading.Thread(target=serve, daemon=True)
+    thread.start()
+    base = f"http://127.0.0.1:{port}"
+    for _ in range(50):
+        try:
+            urllib.request.urlopen(base + "/api/health", timeout=0.2)
+            break
+        except Exception:
+            thread.join(0.05)
+    endpoint = json.loads(urllib.request.urlopen(urllib.request.Request(
+        base + "/api/endpoints",
+        data=json.dumps({"name": "local", "base_url": "http://127.0.0.1:9/v1"}).encode(),
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    ), timeout=2).read())
+    bot = json.loads(urllib.request.urlopen(urllib.request.Request(
+        base + "/api/bots",
+        data=json.dumps({"name": "Tick", "endpoint_id": endpoint["id"]}).encode(),
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    ), timeout=2).read())
+    chat = json.loads(urllib.request.urlopen(urllib.request.Request(
+        base + f"/api/bots/{bot['id']}/chats",
+        data=b"{}",
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    ), timeout=2).read())
+    assert chat["messages"] == []
+    found: list[str] = []
+    opened = threading.Event()
+
+    def listen() -> None:
+        req = urllib.request.Request(
+            base + f"/api/bots/{bot['id']}/chats/{chat['id']}/feed",
+            headers={"Accept": "text/event-stream"},
+        )
+        with urllib.request.urlopen(req, timeout=5) as response:
+            opened.set()
+            while True:
+                line = response.readline().decode()
+                if not line:
+                    return
+                found.append(line)
+                if "Tick once says hello." in line:
+                    return
+
+    listener = threading.Thread(target=listen, daemon=True)
+    listener.start()
+    assert opened.wait(3)
+    store.append_routine_message(bot["id"], "Tick once says hello.", routine_name="Tick once")
+    listener.join(3)
+    text = "".join(found)
+    assert "Tick once says hello." in text, text
+    assert "Tick once" in text
+
+
+def test_a_room_approval_is_shown_and_the_tool_runs(tmp_path):
+    """A card raised in a room carries the room id, and approving it runs the tool."""
+    from easyagent import safety, turn as turn_mod
+    from easyagent.app import _room_pending
+    from easyagent.tools import ToolRequest
+
+    safety.reset_for_tests()
+    safety._UNATTENDED.set(False)
+    import os
+    previous_wait = os.environ.get("EASYAGENT_APPROVAL_SECONDS")
+    os.environ["EASYAGENT_APPROVAL_SECONDS"] = "30"
+    app = create_app(tmp_path)
+    store = app.state.store
+    endpoint = store.add_endpoint(name="local", base_url="http://127.0.0.1:9/v1", api_key=None)
+    bot = store.add_bot(name="Strict", endpoint_id=endpoint["id"], model=None)
+    room = store.create_room(name="Lab")
+    store.add_room_bot(room["id"], bot["id"])
+
+    async def run():
+        async def raised():
+            token = turn_mod.push_room_chat(room["id"])
+            try:
+                return await safety.guard(
+                    store, ToolRequest(kind="shell", command="python3 -c 'print(42)'"), bot["id"]
+                )
+            finally:
+                turn_mod.reset_room_chat(token)
+
+        task = asyncio.create_task(raised())
+        await asyncio.wait({task}, timeout=1)
+        cards = safety.list_pending(bot["id"])
+        if not cards:
+            if task.done():
+                exc = task.exception()
+                raise AssertionError(f"no card; guard finished with {exc!r}; unattended={safety.is_unattended()}")
+            raise AssertionError(f"no card while the guard is still waiting; unattended={safety.is_unattended()}")
+        assert cards[0].get("chat_id") == room["id"]
+        assert _room_pending(store.get_room(room["id"]))
+        assert safety.resolve_card(cards[0]["id"], "approve", bot["id"]) is not None
+        result = await asyncio.wait_for(task, timeout=10)
+        assert "42" in str(result)
+
+    try:
+        asyncio.run(run())
+    finally:
+        if previous_wait is None:
+            os.environ.pop("EASYAGENT_APPROVAL_SECONDS", None)
+        else:
+            os.environ["EASYAGENT_APPROVAL_SECONDS"] = previous_wait

@@ -4306,6 +4306,11 @@ async def guard(store: Store, request, bot_id: str | None):
         # A blocked rule that was unlocked is still not offered "always".
         if verdict.rule in _NEVER_ALWAYS:
             card.offer_always = False
+        slot = turn_mod.current_slot()
+        if slot is not None and slot.chat_id:
+            card.chat_id = slot.chat_id
+        elif turn_mod.room_chat_id():
+            card.chat_id = turn_mod.room_chat_id()
         _decorate_class(store, request, verdict, card)
         _PENDING[card.id] = card
         _notify(verdict.why)
@@ -4385,8 +4390,11 @@ def _make_card(bot_id: str | None, verdict: Verdict, exact: str, proposal: dict 
         proposal=proposal,
     )
     slot = turn_mod.current_slot()
+    room_id = turn_mod.room_chat_id()
     if slot is not None and slot.chat_id:
         card.chat_id = slot.chat_id
+    elif room_id:
+        card.chat_id = room_id
     if verdict.rule in _NEVER_ALWAYS:
         card.offer_always = False
     return card

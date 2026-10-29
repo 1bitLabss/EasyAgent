@@ -843,11 +843,8 @@ async function readEvents(response: Response, flight: Flight) {
           .map((line) => line.slice(5).trim())
           .join("\n");
         if (!data && raw.split("\n").some((line) => line.startsWith(":"))) {
-          const heardAt = Date.now();
-          if (flight.live) flight.live.heardAt = heardAt;
-          else {
-            flight.live = { phase: "thinking", label: "Waiting on model", text: "", reasoning: "", run: null, heardAt };
-          }
+          // A heartbeat only keeps the quiet timer alive. It is not a status.
+          if (flight.live && !flight.settled) flight.live.heardAt = Date.now();
         }
         if (data) {
           saw = true;
@@ -871,7 +868,18 @@ async function readEvents(response: Response, flight: Flight) {
   return ended;
 }
 
+const dismissedPauses = new Set<string>();
+
+export function dismissPauseRows(botId: string, chatId: string) {
+  dismissedPauses.add(`${botId}:${chatId}`);
+}
+
+export function pausesDismissed(botId?: string | null, chatId?: string | null) {
+  return Boolean(botId && chatId && dismissedPauses.has(`${botId}:${chatId}`));
+}
+
 function begin(botId: string, chatId: string, seed?: { label?: string; run?: Run | null }) {
+  dismissedPauses.delete(`${botId}:${chatId}`);
   const key = flightKey(botId, chatId);
   const previous = flights.get(key);
   if (previous) {
@@ -922,6 +930,12 @@ function dropContinueEcho(messages: ChatMessage[], kept: number, message: ChatMe
 }
 
 function placeMessage(flight: Flight, message: ChatMessage, options: { append?: boolean } = {}) {
+  if (
+    pausesDismissed(flight.botId, flight.chatId) &&
+    (message.content === PAUSED_YOU_SENT || message.content === PAUSED_SAY_CONTINUE || message.content === "Finished before pausing")
+  ) {
+    return;
+  }
   queryClient.setQueryData<Chat>(["chat", flight.botId, flight.chatId], (chat) => {
     if (!chat) return chat;
     let messages = [...(chat.messages || [])];
@@ -970,6 +984,7 @@ function queuedTailRow(row: ChatMessage): boolean {
 function paintBusySend(botId: string, chatId: string, text: string, clientId: string | undefined, live: Live | null): string {
   const client_id = clientId || (typeof crypto !== "undefined" && crypto.randomUUID ? crypto.randomUUID() : `c-${Date.now()}`);
   const partialText = (live?.text || "").trim();
+  const hidePause = pausesDismissed(botId, chatId);
   queryClient.setQueryData<Chat>(["chat", botId, chatId], (chat) => {
     if (!chat) return chat;
     const messages = [...(chat.messages || [])];
@@ -1008,7 +1023,7 @@ function paintBusySend(botId: string, chatId: string, text: string, clientId: st
       const hasPause = messages.some(
         (row) => row.kind === "status" && (row.content === PAUSED_YOU_SENT || row.content === PAUSED_SAY_CONTINUE),
       );
-      if (at >= 0 && !hasPause) {
+      if (at >= 0 && !hasPause && !hidePause) {
         messages.splice(at + 1, 0, {
           role: "assistant",
           kind: "status",
@@ -1094,8 +1109,9 @@ function markNotSent(botId: string, chatId: string, clientId: string) {
 
 export async function sendMessage(botId: string, chatId: string, text: string, file?: File | null, clientId?: string) {
   const cached = queryClient.getQueryData<Chat>(["chat", botId, chatId]);
-  const serverBusy = cached?.run?.status === "running";
   const existing = flightFor(botId, chatId);
+  // A settled flight has saved its answer. A stale "running" flag must not queue the next line.
+  const serverBusy = cached?.run?.status === "running" && !(existing && existing.settled);
   if (serverBusy) {
     const flight = existing && !existing.replaced ? existing : null;
     const control = flight?.control || new AbortController();
@@ -1326,32 +1342,32 @@ export async function stopAndSendStored(botId: string, chatId: string, messageId
   }
 }
 
+function withoutPauseRows(chat: Chat): Chat {
+  const messages = (chat.messages || []).filter(
+    (row) => row.content !== PAUSED_YOU_SENT && row.content !== PAUSED_SAY_CONTINUE && row.content !== "Finished before pausing",
+  );
+  if (messages.length === (chat.messages || []).length) return chat;
+  return { ...chat, messages };
+}
+
 function dropLocalPause(botId: string, chatId: string) {
-  queryClient.setQueryData<Chat>(["chat", botId, chatId], (chat) => {
-    if (!chat) return chat;
-    const messages = (chat.messages || []).filter(
-      (row) => row.content !== PAUSED_YOU_SENT && row.content !== PAUSED_SAY_CONTINUE,
-    );
-    if (messages.length === (chat.messages || []).length) return chat;
-    return { ...chat, messages };
-  });
+  queryClient.setQueryData<Chat>(["chat", botId, chatId], (chat) => (chat ? withoutPauseRows(chat) : chat));
 }
 
 export async function stopMessage(botId: string, chatId: string) {
+  dismissPauseRows(botId, chatId);
   dropLocalPause(botId, chatId);
   const flight = flightFor(botId, chatId);
-  const chat = await api<Chat>(`/api/bots/${botId}/chats/${chatId}/stop`, { method: "POST" });
+  const chat = withoutPauseRows(await api<Chat>(`/api/bots/${botId}/chats/${chatId}/stop`, { method: "POST" }));
   // The open stream draws the queued answer. Closing it here would hide that reply.
+  const prev = queryClient.getQueryData<Chat>(["chat", botId, chatId]);
+  const merged = withoutPauseRows(mergeChat(prev ? withoutPauseRows(prev) : undefined, chat));
   if (flight && flight.sending && !flight.settled) {
-    const prev = queryClient.getQueryData<Chat>(["chat", botId, chatId]);
-    queryClient.setQueryData(["chat", botId, chatId], mergeChat(prev, chat));
+    queryClient.setQueryData(["chat", botId, chatId], merged);
     return;
   }
-  if (flight) finish(flight, chat);
-  else {
-    const prev = queryClient.getQueryData<Chat>(["chat", botId, chatId]);
-    queryClient.setQueryData(["chat", botId, chatId], mergeChat(prev, chat));
-  }
+  if (flight) finish(flight, merged);
+  else queryClient.setQueryData(["chat", botId, chatId], merged);
 }
 
 export async function retryUnsent(botId: string, chatId: string, clientId: string) {

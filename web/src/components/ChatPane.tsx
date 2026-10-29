@@ -2,7 +2,7 @@ import { useQuery } from "@tanstack/react-query";
 import { MessageSquare, Terminal } from "lucide-react";
 import { memo, useCallback, useEffect, useLayoutEffect, useRef, useState, type ReactNode } from "react";
 import { useStickToBottom } from "use-stick-to-bottom";
-import { api, queryClient } from "@/api";
+import { api, queryClient, sharedToken } from "@/api";
 import { ApprovalCard } from "@/components/ApprovalCard";
 import { Composer, type ComposerHandle } from "@/components/Composer";
 import { Elapsed } from "@/components/Elapsed";
@@ -21,7 +21,7 @@ import type { FrozenReply } from "@/stream";
 import { cn } from "@/lib/utils";
 import { keepLoadedHistory, mergeChat, sameMessage, shareChat, type MessagePage } from "@/lib/window";
 import { useApp } from "@/store";
-import { RETRY_REASON, attachLive, canResume, chatStillPolling, flightFor, retryMessage, retryUnsent, sendMessage, sendNow, settleIncoming, stopAndSendStored, stopMessage, useLive } from "@/stream";
+import { RETRY_REASON, attachLive, canResume, chatStillPolling, flightFor, pausesDismissed, retryMessage, retryUnsent, sendMessage, sendNow, settleIncoming, stopAndSendStored, stopMessage, useLive } from "@/stream";
 import type { Bot, Chat, ChatMessage } from "@/types";
 
 const REACTIONS = ["👍", "👎", "❤️", "👀"];
@@ -471,8 +471,9 @@ export function ChatPane() {
     const control = new AbortController();
     void (async () => {
       try {
+        const token = sharedToken();
         const response = await fetch(`/api/bots/${botId}/chats/${chatId}/feed`, {
-          headers: { Accept: "text/event-stream" },
+          headers: { Accept: "text/event-stream", ...(token ? { "X-EasyAgent-Token": token } : {}) },
           signal: control.signal,
         });
         if (!response.ok || !response.body) return;
@@ -493,10 +494,7 @@ export function ChatPane() {
               if (event.type === "message" && event.message) {
                 const message = event.message;
                 queryClient.setQueryData<Chat>(["chat", botId, chatId], (current) => {
-                  if (!current) {
-                    void queryClient.invalidateQueries({ queryKey: ["chat", botId, chatId] });
-                    return current;
-                  }
+                  if (!current) return current;
                   const messages = current.messages || [];
                   if (message.id && messages.some((item) => item.id === message.id)) return current;
                   return {
@@ -505,6 +503,8 @@ export function ChatPane() {
                     message_count: Math.max(current.message_count ?? messages.length, messages.length) + 1,
                   };
                 });
+                // An empty chat has no live stream. The refetch is what replaces the welcome screen.
+                void queryClient.invalidateQueries({ queryKey: ["chat", botId, chatId] });
               }
             }
             split = buffer.indexOf("\n\n");
@@ -759,7 +759,14 @@ export function ChatPane() {
       return { ...row, content, thinking };
     });
   }
-  const shown = placed.tail.length ? [...head, ...placed.tail] : head;
+  const pauseHidden = pausesDismissed(botId, chatId);
+  const shown = (placed.tail.length ? [...head, ...placed.tail] : head).filter(
+    (row) =>
+      !pauseHidden ||
+      (row.content !== "Paused, you sent a message" &&
+        row.content !== "Paused, say continue to resume" &&
+        row.content !== "Finished before pausing"),
+  );
   const asked = askedLine(bot.endpoint_name || "", rows);
   const pill = workingLine(live?.run || open?.run, now);
   const checklist = (open?.plan?.steps || []).filter((step) => step && step.text);

@@ -20,8 +20,9 @@ def test_a_side_line_during_a_reply_asks_the_one_other_bot():
 
     text = "subsonic ammo and a surpresser will be like super quiet"
     assert side_consult(text, ("LLM3",), True) == ("LLM3", text)
+    assert side_consult(text, ("Helper2", "LLM3M"), True) == ("LLM3M", text)
     assert side_consult(text, ("LLM3",), False) is None
-    assert side_consult(text, ("LLM3", "Helper2"), True) is None
+    assert side_consult(text, (), True) is None
     assert side_consult("How many boats are at the east pier?", ("LLM3",), False) is None
 
 

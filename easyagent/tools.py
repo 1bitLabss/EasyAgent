@@ -7335,7 +7335,7 @@ async def _iter_streamed_model(
     timeout: float = 120.0,
 ):
     """Yield ('thinking', chunk) as reasoning arrives, and ('text', chunk) for the answer."""
-    pending: asyncio.Queue = asyncio.Queue(maxsize=8)
+    pending: asyncio.Queue = asyncio.Queue(maxsize=32)
     found: list[dict] = []
 
     async def run() -> None:

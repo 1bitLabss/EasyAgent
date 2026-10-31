@@ -1659,7 +1659,7 @@ def create_app(data_dir: str | Path | None = None) -> FastAPI:
                 except StoreError:
                     return
                 return
-            watched: asyncio.Queue = asyncio.Queue(maxsize=8)
+            watched: asyncio.Queue = asyncio.Queue(maxsize=256)
             slot.listeners.append(watched)
             try:
                 try:
@@ -2128,7 +2128,7 @@ def create_app(data_dir: str | Path | None = None) -> FastAPI:
             if run is None or run.get("task") is None or run["task"].done():
                 yield _sse({"type": "done", "room": _public_room(store, store.get_room(room_id))})
                 return
-            watched: asyncio.Queue = asyncio.Queue(maxsize=8)
+            watched: asyncio.Queue = asyncio.Queue(maxsize=256)
             run["listeners"].append(watched)
             try:
                 yield _sse({"type": "sync", "room": _public_room(store, store.get_room(room_id)), "statuses": run.get("statuses") or {}})
@@ -4021,7 +4021,7 @@ async def _stream_room_turn(store: Store, room_id: str, user_message: dict, targ
             await publish(event)
             await publish(_room_status(bot_id, name, state, label))
 
-        mine: asyncio.Queue = asyncio.Queue(maxsize=8)
+        mine: asyncio.Queue = asyncio.Queue(maxsize=256)
         listeners.append(mine)
         tasks = [asyncio.create_task(one(bot_id, index)) for index, bot_id in enumerate(targets)]
         for bot_id in targets:
@@ -7679,7 +7679,7 @@ async def _emit_run(store: Store, bot_id: str, chat_id: str, producer, *, resume
             if getattr(slot, "notify", None) is publish:
                 slot.notify = None
 
-    queue: asyncio.Queue = asyncio.Queue(maxsize=8)
+    queue: asyncio.Queue = asyncio.Queue(maxsize=256)
     with guard:
         listeners.append(queue)
     task = asyncio.create_task(worker())

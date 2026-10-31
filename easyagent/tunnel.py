@@ -60,7 +60,7 @@ async def iter_app(app, method: str, path: str, headers: dict, body: bytes):
     scope, _raw_path = _scope(method, path, headers)
     delivered = False
     finished = asyncio.Event()
-    queue: asyncio.Queue = asyncio.Queue(maxsize=8)
+    queue: asyncio.Queue = asyncio.Queue(maxsize=32)
 
     async def receive():
         nonlocal delivered

@@ -35,6 +35,22 @@ def _protected(item) -> bool:
     return False
 
 
+def _collapse(held: list) -> list:
+    """Join every piece of one content kind so a full queue does not drop answer text."""
+    out: list = []
+    at: dict[str, int] = {}
+    for item in held:
+        kind = _kind(item)
+        if kind in _CONTENT and kind in at:
+            index = at[kind]
+            out[index] = (kind, _join(out[index][1], item[1]))
+            continue
+        if kind in _CONTENT:
+            at[kind] = len(out)
+        out.append(item)
+    return out
+
+
 def _merge(held: list, item) -> list:
     """Merge model text and relay bytes. Viewer events stay separate so old ones can be dropped."""
     kind = _kind(item)
@@ -68,14 +84,21 @@ def _trim(held: list, limit: int) -> list:
 def offer(queue: asyncio.Queue, item, *, final: bool = False) -> None:
     """Add item without waiting. A full queue merges or drops older pieces.
 
-    ``final`` is the closing signal. It is not dropped.
+    ``final`` is the closing signal. It is not dropped. A queue with room keeps
+    each piece, so a reader that keeps up still sees them one by one.
     """
+    try:
+        queue.put_nowait(item)
+        return
+    except asyncio.QueueFull:
+        pass
     held: list = []
     while True:
         try:
             held.append(queue.get_nowait())
         except asyncio.QueueEmpty:
             break
+    held = _collapse(held)
     if final or _kind(item) in _SIGNAL or item is None:
         held.append(item)
     else:

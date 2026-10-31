@@ -44,6 +44,7 @@ def test_a_python_type_grant_covers_later_python_not_curl(tmp_path):
 
     assert command_family("python3 a.py") == "python"
     assert command_family('python3 -c "print(7*6)"') == "python"
+    assert command_family("/tmp/work/b.py") == "python"
     assert command_family("curl -s http://example/price") == "curl"
     store = Store(tmp_path)
     store.ensure()

@@ -4157,6 +4157,17 @@ _TYPE_PY = re.compile(r"(?i)(?:^|[;&|\n`])\s*(?:python\d*(?:\.\d+)?|py)(?:\.exe)
 _TYPE_HOURS = 8
 
 
+def _ask_blob(request) -> str:
+    return "\n".join(
+        part
+        for part in (
+            str(getattr(request, "command", "") or ""),
+            str(getattr(request, "path", "") or ""),
+        )
+        if part
+    )
+
+
 def command_family(command: str) -> str:
     """The kind of command a per-type approval covers. Empty means this one command."""
     text = command or ""
@@ -4166,7 +4177,7 @@ def command_family(command: str) -> str:
         return "pip"
     if re.search(r"(?i)\bgit\b", text):
         return "git"
-    if _TYPE_PY.search(text):
+    if _TYPE_PY.search(text) or re.search(r"(?i)\.py\b", text):
         return "python"
     return ""
 
@@ -4374,8 +4385,8 @@ async def guard(store: Store, request, bot_id: str | None):
         asyncio.create_task(_settle_unattended(store, request, bot_id, card, verdict))
         _notify_bridge(store, bot_id, card)
         raise ToolError("That needs you. A card is in the chat. This routine went on without it. If nobody answers, the command is not run, and it can be asked again.")
-    if verdict.tier == ASK and _type_covers(store, bot_id, getattr(request, "command", "") or ""):
-        family = command_family(getattr(request, "command", "") or "")
+    if verdict.tier == ASK and _type_covers(store, bot_id, _ask_blob(request)):
+        family = command_family(_ask_blob(request))
         _audit(
             store,
             bot_id,

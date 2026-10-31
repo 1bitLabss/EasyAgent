@@ -6636,8 +6636,9 @@ async def _finish_and_maybe_ask(
             child_chat_id=None,
         )
     finished = await _ask_named(store, bot_id, chat_id, ask[0], ask[1])
-    # The person asked for the other bot. Its reply is context, then this bot answers.
-    if not user_asked_to_consult(user_text, names):
+    # The person asked for the other bot, or sent this line while a reply was
+    # already running. The child's reply is context. This bot answers.
+    if not user_asked_to_consult(user_text, names) and not during_job:
         return finished
     rows = (finished.get("chat") or {}).get("messages") or []
     last = rows[-1] if rows else {}

@@ -61,6 +61,61 @@ def test_a_full_queue_keeps_the_closing_signal():
     assert automatic_ask_allowed("The notes mention Helper3.", ("Helper3",)) is False
 
 
+def test_a_finished_bot_does_not_keep_the_lane():
+    import asyncio
+
+    from easyagent import gate
+
+    async def scenario():
+        gate.reset_lanes()
+        token = gate.bind_connection({"id": "local", "name": "qa-stub", "max_parallel": 1}, "Hog")
+        seat = await gate.reserve()
+        await seat.acquire()
+        assert gate.lane_busy("local")
+        assert gate.release_bot("Hog") == 1
+        assert gate.lane_busy("local") is False
+        gate.reset_connection(token)
+
+    asyncio.run(scenario())
+
+
+def test_an_expired_lane_lease_lets_the_next_bot_start(monkeypatch):
+    import asyncio
+    import time
+
+    from easyagent import gate
+
+    async def scenario():
+        gate.reset_lanes()
+        monkeypatch.setenv("EASYAGENT_LANE_LEASE_SECONDS", "5")
+        held = gate.bind_connection({"id": "local", "name": "qa-stub", "max_parallel": 1}, "Hog")
+        seat = await gate.reserve()
+        await seat.acquire()
+        seat.held_at = time.monotonic() - 30
+        nxt = gate.bind_connection({"id": "local", "name": "qa-stub", "max_parallel": 1}, "Tick")
+        follower = await gate.reserve()
+        assert follower.holding
+        await follower.release()
+        gate.reset_connection(held)
+        gate.reset_connection(nxt)
+        assert gate.lane_busy("local") is False
+
+    asyncio.run(scenario())
+
+
+def test_an_env_prefix_stays_on_the_approval_card(tmp_path):
+    from easyagent.safety import classify
+    from easyagent.store import Store
+    from easyagent.tools import ToolRequest
+
+    store = Store(tmp_path)
+    store.ensure()
+    endpoint = store.add_endpoint(name="local", base_url="http://127.0.0.1:9/v1", api_key=None)
+    bot = store.add_bot(name="Ada", endpoint_id=endpoint["id"], model=None)
+    verdict = classify(store, ToolRequest(kind="shell", command="FOO=1 python a.py"), bot["id"])
+    assert "FOO=1 python a.py" in (verdict.detail or "")
+
+
 def test_packaged_tzdata_converts_chicago_when_zoneinfo_cannot(monkeypatch):
     import easyagent.schedule as schedule
 

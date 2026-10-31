@@ -3092,16 +3092,14 @@ async def _heartbeat(source):
     finally:
         task = pending
         pending = None
-        if task is None:
-            return
-        if not task.done():
+        if task is not None and not task.done():
             task.cancel()
-        try:
-            await task
-        except (asyncio.CancelledError, StopAsyncIteration):
-            return
-        except Exception:
-            return
+            with suppress(asyncio.CancelledError, StopAsyncIteration, Exception):
+                await task
+        closer = getattr(agen, "aclose", None)
+        if closer is not None:
+            with suppress(Exception):
+                await closer()
 
 
 def _serve_sse(source):
@@ -5666,7 +5664,18 @@ async def _drain_owned(store: Store, bot_id: str, chat_id: str) -> None:
 
 
 async def _finish_turn(store: Store, bot_id: str, chat_id: str) -> None:
-    """Clear busy only when the inbox is empty. A message in the gap starts a drain."""
+    """Clear busy only when the inbox is empty. A message in the gap starts a drain.
+
+    The model line is released here too. A generator that was not closed, or a
+    viewer task that detached, must not leave the connection busy.
+    """
+    try:
+        from easyagent import gate
+
+        bot = store.get_bot(bot_id)
+        gate.release_bot(str(bot.get("name") or ""))
+    except Exception:
+        pass
     async with turn_mod.boundary(store, chat_id):
         slot = turn_mod.slot_for(store, chat_id)
         if slot.user_stop:
@@ -7651,9 +7660,16 @@ async def _emit_run(store: Store, bot_id: str, chat_id: str, producer, *, resume
                     "heuristic isolation: this run belongs to one chat and keeps going if the viewer leaves",
                     flush=True,
                 )
+                stream = producer()
                 try:
-                    async for chunk in producer():
-                        await publish(chunk)
+                    try:
+                        async for chunk in stream:
+                            await publish(chunk)
+                    finally:
+                        closer = getattr(stream, "aclose", None)
+                        if closer is not None:
+                            with suppress(Exception):
+                                await closer()
                 finally:
                     reason = turn_mod.cancel_reason()
                     if turn_mod.cancelled() and reason and not turn_mod.pause_requested():

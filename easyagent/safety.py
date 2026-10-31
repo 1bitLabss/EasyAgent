@@ -2437,6 +2437,29 @@ def _ask_command(rule: str, why: str, command: str) -> Verdict:
     return _verdict(ASK, rule, why, detail, _fp("cmd", detail))
 
 
+def _keep_full_command(verdict: Verdict, original: str) -> Verdict:
+    """The card shows the command that was asked, including an env prefix.
+
+    Judging may look at the program after a literal assignment is set aside.
+    The person still has to see ``FOO=1 python a.py``, not only the program.
+    """
+    raw = (original or "").strip()
+    if not raw:
+        return verdict
+    detail = verdict.detail or ""
+    head = detail.split("\n\n", 1)[0]
+    if raw in head:
+        return verdict
+    marker = "\n\nThis bot changed"
+    if marker in detail:
+        detail = raw + detail[detail.index(marker) :]
+    else:
+        detail = raw
+    if detail == verdict.detail:
+        return verdict
+    return _verdict(verdict.tier, verdict.rule, verdict.why, detail, verdict.fingerprint)
+
+
 def judge_command(
     command: str,
     *,
@@ -2471,10 +2494,10 @@ def judge_command(
         denied=denied,
     )
     if mode != "strict":
-        return closed
+        return _keep_full_command(closed, command)
     from easyagent.strictshell import apply
 
-    return apply(
+    judged = apply(
         command,
         closed,
         cwd=cwd,
@@ -2485,6 +2508,7 @@ def judge_command(
         remote=remote,
         depth=depth,
     )
+    return _keep_full_command(judged, command)
 
 
 def _fail_closed(

@@ -287,7 +287,7 @@ def test_system_prompt_stays_under_eight_thousand_characters():
 
     text = build_system(bot_name="Ada", direction="", summary="", skills_text="", workspace="/tmp/work")
     assert len(text) <= 8000
-    assert "Never say you can't do something on this list." not in text
+    assert "Never say you can't" not in text
     assert "python tool" in text or "python" in text
 
 

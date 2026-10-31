@@ -133,6 +133,22 @@ def plain_consult_turn(text: str) -> bool:
     return False
 
 
+def side_consult(text: str, names=None, during_job: bool = False) -> tuple[str, str] | None:
+    """One other bot, when a line arrives during a reply and the model did not ask.
+
+    A fresh question does not take this path. Two other bots is not a guess.
+    """
+    if not during_job:
+        return None
+    roster = [name for name in (names or ()) if name]
+    if len(roster) != 1:
+        return None
+    task = " ".join((text or "").split())
+    if not task:
+        return None
+    return roster[0], task
+
+
 def consult_target(text: str, names=None) -> tuple[str, str] | None:
     """The bot and the task, when the person asked for another bot by name."""
     if not user_asked_to_consult(text, names):

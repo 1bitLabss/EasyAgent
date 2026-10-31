@@ -75,6 +75,7 @@ from easyagent.tools import (
 from easyagent.vault import seal
 from easyagent.subagent import (
     automatic_ask_allowed,
+    side_consult,
     child_messages,
     consult_target,
     error_line,
@@ -6621,7 +6622,7 @@ async def _finish_and_maybe_ask(
             child_chat_id=None,
         )
     if not ask:
-        named = consult_target(user_text, names)
+        named = consult_target(user_text, names) or side_consult(user_text, names, during_job)
         if not named:
             return finished
         ask = named
@@ -6737,6 +6738,21 @@ async def _ask_named(store: Store, parent_id: str, parent_chat_id: str, child_na
     return await _run_child(store, parent_id, parent_chat_id, matches[0], task)
 
 
+def _quiet_model_wait(base_url: str) -> float:
+    """How long a call may sit before the first byte.
+
+    A streamed chat already waits this long for a local model. A child ask is
+    one non-streaming read, so the same quiet stretch has to be the read limit.
+    A cloud host keeps the shorter wait.
+    """
+    from easyagent.generation import LOCAL_FIRST_TOKEN_SECONDS, current_limits, is_local_base
+
+    wait = float(current_limits().first_token_seconds)
+    if is_local_base(base_url):
+        wait = max(wait, float(LOCAL_FIRST_TOKEN_SECONDS))
+    return wait
+
+
 async def _run_child(store: Store, parent_id: str, parent_chat_id: str, child: dict, task: str) -> dict:
     """Write the task on the child's own chat, then append a short result to the parent."""
     parent_count = len(store.get_chat(parent_id, parent_chat_id).get("messages") or [])
@@ -6766,6 +6782,7 @@ async def _run_child(store: Store, parent_id: str, parent_chat_id: str, child: d
                     api_key=endpoint.get("api_key") or None,
                     model=chosen_model(child, endpoint),
                     messages=child_messages(child["name"], store.read_direction(), task),
+                    timeout=_quiet_model_wait(endpoint["base_url"]),
                 )
             except llm.ProviderError as exc:
                 error_text = llm.connection_error_text(str(exc), endpoint, chosen_model(child, endpoint), child["name"])

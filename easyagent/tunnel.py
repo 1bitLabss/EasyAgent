@@ -8,6 +8,7 @@ import json
 import os
 
 from easyagent.access import configured_token
+from easyagent.boundq import offer
 
 
 def websocket_url(http_url: str) -> str:
@@ -59,7 +60,7 @@ async def iter_app(app, method: str, path: str, headers: dict, body: bytes):
     scope, _raw_path = _scope(method, path, headers)
     delivered = False
     finished = asyncio.Event()
-    queue: asyncio.Queue = asyncio.Queue()
+    queue: asyncio.Queue = asyncio.Queue(maxsize=8)
 
     async def receive():
         nonlocal delivered
@@ -70,8 +71,8 @@ async def iter_app(app, method: str, path: str, headers: dict, body: bytes):
         return {"type": "http.disconnect"}
 
     async def send(message):
-        # put_nowait: the phone's socket must not stall the model read.
-        # The queue is unbounded. A slow viewer grows it; the read keeps going.
+        # offer: the phone's socket must not stall the model read.
+        # A slow viewer merges chunks. The closing signal is kept.
         if message["type"] == "http.response.start":
             status = int(message["status"])
             response_headers: dict[str, str] = {}
@@ -79,20 +80,20 @@ async def iter_app(app, method: str, path: str, headers: dict, body: bytes):
                 name = key.decode("latin1").lower()
                 if name in {"content-type", "cache-control"}:
                     response_headers[name] = value.decode("latin1")
-            queue.put_nowait(("start", (status, response_headers)))
+            offer(queue, ("start", (status, response_headers)), final=True)
         elif message["type"] == "http.response.body":
             chunk = message.get("body") or b""
             if chunk:
-                queue.put_nowait(("chunk", chunk))
+                offer(queue, ("chunk", chunk))
             if not message.get("more_body", False):
-                queue.put_nowait(("end", None))
+                offer(queue, ("end", None), final=True)
 
     async def run():
         try:
             await app(scope, receive, send)
         finally:
             finished.set()
-            await queue.put(("end", None))
+            offer(queue, ("end", None), final=True)
 
     task = asyncio.create_task(run())
     try:

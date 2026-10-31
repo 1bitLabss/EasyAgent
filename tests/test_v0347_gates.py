@@ -15,24 +15,47 @@ def test_a_local_child_may_think_longer_than_the_cloud_read():
     assert _quiet_model_wait("https://api.example.com/v1") < LOCAL_FIRST_TOKEN_SECONDS
 
 
-def test_a_substantial_aside_during_a_reply_asks_the_latest_other_bot():
-    from easyagent.subagent import side_consult
+def test_an_unrequested_long_statement_is_not_forwarded():
+    from easyagent.subagent import consult_target, side_consult
 
     aside = "subsonic ammo and a surpresser will be like super quiet"
-    assert side_consult(aside, ("Helper2", "Helper9"), True) == ("Helper9", aside)
-    assert side_consult(aside, ("Helper9",), False) is None
-    assert side_consult(aside, (), True) is None
+    assert side_consult(aside, ("Helper2", "Helper9"), True) is None
     assert side_consult("thanks!", ("Helper9",), True) is None
-    assert side_consult("also mention fees", ("Helper9",), True) is None
-    assert side_consult("and keep it under 10 bullet points", ("Helper9",), True) is None
-    assert side_consult("side question 1: what eats sea urchins?", ("Helper9",), True) is None
-    assert side_consult("quick question while you work: is a refunded order counted in your total?", ("Helper9",), True) is None
-    assert side_consult("also, what day of the week is it?", ("Helper9",), True) is None
-    assert side_consult("one more thing: how many oceans are there?", ("Helper9",), True) is None
-    assert side_consult("by the way, what colour is the sky?", ("Helper9",), True) is None
+    assert side_consult("ask Helper9 to check the noise", ("Helper9",), True) == ("Helper9", "check the noise")
+    asked = side_consult("ask another bot whether it is quiet", ("Helper9",), True)
+    assert asked is not None and asked[0] == "Helper9"
+    assert side_consult("ask Helper9 to check the noise", ("Helper9",), False) is None
+    assert consult_target("ask Helper9 to check the noise", ("Helper9",)) == ("Helper9", "check the noise")
 
 
-def test_a_question_does_not_ask_another_bot_on_its_own():
+def test_a_full_queue_keeps_the_closing_signal():
+    import asyncio
+
+    from easyagent.boundq import offer
+
+    queue: asyncio.Queue = asyncio.Queue(maxsize=2)
+    offer(queue, ("text", "one"))
+    offer(queue, ("text", " two"))
+    offer(queue, ("text", " three"))
+    offer(queue, ("end", ""), final=True)
+    kinds = []
+    body = ""
+    while not queue.empty():
+        kind, payload = queue.get_nowait()
+        kinds.append(kind)
+        if kind == "text":
+            body += payload
+    assert kinds[-1] == "end"
+    assert body == "one two three"
+    viewer: asyncio.Queue = asyncio.Queue(maxsize=2)
+    for piece in ("a", "b", "c"):
+        offer(viewer, piece)
+    offer(viewer, None, final=True)
+    got = []
+    while not viewer.empty():
+        got.append(viewer.get_nowait())
+    assert got[-1] is None
+    assert len(got) <= 2
     assert automatic_ask_allowed("How many boats are at the east pier?") is False
     assert automatic_ask_allowed("what is the capital of France?") is False
     assert automatic_ask_allowed("The notes mention Helper3.", ("Helper3",)) is False

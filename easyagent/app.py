@@ -73,6 +73,7 @@ from easyagent.tools import (
     tapback_from_reply,
 )
 from easyagent.vault import seal
+from easyagent.boundq import offer
 from easyagent.subagent import (
     automatic_ask_allowed,
     child_messages,
@@ -1658,7 +1659,7 @@ def create_app(data_dir: str | Path | None = None) -> FastAPI:
                 except StoreError:
                     return
                 return
-            watched: asyncio.Queue = asyncio.Queue()
+            watched: asyncio.Queue = asyncio.Queue(maxsize=8)
             slot.listeners.append(watched)
             try:
                 try:
@@ -2127,7 +2128,7 @@ def create_app(data_dir: str | Path | None = None) -> FastAPI:
             if run is None or run.get("task") is None or run["task"].done():
                 yield _sse({"type": "done", "room": _public_room(store, store.get_room(room_id))})
                 return
-            watched: asyncio.Queue = asyncio.Queue()
+            watched: asyncio.Queue = asyncio.Queue(maxsize=8)
             run["listeners"].append(watched)
             try:
                 yield _sse({"type": "sync", "room": _public_room(store, store.get_room(room_id)), "statuses": run.get("statuses") or {}})
@@ -3938,7 +3939,7 @@ async def _stream_room_turn(store: Store, room_id: str, user_message: dict, targ
     async def publish(item: str) -> None:
         for queue in list(listeners):
             with suppress(Exception):
-                queue.put_nowait(item)
+                offer(queue, item, final=item is None)
 
     def bot_name(bot_id: str) -> str:
         try:
@@ -4020,7 +4021,7 @@ async def _stream_room_turn(store: Store, room_id: str, user_message: dict, targ
             await publish(event)
             await publish(_room_status(bot_id, name, state, label))
 
-        mine: asyncio.Queue = asyncio.Queue()
+        mine: asyncio.Queue = asyncio.Queue(maxsize=8)
         listeners.append(mine)
         tasks = [asyncio.create_task(one(bot_id, index)) for index, bot_id in enumerate(targets)]
         for bot_id in targets:
@@ -4049,7 +4050,7 @@ async def _stream_room_turn(store: Store, room_id: str, user_message: dict, targ
     finally:
         for queue in list(listeners):
             with suppress(Exception):
-                queue.put_nowait(None)
+                offer(queue, None, final=True)
         current = _ROOM_RUNS.get(room_id)
         if current is run:
             _ROOM_RUNS.pop(room_id, None)
@@ -7638,7 +7639,7 @@ async def _emit_run(store: Store, bot_id: str, chat_id: str, producer, *, resume
             targets = list(listeners)
         for queue in targets:
             with suppress(Exception):
-                queue.put_nowait(item)
+                offer(queue, item, final=item is None)
 
     slot.notify = publish
 
@@ -7678,7 +7679,7 @@ async def _emit_run(store: Store, bot_id: str, chat_id: str, producer, *, resume
             if getattr(slot, "notify", None) is publish:
                 slot.notify = None
 
-    queue: asyncio.Queue = asyncio.Queue()
+    queue: asyncio.Queue = asyncio.Queue(maxsize=8)
     with guard:
         listeners.append(queue)
     task = asyncio.create_task(worker())

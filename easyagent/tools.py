@@ -27,6 +27,7 @@ from pathlib import Path
 
 from easyagent import gate
 from easyagent import llm
+from easyagent.boundq import offer
 from easyagent.check import review_turn
 from easyagent import retry
 from easyagent import search as search_mod
@@ -7334,7 +7335,7 @@ async def _iter_streamed_model(
     timeout: float = 120.0,
 ):
     """Yield ('thinking', chunk) as reasoning arrives, and ('text', chunk) for the answer."""
-    pending: asyncio.Queue = asyncio.Queue()
+    pending: asyncio.Queue = asyncio.Queue(maxsize=8)
     found: list[dict] = []
 
     async def run() -> None:
@@ -7344,7 +7345,7 @@ async def _iter_streamed_model(
             nonlocal saw_reasoning
             if chunk:
                 saw_reasoning = True
-                pending.put_nowait(("thinking", chunk))
+                offer(pending, ("thinking", chunk))
 
         token = llm.attach_reasoning_sink(sink)
         purpose = llm.bind_purpose("chat")
@@ -7353,8 +7354,8 @@ async def _iter_streamed_model(
             async for piece in llm.stream_complete(
                 base_url=base_url, api_key=api_key, model=model, messages=messages, timeout=timeout
             ):
-                # put_nowait: a slow viewer must not stop the model read.
-                pending.put_nowait(("text", piece or ""))
+                # offer: a slow viewer must not stop the model read, or grow without a bound.
+                offer(pending, ("text", piece or ""))
         except llm.ProviderError as exc:
             # Reasoning with no answer is not a finished call. A truly empty
             # stream still ends here so the turn can ask once more.
@@ -7367,9 +7368,9 @@ async def _iter_streamed_model(
             found.extend(llm.take_native_calls())
             llm.detach_reasoning_sink(token)
         if error is not None:
-            await pending.put(("error", error))
+            offer(pending, ("error", error), final=True)
             return
-        await pending.put(("end", ""))
+        offer(pending, ("end", ""), final=True)
 
     async def _take_model_event():
         """The next model chunk. After an answer is on screen, silence ends the turn."""

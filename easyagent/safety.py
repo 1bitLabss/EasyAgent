@@ -4153,8 +4153,8 @@ def _class_take(store: Store, request, bot_id: str | None, verdict: Verdict) -> 
         return False
 
 
-_TYPE_PY = re.compile(r"(?i)(?:^|[;&|\n`])\s*(?:python\d*(?:\.\d+)?|py)(?:\.exe)?\b")
 _TYPE_HOURS = 8
+_PY_PROGRAM = re.compile(r"(?i)(?:python\d*(?:\.\d+)?|py)(?:\.exe)?$")
 
 
 def _ask_blob(request) -> str:
@@ -4168,17 +4168,145 @@ def _ask_blob(request) -> str:
     )
 
 
+def _python_program_name(token: str) -> bool:
+    name = (token or "").strip().strip("'\"").replace("\\", "/").rsplit("/", 1)[-1]
+    return bool(_PY_PROGRAM.fullmatch(name))
+
+
+def _has_command_substitution(text: str) -> bool:
+    """Backticks or ``$(`` outside single quotes. Those can hide another command."""
+    quote = ""
+    index = 0
+    while index < len(text):
+        ch = text[index]
+        if quote == "'":
+            if ch == "'":
+                quote = ""
+            index += 1
+            continue
+        if ch == "`" or text.startswith("$(", index) or text.startswith("<(", index) or text.startswith(">(", index):
+            return True
+        if quote == '"':
+            if ch == '"' and not _escaped_double_quote(text, index):
+                quote = ""
+            index += 1
+            continue
+        if ch in {"'", '"'}:
+            quote = ch
+        index += 1
+    return False
+
+
+def _redirect_targets(text: str) -> list[str] | None:
+    """Targets of ``<`` and ``>`` outside quotes. None when a target cannot be read."""
+    targets: list[str] = []
+    quote = ""
+    index = 0
+    while index < len(text):
+        ch = text[index]
+        if quote:
+            if ch == quote and not (quote == '"' and _escaped_double_quote(text, index)):
+                quote = ""
+            index += 1
+            continue
+        if ch in {"'", '"'}:
+            quote = ch
+            index += 1
+            continue
+        if ch not in {">", "<"}:
+            index += 1
+            continue
+        cursor = index + 1
+        while cursor < len(text) and text[cursor] in {">", "&"}:
+            cursor += 1
+        cursor = _skip_ws(text, cursor)
+        if cursor >= len(text):
+            return None
+        if text[cursor] == "&":
+            index = cursor + 1
+            continue
+        if text[cursor] in {"'", '"'}:
+            body, nxt, closed, _literal = _read_quoted(text, cursor)
+            if not closed:
+                return None
+            targets.append(body)
+            index = nxt
+            continue
+        end = cursor
+        while end < len(text) and not text[end].isspace() and text[end] not in {";", "|", "&", "<", ">"}:
+            end += 1
+        if end == cursor:
+            return None
+        targets.append(text[cursor:end])
+        index = end
+    return targets
+
+
+def _sensitive_redirect(target: str) -> bool:
+    """A redirect into a credential, a dotfile, or a system path."""
+    raw = (target or "").strip()
+    if not raw or raw.startswith("&"):
+        return False
+    low = raw.replace("\\", "/").lower()
+    if low.startswith("~") or low.startswith("$") or "%" in low:
+        return True
+    if re.match(r"(?i)^/(?:etc|dev|proc|sys|boot|root)(?:/|$)", low):
+        return True
+    if "/.ssh" in low or low.endswith("authorized_keys") or "cron" in low or "/systemd/" in low:
+        return True
+    name = low.rsplit("/", 1)[-1]
+    if name.startswith(".") and name not in {".", ".."}:
+        return True
+    try:
+        if secret_file(Path(raw)):
+            return True
+    except Exception:
+        return True
+    return False
+
+
+def _lone_python_file(text: str) -> bool:
+    """A path and nothing else. A write of one script, not a shell line that mentions one."""
+    if not text or any(ch.isspace() for ch in text):
+        return False
+    if re.search(r"[`$;&|<>]", text):
+        return False
+    return text.lower().endswith(".py")
+
+
+def _single_python_invocation(text: str) -> bool:
+    """One python program. No chain, substitution, env prefix, or sensitive redirect."""
+    raw = (text or "").strip()
+    if not raw:
+        return False
+    if _lone_python_file(raw):
+        return True
+    if _split_chain(raw) != [raw]:
+        return False
+    if _has_command_substitution(raw) or _scan_uncertain(raw):
+        return False
+    targets = _redirect_targets(raw)
+    if targets is None or any(_sensitive_redirect(item) for item in targets):
+        return False
+    words, uncertain = _lex_words(raw)
+    if uncertain or not words:
+        return False
+    if any(word.literal and _is_assignment(word.text) for word in words):
+        return False
+    return _python_program_name(words[0].text)
+
+
 def command_family(command: str) -> str:
     """The kind of command a per-type approval covers. Empty means this one command."""
     text = command or ""
+    if _single_python_invocation(text):
+        return "python"
     if re.search(r"(?i)\bcurl\b", text):
         return "curl"
     if re.search(r"(?i)\bpip3?\b", text):
         return "pip"
     if re.search(r"(?i)\bgit\b", text):
         return "git"
-    if _TYPE_PY.search(text) or re.search(r"(?i)\.py\b", text):
-        return "python"
     return ""
 
 
@@ -4210,10 +4338,25 @@ def _remember_type(store: Store, bot_id: str, family: str) -> bool:
     return True
 
 
-def _type_covers(store: Store, bot_id: str | None, command: str) -> bool:
+def _type_covers(store: Store, bot_id: str | None, command: str, rule: str | None = None) -> bool:
+    """True when this chat's type grant covers this one command.
+
+    A lasting block stays a block. A chain or a disguised python line is not covered.
+    """
+    if rule in _NEVER_ALWAYS:
+        return False
     family = command_family(command)
     if not family or not bot_id or is_unattended():
         return False
+    if family == "python" and rule is None and not _lone_python_file((command or "").strip()):
+        try:
+            from easyagent.tools import ToolRequest
+
+            found = classify(store, ToolRequest(kind="shell", command=command), bot_id)
+        except Exception:
+            return False
+        if found.tier == BLOCK or found.rule in _NEVER_ALWAYS:
+            return False
     slot = turn_mod.current_slot()
     if slot is None or slot.bot_id != bot_id or not slot.chat_id:
         return False
@@ -4385,7 +4528,11 @@ async def guard(store: Store, request, bot_id: str | None):
         asyncio.create_task(_settle_unattended(store, request, bot_id, card, verdict))
         _notify_bridge(store, bot_id, card)
         raise ToolError("That needs you. A card is in the chat. This routine went on without it. If nobody answers, the command is not run, and it can be asked again.")
-    if verdict.tier == ASK and _type_covers(store, bot_id, _ask_blob(request)):
+    if (
+        verdict.tier == ASK
+        and verdict.rule not in _NEVER_ALWAYS
+        and _type_covers(store, bot_id, _ask_blob(request), verdict.rule)
+    ):
         family = command_family(_ask_blob(request))
         _audit(
             store,

@@ -80,6 +80,7 @@ from easyagent.subagent import (
     error_line,
     parse_subagent,
     short_result,
+    side_consult,
     strip_subagent_fences,
     user_asked_to_consult,
 )
@@ -6621,7 +6622,7 @@ async def _finish_and_maybe_ask(
             child_chat_id=None,
         )
     if not ask:
-        named = consult_target(user_text, names)
+        named = consult_target(user_text, names) or side_consult(user_text, names, during_job)
         if not named:
             return finished
         ask = named

@@ -15,6 +15,23 @@ def test_a_local_child_may_think_longer_than_the_cloud_read():
     assert _quiet_model_wait("https://api.example.com/v1") < LOCAL_FIRST_TOKEN_SECONDS
 
 
+def test_a_substantial_aside_during_a_reply_asks_the_latest_other_bot():
+    from easyagent.subagent import side_consult
+
+    aside = "subsonic ammo and a surpresser will be like super quiet"
+    assert side_consult(aside, ("Helper2", "LLM3M"), True) == ("LLM3M", aside)
+    assert side_consult(aside, ("LLM3M",), False) is None
+    assert side_consult(aside, (), True) is None
+    assert side_consult("thanks!", ("LLM3M",), True) is None
+    assert side_consult("also mention fees", ("LLM3M",), True) is None
+    assert side_consult("and keep it under 10 bullet points", ("LLM3M",), True) is None
+    assert side_consult("side question 1: what eats sea urchins?", ("LLM3M",), True) is None
+    assert side_consult("quick question while you work: is a refunded order counted in your total?", ("LLM3M",), True) is None
+    assert side_consult("also, what day of the week is it?", ("LLM3M",), True) is None
+    assert side_consult("one more thing: how many oceans are there?", ("LLM3M",), True) is None
+    assert side_consult("by the way, what colour is the sky?", ("LLM3M",), True) is None
+
+
 def test_a_question_does_not_ask_another_bot_on_its_own():
     assert automatic_ask_allowed("How many boats are at the east pier?") is False
     assert automatic_ask_allowed("what is the capital of France?") is False

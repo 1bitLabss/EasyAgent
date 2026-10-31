@@ -133,6 +133,29 @@ def plain_consult_turn(text: str) -> bool:
     return False
 
 
+_ASIDE_FOLLOWUP = re.compile(
+    r"(?i)^(?:also\b|and\b|thanks\b|thank you\b|by the way\b|one more\b|quick\b)"
+)
+
+
+def side_consult(text: str, names=None, during_job: bool = False) -> tuple[str, str] | None:
+    """A substantial aside that arrived during a reply goes to the latest other bot.
+
+    names are in the order the bots were created. A question, a short courtesy,
+    and a follow-up fragment stay with this bot. A fresh question does not use
+    this path.
+    """
+    if not during_job:
+        return None
+    raw = " ".join((text or "").split())
+    if not raw or "?" in raw or len(raw) < 40 or _ASIDE_FOLLOWUP.match(raw):
+        return None
+    roster = [name for name in (names or ()) if name]
+    if not roster:
+        return None
+    return roster[-1], raw
+
+
 def consult_target(text: str, names=None) -> tuple[str, str] | None:
     """The bot and the task, when the person asked for another bot by name."""
     if not user_asked_to_consult(text, names):

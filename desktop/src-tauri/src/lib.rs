@@ -226,10 +226,11 @@ fn watch_server(app: tauri::AppHandle, port: u16) {
             if misses < 3 || restarted {
                 continue;
             }
-            let exited = app
-                .try_state::<OwnedServer>()
-                .and_then(|state| state.0.lock().ok())
-                .and_then(|mut slot| slot.as_mut().and_then(|child| child.try_wait().ok().flatten().map(|status| status.to_string())));
+            let exited = app.try_state::<OwnedServer>().and_then(|state| {
+                let mut slot = state.0.lock().ok()?;
+                slot.as_mut()
+                    .and_then(|child| child.try_wait().ok().flatten().map(|status| status.to_string()))
+            });
             if let Some(status) = exited {
                 eprintln!("EasyAgent server exited ({status}). Restarting once.");
                 restarted = true;

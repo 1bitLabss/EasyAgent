@@ -13,13 +13,10 @@ def _shell_note() -> str:
     """Shell advice for the computer EasyAgent is running on."""
     if sys.platform == "win32":
         return (
-            "On Windows, this shell is PowerShell. Prefer Invoke-RestMethod for an HTTP API, "
-            "and ConvertTo-Json and ConvertFrom-Json for JSON. "
-            "For Python, use the python tool. "
-            "For anything multi-line in PowerShell, write a .ps1 file and run that file. "
-            "On Windows, ls and pwd are not commands. Do not run them. "
-            "List a folder with the file tool, or with dir. "
-            "A command Windows rejects does not end the turn."
+            "This shell is PowerShell. Use Invoke-RestMethod for HTTP, ConvertTo-Json and "
+            "ConvertFrom-Json for JSON, the python tool for Python, and a .ps1 file for multi-line scripts. "
+            "On Windows, ls and pwd are not commands. Use dir or the file tool. "
+            "A rejected command does not end the turn."
         )
     if sys.platform == "darwin":
         return "On macOS, ls and pwd are normal commands. A command that fails does not end the turn."

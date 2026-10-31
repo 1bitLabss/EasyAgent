@@ -2437,6 +2437,11 @@ def _ask_command(rule: str, why: str, command: str) -> Verdict:
     return _verdict(ASK, rule, why, detail, _fp("cmd", detail))
 
 
+_ENV_PREFIX = re.compile(
+    r"(?i)(?:^|[;&|\n]\s*)(?:env\s+)?[A-Za-z_][A-Za-z0-9_]*="
+)
+
+
 def _keep_full_command(verdict: Verdict, original: str) -> Verdict:
     """The card shows the command that was asked, including an env prefix.
 
@@ -2444,7 +2449,7 @@ def _keep_full_command(verdict: Verdict, original: str) -> Verdict:
     The person still has to see ``FOO=1 python a.py``, not only the program.
     """
     raw = (original or "").strip()
-    if not raw:
+    if not raw or not _ENV_PREFIX.search(raw):
         return verdict
     detail = verdict.detail or ""
     head = detail.split("\n\n", 1)[0]

@@ -75,7 +75,6 @@ from easyagent.tools import (
 from easyagent.vault import seal
 from easyagent.subagent import (
     automatic_ask_allowed,
-    side_consult,
     child_messages,
     consult_target,
     error_line,
@@ -6622,7 +6621,7 @@ async def _finish_and_maybe_ask(
             child_chat_id=None,
         )
     if not ask:
-        named = consult_target(user_text, names) or side_consult(user_text, names, during_job)
+        named = consult_target(user_text, names)
         if not named:
             return finished
         ask = named

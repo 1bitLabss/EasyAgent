@@ -15,17 +15,6 @@ def test_a_local_child_may_think_longer_than_the_cloud_read():
     assert _quiet_model_wait("https://api.example.com/v1") < LOCAL_FIRST_TOKEN_SECONDS
 
 
-def test_a_side_line_during_a_reply_asks_the_one_other_bot():
-    from easyagent.subagent import side_consult
-
-    text = "subsonic ammo and a surpresser will be like super quiet"
-    assert side_consult(text, ("LLM3",), True) == ("LLM3", text)
-    assert side_consult(text, ("Helper2", "LLM3M"), True) == ("LLM3M", text)
-    assert side_consult(text, ("LLM3",), False) is None
-    assert side_consult(text, (), True) is None
-    assert side_consult("How many boats are at the east pier?", ("LLM3",), False) is None
-
-
 def test_a_question_does_not_ask_another_bot_on_its_own():
     assert automatic_ask_allowed("How many boats are at the east pier?") is False
     assert automatic_ask_allowed("what is the capital of France?") is False

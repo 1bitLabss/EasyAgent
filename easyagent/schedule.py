@@ -14,6 +14,7 @@ import os
 import re
 import sys
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from easyagent import gate
@@ -543,19 +544,57 @@ def local_zone_name() -> str:
     return "local"
 
 
+def _tzdata_root():
+    """Zone files shipped with the tzdata package, even when TZPATH was cleared.
+
+    Windows does not ship the IANA database. The package does. A test that
+    hides the module and empties TZPATH still leaves the files on disk.
+    """
+    import sysconfig
+
+    root = Path(sysconfig.get_path("purelib")) / "tzdata" / "zoneinfo"
+    if root.is_dir():
+        return root
+    return None
+
+
+def load_zone(name: str):
+    """A zone object. The system database first, then the packaged files."""
+    candidate = iana_zone((name or "").strip())
+    if not candidate:
+        return None
+    if candidate in {"UTC", "Etc/UTC", "GMT", "Etc/GMT"}:
+        try:
+            return ZoneInfo("UTC")
+        except (ZoneInfoNotFoundError, ModuleNotFoundError, TypeError):
+            return timezone.utc
+    try:
+        return ZoneInfo(candidate)
+    except (ZoneInfoNotFoundError, ModuleNotFoundError, TypeError):
+        pass
+    except Exception:
+        return None
+    root = _tzdata_root()
+    if root is None:
+        return None
+    path = root.joinpath(*candidate.split("/"))
+    if not path.is_file():
+        return None
+    opener = getattr(ZoneInfo, "from_file", None)
+    if not callable(opener):
+        return None
+    try:
+        with path.open("rb") as handle:
+            return opener(handle, key=candidate)
+    except Exception:
+        return None
+
+
 def zone_for(schedule: dict):
     name = iana_zone((schedule.get("timezone") or "").strip())
     if not name:
         return None
-    if name in {"UTC", "Etc/UTC", "GMT", "Etc/GMT"}:
-        try:
-            return ZoneInfo("UTC")
-        except (ZoneInfoNotFoundError, ModuleNotFoundError):
-            return timezone.utc
-    try:
-        return ZoneInfo(name)
-    except (ZoneInfoNotFoundError, ModuleNotFoundError):
-        return None
+    return load_zone(name)
 
 
 def _offset_zone():
@@ -1381,18 +1420,7 @@ def _chosen_model(bot: dict, endpoint: dict) -> str | None:
 
 
 def _zoneinfo(name: str):
-    candidate = iana_zone((name or "").strip())
-    if not candidate:
-        return None
-    if candidate in {"UTC", "Etc/UTC", "GMT", "Etc/GMT"}:
-        try:
-            return ZoneInfo("UTC")
-        except (ZoneInfoNotFoundError, ModuleNotFoundError):
-            return timezone.utc
-    try:
-        return ZoneInfo(candidate)
-    except (ZoneInfoNotFoundError, ModuleNotFoundError):
-        return None
+    return load_zone(name)
 
 
 def _once_in_zone(value: str, timezone_name: str) -> datetime:

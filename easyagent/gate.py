@@ -187,7 +187,12 @@ class _Seat:
         if self.holding:
             _tell_lane()
 
-    async def release(self) -> None:
+    def abandon(self) -> None:
+        """Free the slot now. A stuck reader must not keep the line.
+
+        Safe to call twice, and safe from a task that is not the one that
+        acquired the seat. A queued job can start as soon as this returns.
+        """
         lane = self.lane
         if lane is not None:
             with lane.lock:
@@ -206,6 +211,9 @@ class _Seat:
             except ValueError:
                 pass
             self._inside = None
+
+    async def release(self) -> None:
+        self.abandon()
 
 
 class _Open:

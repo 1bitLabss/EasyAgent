@@ -47,7 +47,7 @@ def test_routines_and_the_capability_list_are_at_the_top(tmp_path, monkeypatch):
     for field in ("name", "prompt", "cron", "daily", "weekdays", "weekly", "once", "every_minutes", "timezone", "quiet"):
         assert field in head, field
     assert OPEN_NOTE in head
-    assert "never say you can't" not in head.lower()
+    assert "never say you can't do something on this list." in head.lower()
     assert "you have a built-in scheduler" in head.lower()
     assert "do not use task scheduler" in head.lower()
     assert CAPABILITY_RULE.lower() in head.lower()

@@ -7353,7 +7353,8 @@ async def _iter_streamed_model(
             async for piece in llm.stream_complete(
                 base_url=base_url, api_key=api_key, model=model, messages=messages, timeout=timeout
             ):
-                await pending.put(("text", piece or ""))
+                # put_nowait: a slow viewer must not stop the model read.
+                pending.put_nowait(("text", piece or ""))
         except llm.ProviderError as exc:
             # Reasoning with no answer is not a finished call. A truly empty
             # stream still ends here so the turn can ask once more.
@@ -7431,6 +7432,9 @@ async def _pull_model(
         window.begin_attempt()
         permit = await gate.reserve()
         hold = True
+        seat_slot = turn_mod.current_slot()
+        if seat_slot is not None:
+            seat_slot.lane_seat = permit
         try:
             if permit.waiting:
                 yield "status", permit.label
@@ -7501,12 +7505,16 @@ async def _pull_model(
                         yield "replay", ""
                     await permit.release()
                     hold = False
+                    if seat_slot is not None and getattr(seat_slot, "lane_seat", None) is permit:
+                        seat_slot.lane_seat = None
                     await retry.pause(delay)
             finally:
                 gate.restore_inner_retry(inner)
         finally:
             if hold:
-                await permit.release()
+                permit.abandon()
+            if seat_slot is not None and getattr(seat_slot, "lane_seat", None) is permit:
+                seat_slot.lane_seat = None
 
 
 def _clear_live_tool_fence(store, bot_id: str, chat_id: str) -> None:
@@ -8622,7 +8630,7 @@ async def run_turn(
                 raise
         except GenerationLimit as exc:
             # The answer is already on screen and the model went quiet.
-            # Ending here is the turn, not a pause for running too long.
+            # Ending here is the turn. A stall with no text still surfaces.
             kept = _drop_known_logs(_spoken(shown_answer or ""), lines).strip()
             if exc.reason == "stall" and kept:
                 for event in close(kept):

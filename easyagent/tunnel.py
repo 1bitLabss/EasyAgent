@@ -70,6 +70,8 @@ async def iter_app(app, method: str, path: str, headers: dict, body: bytes):
         return {"type": "http.disconnect"}
 
     async def send(message):
+        # put_nowait: the phone's socket must not stall the model read.
+        # The queue is unbounded. A slow viewer grows it; the read keeps going.
         if message["type"] == "http.response.start":
             status = int(message["status"])
             response_headers: dict[str, str] = {}
@@ -77,13 +79,13 @@ async def iter_app(app, method: str, path: str, headers: dict, body: bytes):
                 name = key.decode("latin1").lower()
                 if name in {"content-type", "cache-control"}:
                     response_headers[name] = value.decode("latin1")
-            await queue.put(("start", (status, response_headers)))
+            queue.put_nowait(("start", (status, response_headers)))
         elif message["type"] == "http.response.body":
             chunk = message.get("body") or b""
             if chunk:
-                await queue.put(("chunk", chunk))
+                queue.put_nowait(("chunk", chunk))
             if not message.get("more_body", False):
-                await queue.put(("end", None))
+                queue.put_nowait(("end", None))
 
     async def run():
         try:

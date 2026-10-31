@@ -877,6 +877,9 @@ def _enqueue(
     if not full:
         items.append(message)
     row = _user_row(message_id, content, attachment, at, message["chip"], reason, client_id)
+    run = chat.get("run") if isinstance(chat.get("run"), dict) else {}
+    if run.get("status") == "running":
+        row["during_job"] = True
     _stamp_before(row, _live_open(messages))
     messages.append(row)
     note = _upsert_queue_status(messages, text)

@@ -4600,6 +4600,7 @@ def _drop_activity(chat: dict) -> None:
 
 
 WEDGE_TEXT = "This job was still marked running, but nothing was in flight, so I paused it. Resume it, or dismiss it."
+_STALL_TEXT = "The model stopped sending text, so this reply ended."
 PAUSE_TEXT = "Paused, reading your message"
 PAUSED_YOU_SENT = "Paused, you sent a message"
 PAUSED_SAY_CONTINUE = "Paused, say continue to resume"
@@ -6398,6 +6399,9 @@ def _append_error(store: Store, bot_id: str, chat_id: str, detail: str) -> dict:
     """
     chat = store.get_chat(bot_id, chat_id)
     _drop_activity(chat)
+    for message in chat.get("messages") or []:
+        if isinstance(message, dict) and message.get("live"):
+            message.pop("live", None)
     before = len(chat.get("messages") or [])
     cleaned = " ".join((redact(store, detail) or "").split())
     from easyagent.generation import is_still_working
@@ -6479,6 +6483,56 @@ def _append_error(store: Store, bot_id: str, chat_id: str, detail: str) -> dict:
     return {"reply": shown, "skills_saved": [], "chat": public, "context": stats}
 
 
+def note_model_stall(slot) -> None:
+    """A quiet model socket ended. The chat shows that, and the lane is free.
+
+    The reader may be stuck on a send. This writes the error from the stall
+    watch so a queued job is not waiting on a turn that will not finish.
+    """
+    store = getattr(slot, "store", None)
+    bot_id = str(getattr(slot, "bot_id", "") or "")
+    chat_id = str(getattr(slot, "chat_id", "") or "")
+    if store is None or not bot_id or not chat_id:
+        return
+    if getattr(slot, "stall_noted", False):
+        return
+    try:
+        chat = store.get_chat(bot_id, chat_id)
+    except StoreError:
+        return
+    run = chat.get("run") if isinstance(chat.get("run"), dict) else {}
+    if run.get("status") not in {"running", ""}:
+        return
+    slot.stall_noted = True
+    for message in chat.get("messages") or []:
+        if isinstance(message, dict) and message.get("live"):
+            message.pop("live", None)
+    if not any(
+        isinstance(item, dict) and item.get("role") == "assistant" and item.get("content") == _STALL_TEXT
+        for item in chat.get("messages") or []
+    ):
+        chat.setdefault("messages", []).append({
+            "id": new_id(),
+            "role": "assistant",
+            "content": _STALL_TEXT,
+            "error": True,
+            "created_at": now_iso(),
+        })
+    _apply_run(chat, status="error", reason=_STALL_TEXT, step="")
+    chat["updated_at"] = now_iso()
+    try:
+        store.save_chat(chat)
+    except (StoreError, OSError, HTTPException):
+        return
+    seat = getattr(slot, "lane_seat", None)
+    if seat is not None:
+        try:
+            seat.abandon()
+        except Exception:
+            pass
+        slot.lane_seat = None
+
+
 def _other_bot_names(store: Store, bot_id: str) -> tuple[str, ...]:
     """Bots this bot can ask. Its own name is not one of them."""
     names: list[str] = []
@@ -6520,7 +6574,17 @@ async def _finish_and_maybe_ask(
     ask = parse_subagent(visible)
     names = _other_bot_names(store, bot_id)
     # A plain question does not send another bot just because the reply contains the fence.
-    suppressed = bool(ask) and not automatic_ask_allowed(user_text, names)
+    during_job = False
+    try:
+        for item in reversed(store.get_chat(bot_id, chat_id).get("messages") or []):
+            if isinstance(item, dict) and item.get("role") == "user":
+                during_job = bool(item.get("during_job"))
+                break
+    except StoreError:
+        during_job = False
+    # A line sent while a reply was already running may ask another bot.
+    # A fresh question still does not.
+    suppressed = bool(ask) and not automatic_ask_allowed(user_text, names) and not during_job
     if suppressed:
         ask = None
     visible = strip_subagent_fences(visible, keep_shape=True)
@@ -7435,6 +7499,10 @@ async def _stream_reply(
             yield _sse(payload)
     except GenerationLimit as exc:
         closed = _stale_stop_closed(store.get_chat(bot_id, chat_id).get("messages") or [])
+        if getattr(exc, "reason", "") == "stall":
+            failed = _append_error(store, bot_id, chat_id, _STALL_TEXT)
+            yield _sse({"type": "error", "detail": failed["reply"], "chat": failed["chat"]})
+            return
         if getattr(exc, "reason", "") == "first_token" or closed:
             detail = _still_working_line() if getattr(exc, "reason", "") == "first_token" else _silence_text(store, bot_id)
             failed = _append_error(store, bot_id, chat_id, detail)
@@ -7545,10 +7613,10 @@ async def _emit_run(store: Store, bot_id: str, chat_id: str, producer, *, resume
     """
     slot = turn_mod.slot_for(store, chat_id)
     listeners = slot.listeners
-    guard = asyncio.Lock()
+    guard = threading.Lock()
 
     async def publish(item) -> None:
-        async with guard:
+        with guard:
             targets = list(listeners)
         for queue in targets:
             with suppress(Exception):
@@ -7593,7 +7661,7 @@ async def _emit_run(store: Store, bot_id: str, chat_id: str, producer, *, resume
                 slot.notify = None
 
     queue: asyncio.Queue = asyncio.Queue()
-    async with guard:
+    with guard:
         listeners.append(queue)
     task = asyncio.create_task(worker())
     turn_mod.track_worker(task)
@@ -7610,7 +7678,7 @@ async def _emit_run(store: Store, bot_id: str, chat_id: str, producer, *, resume
         )
         return
     finally:
-        async with guard:
+        with guard:
             if queue in listeners:
                 listeners.remove(queue)
 

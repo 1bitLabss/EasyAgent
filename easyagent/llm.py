@@ -2083,6 +2083,20 @@ def _unfenced_unknown(calls: list[dict]) -> bool:
     return False
 
 
+async def _forget_task(task: asyncio.Task) -> None:
+    """Retrieve a closer after the reader has moved on.
+
+    The reader must not await this task. ``aclose`` waits for the body read,
+    and the body read is the reader, so awaiting it here never returns.
+    """
+    if not task.done():
+        task.cancel()
+    try:
+        await asyncio.wait_for(task, timeout=1.0)
+    except (asyncio.CancelledError, TimeoutError, Exception):
+        return
+
+
 async def _unblock_stalled_read(client: httpx.AsyncClient, delay: float) -> None:
     """Close a stream whose next line never arrives.
 
@@ -2090,14 +2104,87 @@ async def _unblock_stalled_read(client: httpx.AsyncClient, delay: float) -> None
     cancellation sits until the peer dies. A finished stub reply then stayed
     on Writing until the connection itself gave up, and the limit replaced
     the text. Closing the client is what makes the stall limit real.
+    The close itself is bounded: waiting on it from the reader deadlocks.
     """
     try:
         await asyncio.sleep(delay)
     except asyncio.CancelledError:
         return
     try:
-        await client.aclose()
-    except Exception:
+        await asyncio.wait_for(client.aclose(), timeout=1.0)
+    except (asyncio.CancelledError, TimeoutError, Exception):
+        return
+
+
+def _note_model_token(piece: str) -> None:
+    """The stall watch reads this clock. It does not live on the read task."""
+    slot = turn_mod.current_slot()
+    if slot is None:
+        return
+    now = time.monotonic()
+    if not getattr(slot, "model_stream_started", 0):
+        slot.model_stream_started = now
+    if piece:
+        slot.last_model_token_at = now
+        slot.model_saw_token = True
+
+
+def _arm_stream_clock(limits) -> None:
+    slot = turn_mod.current_slot()
+    if slot is None:
+        return
+    now = time.monotonic()
+    slot.model_stream_started = now
+    slot.last_model_token_at = 0.0
+    slot.model_saw_token = False
+    slot.model_stalled = False
+    slot.stall_limit = float(limits.stall_seconds)
+    slot.first_limit = float(limits.first_token_seconds)
+
+
+async def _watch_stream_stall(client: httpx.AsyncClient, stop: asyncio.Event) -> None:
+    """End a stream that has gone quiet, even if the reader is stuck on a send.
+
+    A viewer leaving, or a relay waiting on the phone, used to leave the model
+    socket open and the lane taken. Queued work never started. Closing the
+    socket and dropping the lane is what makes the silence limit real.
+    """
+    while not stop.is_set():
+        try:
+            await asyncio.wait_for(stop.wait(), timeout=1.0)
+            return
+        except TimeoutError:
+            pass
+        slot = turn_mod.current_slot()
+        if slot is None:
+            continue
+        started = float(getattr(slot, "model_stream_started", 0) or 0)
+        if not started:
+            continue
+        saw = bool(getattr(slot, "model_saw_token", False))
+        last = float(getattr(slot, "last_model_token_at", 0) or 0)
+        mark = last if saw and last else started
+        cap = float(getattr(slot, "stall_limit", 45) if saw else getattr(slot, "first_limit", 120))
+        if time.monotonic() - mark < cap:
+            continue
+        slot.model_stalled = True
+        try:
+            await asyncio.wait_for(client.aclose(), timeout=1.0)
+        except (asyncio.CancelledError, TimeoutError, Exception):
+            pass
+        seat = getattr(slot, "lane_seat", None)
+        if seat is not None:
+            try:
+                seat.abandon()
+            except Exception:
+                pass
+            slot.lane_seat = None
+        try:
+            from easyagent.app import note_model_stall
+
+            note_model_stall(slot)
+        except Exception:
+            return
         return
 
 
@@ -2216,8 +2303,11 @@ async def _stream_attempt(
     headers = _auth_headers(base_url, api_key)
     client = httpx.AsyncClient(timeout=_http_timeout(timeout, stream=True))
     turn_mod.attach_client(client)
+    _arm_stream_clock(watch.limits)
     yielded = False
     opened = None
+    stop_watch = asyncio.Event()
+    watcher = asyncio.create_task(_watch_stream_stall(client, stop_watch))
     try:
         turn_mod.raise_if_cancelled()
         opened = client.stream("POST", url, json=payload, headers=headers)
@@ -2271,27 +2361,24 @@ async def _stream_attempt(
                     except StopAsyncIteration:
                         break
                     except TimeoutError as exc:
-                        await _drop_read(body, client)
+                        # The closer shuts the socket. Awaiting it here deadlocks:
+                        # aclose waits for this read, and this read waits for aclose.
                         reason = "stall" if yielded else "first_token"
                         raise GenerationLimit(reason) from exc
                     except httpx.HTTPError as exc:
                         if release.done() and not release.cancelled():
-                            await _drop_read(body, client)
                             reason = "stall" if yielded else "first_token"
                             raise GenerationLimit(reason) from exc
                         raise
                     except GenerationLimit:
                         raise
                 finally:
-                    # Closing the socket can finish the body with StopAsyncIteration.
-                    # Retrieve it here. Leaving it on the task holds the lane.
-                    if not release.done():
-                        release.cancel()
-                    try:
-                        await release
-                    except (asyncio.CancelledError, StopAsyncIteration):
-                        pass
+                    # Do not await the closer on this task. A cancelled viewer used
+                    # to land here and sit in aclose until the socket gave up, and
+                    # the lane stayed taken so a queued job never reached the model.
+                    asyncio.create_task(_forget_task(release))
                 watch.observe(piece or "")
+                _note_model_token(piece or "")
                 if piece:
                     yielded = True
                     wait = watch.limits.stall_seconds
@@ -2305,16 +2392,18 @@ async def _stream_attempt(
         finally:
             if opened is not None:
                 try:
-                    await opened.__aexit__(None, None, None)
-                except (StopAsyncIteration, asyncio.CancelledError):
+                    await asyncio.wait_for(opened.__aexit__(None, None, None), timeout=1.0)
+                except (StopAsyncIteration, asyncio.CancelledError, TimeoutError, Exception):
                     pass
                 opened = None
     finally:
+        stop_watch.set()
+        asyncio.create_task(_forget_task(watcher))
         _mark_model_read(False)
         turn_mod.detach_client(client)
         try:
-            await client.aclose()
-        except (StopAsyncIteration, asyncio.CancelledError):
+            await asyncio.wait_for(client.aclose(), timeout=1.0)
+        except (StopAsyncIteration, asyncio.CancelledError, TimeoutError, Exception):
             pass
     if not yielded:
         # A name this computer cannot fence is still a call. The turn answers

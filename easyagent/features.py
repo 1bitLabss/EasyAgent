@@ -208,7 +208,10 @@ def capability_summary() -> str:
 
 def capability_block() -> str:
     summary = capability_summary()
-    return f"{_MARK}\nYou can: {summary}.\n{CAPABILITY_RULE}"
+    return (
+        f"{_MARK}\nYou can: {summary}.\n{CAPABILITY_RULE}\n"
+        "Never say you can't do something on this list."
+    )
 
 
 def ensure_capabilities(text: str) -> str:

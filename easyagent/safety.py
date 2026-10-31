@@ -4153,6 +4153,100 @@ def _class_take(store: Store, request, bot_id: str | None, verdict: Verdict) -> 
         return False
 
 
+_TYPE_PY = re.compile(r"(?i)(?:^|[;&|\n`])\s*(?:python\d*(?:\.\d+)?|py)(?:\.exe)?\b")
+_TYPE_HOURS = 8
+
+
+def command_family(command: str) -> str:
+    """The kind of command a per-type approval covers. Empty means this one command."""
+    text = command or ""
+    if re.search(r"(?i)\bcurl\b", text):
+        return "curl"
+    if re.search(r"(?i)\bpip3?\b", text):
+        return "pip"
+    if re.search(r"(?i)\bgit\b", text):
+        return "git"
+    if _TYPE_PY.search(text):
+        return "python"
+    return ""
+
+
+def _type_rows(chat: dict) -> list[dict]:
+    raw = chat.get("type_grants")
+    if not isinstance(raw, list):
+        return []
+    return [item for item in raw if isinstance(item, dict) and item.get("type")]
+
+
+def _remember_type(store: Store, bot_id: str, family: str) -> bool:
+    """This chat may run this kind of command without another card."""
+    if not family:
+        return False
+    slot = turn_mod.current_slot()
+    if slot is None or not slot.chat_id:
+        return False
+    try:
+        chat = store.get_chat(bot_id, slot.chat_id)
+    except Exception:
+        return False
+    now = time.time()
+    row = {"type": family, "since": now, "until": now + _TYPE_HOURS * 3600}
+    rows = [item for item in _type_rows(chat) if item.get("type") != family]
+    rows.append(row)
+    chat["type_grants"] = rows
+    chat["updated_at"] = now_iso()
+    store.save_chat(chat)
+    return True
+
+
+def _type_covers(store: Store, bot_id: str | None, command: str) -> bool:
+    family = command_family(command)
+    if not family or not bot_id or is_unattended():
+        return False
+    slot = turn_mod.current_slot()
+    if slot is None or slot.bot_id != bot_id or not slot.chat_id:
+        return False
+    try:
+        chat = store.get_chat(bot_id, slot.chat_id)
+    except Exception:
+        return False
+    now = time.time()
+    kept = []
+    hit = False
+    for item in _type_rows(chat):
+        try:
+            until = float(item.get("until") or 0)
+        except (TypeError, ValueError):
+            until = 0
+        if until <= now:
+            continue
+        kept.append(item)
+        if item.get("type") == family:
+            hit = True
+    if len(kept) != len(_type_rows(chat)):
+        if kept:
+            chat["type_grants"] = kept
+        else:
+            chat.pop("type_grants", None)
+        try:
+            store.save_chat(chat)
+        except Exception:
+            return hit
+    return hit
+
+
+def _decorate_type(card: Pending, command: str) -> None:
+    """Offer one button that covers later commands of this kind in this chat."""
+    if card.action_class or card.tier != ASK or card.rule in _NEVER_ALWAYS:
+        return
+    family = command_family(command)
+    if not family:
+        return
+    card.action_class = f"type:{family}"
+    card.action_tool = family
+    card.class_label = f"Allow {family} commands in this chat"
+
+
 def _decorate_class(store: Store, request, verdict: Verdict, card: Pending) -> None:
     """Name the class on the card when this command is one instance of it."""
     if verdict.tier != ASK or verdict.rule in _NEVER_ALWAYS or is_unattended():
@@ -4280,6 +4374,22 @@ async def guard(store: Store, request, bot_id: str | None):
         asyncio.create_task(_settle_unattended(store, request, bot_id, card, verdict))
         _notify_bridge(store, bot_id, card)
         raise ToolError("That needs you. A card is in the chat. This routine went on without it. If nobody answers, the command is not run, and it can be asked again.")
+    if verdict.tier == ASK and _type_covers(store, bot_id, getattr(request, "command", "") or ""):
+        family = command_family(getattr(request, "command", "") or "")
+        _audit(
+            store,
+            bot_id,
+            {
+                "at": now_iso(),
+                "decision": "approve",
+                "tag": "type",
+                "type": family,
+                "rule": verdict.rule,
+                "why": verdict.why,
+                "detail": verdict.detail,
+            },
+        )
+        return _release_ask(store, request, bot_id, verdict)
     if verdict.tier == ASK and _class_take(store, request, bot_id, verdict):
         from easyagent.actionclass import match as class_match
 
@@ -4327,6 +4437,7 @@ async def guard(store: Store, request, bot_id: str | None):
         elif turn_mod.room_chat_id():
             card.chat_id = turn_mod.room_chat_id()
         _decorate_class(store, request, verdict, card)
+        _decorate_type(card, exact)
         _PENDING[card.id] = card
         _notify(verdict.why)
         _notify_bridge(store, bot_id, card)
@@ -4341,6 +4452,28 @@ async def guard(store: Store, request, bot_id: str | None):
             _remember_allow(store, bot_id, exact)
             decision = "approve"
         class_grant = False
+        if decision == "class" and bot_id and str(card.action_class or "").startswith("type:"):
+            family = str(card.action_class).split(":", 1)[1]
+            if _remember_type(store, bot_id, family):
+                decision = "approve"
+                _audit(
+                    store,
+                    bot_id,
+                    {
+                        "at": now_iso(),
+                        "decision": "approve",
+                        "tag": "type",
+                        "type": family,
+                        "rule": verdict.rule,
+                        "why": verdict.why,
+                        "detail": verdict.detail,
+                    },
+                )
+                approved_slot = turn_mod.current_slot()
+                if approved_slot is not None:
+                    approved_slot.script_human_approved = True
+                return _release_ask(store, request, bot_id, verdict)
+            decision = "deny"
         if decision == "class" and bot_id and card.action_class:
             from easyagent.actionclass import remember
 

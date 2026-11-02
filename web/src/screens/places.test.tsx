@@ -9,9 +9,12 @@ vi.mock("@/api", async () => {
   const client = new QueryClient({ defaultOptions: { queries: { retry: false, networkMode: "always" } } });
   return {
     queryClient: client,
-    api: vi.fn(async (path: string) => {
+    api: vi.fn(async (path: string, options?: { method?: string }) => {
       if (path === "/api/endpoints") {
         return [{ id: "e1", name: "Home server", base_url: "http://localhost:8080/v1", has_api_key: false, model: "m", max_parallel: 1, max_tokens: 4096, stall_seconds: 45, first_token_seconds: 600 }];
+      }
+      if (path === "/api/endpoints/e1/test" && options?.method === "POST") {
+        return { ok: true, detail: "The server answered." };
       }
       return {};
     }),
@@ -48,5 +51,17 @@ describe("Connections list", () => {
     await findByText("Home server");
     expect(getByText("Remove")).toBeTruthy();
     expect(getByText("Edit")).toBeTruthy();
+  });
+
+  it("tests a connection and shows the answer without sending a message", async () => {
+    const { findByText, getByText } = render(
+      <QueryClientProvider client={queryClient}>
+        <ConnectionsScreen />
+      </QueryClientProvider>,
+    );
+    await findByText("Home server");
+    fireEvent.click(getByText("Test"));
+    await waitFor(() => expect(mocked.mock.calls.some(([path, options]) => path === "/api/endpoints/e1/test" && options?.method === "POST")).toBe(true));
+    await findByText("The server answered.");
   });
 });

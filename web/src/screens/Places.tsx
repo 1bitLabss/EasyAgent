@@ -29,6 +29,8 @@ export function ConnectionsScreen() {
   const endpoints = useQuery({ queryKey: ["endpoints"], queryFn: () => api<Endpoint[]>("/api/endpoints") });
   const [editing, setEditing] = useState<Endpoint | null | undefined>(undefined);
   const [error, setError] = useState("");
+  const [testing, setTesting] = useState("");
+  const [testNote, setTestNote] = useState<{ id: string; ok: boolean; detail: string } | null>(null);
   return (
     <Page kicker="Connections" title="Where a bot sends messages" lede="A connection is a server that can chat. It is not a conversation. Chats stay on this computer.">
       <div className="flex items-center justify-between">
@@ -96,6 +98,14 @@ export function ConnectionsScreen() {
                 <span className="block truncate text-xs text-muted">{endpoint.base_url} · {endpoint.max_parallel} at a time</span>
               </button>
               <span className="flex shrink-0 items-center gap-1">
+                <Button variant="ghost" size="sm" disabled={testing === endpoint.id} onClick={() => {
+                  setTesting(endpoint.id);
+                  setTestNote(null);
+                  void api<{ ok: boolean; detail: string }>(`/api/endpoints/${endpoint.id}/test`, { method: "POST" })
+                    .then((result) => setTestNote({ id: endpoint.id, ok: result.ok, detail: result.detail }))
+                    .catch((reason: Error) => setTestNote({ id: endpoint.id, ok: false, detail: reason.message }))
+                    .finally(() => setTesting(""));
+                }}>{testing === endpoint.id ? "Testing" : "Test"}</Button>
                 <Button variant="ghost" size="sm" onClick={() => { setEditing(endpoint); setError(""); }}>Edit</Button>
                 <Button variant="ghost" size="sm" onClick={() => askConfirm({
                 title: `Remove ${endpoint.name}?`,
@@ -112,6 +122,7 @@ export function ConnectionsScreen() {
           ))}
         </ul>
       )}
+      {testNote ? <p className={testNote.ok ? "text-sm" : "text-sm text-danger"} role="status">{testNote.detail}</p> : null}
     </Page>
   );
 }

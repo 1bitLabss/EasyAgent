@@ -1033,6 +1033,27 @@ def create_app(data_dir: str | Path | None = None) -> FastAPI:
             raise HTTPException(500, "Endpoint removal touched bot data. This should not happen.")
         return {"deleted": endpoint_id}
 
+    @app.post("/api/endpoints/{endpoint_id}/test")
+    async def test_endpoint(endpoint_id: str):
+        """Ask the server if it is there. No message is sent to the model."""
+        import httpx
+
+        record = store.get_endpoint(endpoint_id)
+        if record is None:
+            raise HTTPException(404, "No such connection.")
+        base_url = str(record.get("base_url") or "")
+        try:
+            async with httpx.AsyncClient(timeout=8.0) as client:
+                response = await client.get(
+                    base_url.rstrip("/") + "/models",
+                    headers=llm._auth_headers(base_url, record.get("api_key")),
+                )
+        except (httpx.HTTPError, OSError):
+            return {"ok": False, "detail": retry.unreachable_text(base_url)}
+        if response.status_code == 200:
+            return {"ok": True, "detail": "The server answered."}
+        return {"ok": False, "detail": f"The server answered with {response.status_code}."}
+
     @app.get("/api/bots")
     def list_bots():
         return [public_bot(store, bot) for bot in store.list_bots()]

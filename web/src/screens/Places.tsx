@@ -91,11 +91,13 @@ export function ConnectionsScreen() {
         <ul className="space-y-2">
           {(endpoints.data || []).map((endpoint) => (
             <li key={endpoint.id} className="flex items-center justify-between gap-2 rounded-md border border-border px-3 py-2">
-              <button type="button" className="min-w-0 text-left" onClick={() => setEditing(endpoint)}>
+              <button type="button" data-testid="endpoint-row" className="min-w-0 text-left" onClick={() => setEditing(endpoint)}>
                 <strong className="block">{endpoint.name}</strong>
                 <span className="block truncate text-xs text-muted">{endpoint.base_url} · {endpoint.max_parallel} at a time</span>
               </button>
-              <Button variant="ghost" size="sm" onClick={() => askConfirm({
+              <span className="flex shrink-0 items-center gap-1">
+                <Button variant="ghost" size="sm" onClick={() => { setEditing(endpoint); setError(""); }}>Edit</Button>
+                <Button variant="ghost" size="sm" onClick={() => askConfirm({
                 title: `Remove ${endpoint.name}?`,
                 copy: "This deletes only this connection. Bots and chats stay until you point a bot somewhere else.",
                 name: endpoint.name,
@@ -105,6 +107,7 @@ export function ConnectionsScreen() {
                   await queryClient.invalidateQueries({ queryKey: ["endpoints"] });
                 },
               })}>Remove</Button>
+              </span>
             </li>
           ))}
         </ul>
@@ -150,7 +153,7 @@ export function RoomsScreen() {
           </form>
         ) : null}
         {(rooms.data || []).length === 0 ? <p className="text-sm text-muted">No rooms yet. Create one, then add two or more bots.</p> : (
-          <ul>{(rooms.data || []).map((item) => <li key={item.id}><button type="button" className="text-sm underline" onClick={() => setRoom(item.id)}>{item.name}</button></li>)}</ul>
+          <ul className="space-y-2">{(rooms.data || []).map((item) => <li key={item.id}><button type="button" className="flex w-full items-center justify-between rounded-md border border-border px-3 py-2 text-left text-sm hover:bg-black/5 dark:hover:bg-white/10" onClick={() => setRoom(item.id)}>{item.name}<span className="text-xs text-muted">Open</span></button></li>)}</ul>
         )}
       </Page>
     );
@@ -272,7 +275,7 @@ export function ProjectsScreen() {
         {error ? <p className="text-sm text-danger">{error}</p> : null}
         <p className="text-xs text-muted">Create it, then open it to upload files and choose the bots. Rooms stay as they are.</p>
         {(projects.data || []).length === 0 ? <p className="text-sm text-muted">No group projects yet. Create one, then choose which bots can use it.</p> : (
-          <ul>{(projects.data || []).map((item) => <li key={item.id}><button type="button" className="text-sm underline" onClick={() => setProject(item.id)}>{item.name}</button></li>)}</ul>
+          <ul className="space-y-2">{(projects.data || []).map((item) => <li key={item.id}><button type="button" className="flex w-full items-center justify-between rounded-md border border-border px-3 py-2 text-left text-sm hover:bg-black/5 dark:hover:bg-white/10" onClick={() => setProject(item.id)}>{item.name}<span className="text-xs text-muted">Open</span></button></li>)}</ul>
         )}
       </Page>
     );
@@ -388,21 +391,24 @@ export function ComputersScreen() {
       {(computers.data || []).length === 0 ? <p className="text-sm text-muted">No computers yet. Add a Linux or Windows computer the bot can use.</p> : (
         <ul className="space-y-2">
           {(computers.data || []).map((computer) => (
-            <li key={computer.id} className="flex items-center justify-between gap-2">
-              <button type="button" className="text-left" onClick={() => setForm(computer)}>
+            <li key={computer.id} className="flex items-center justify-between gap-2 rounded-md border border-border px-3 py-2">
+              <button type="button" className="min-w-0 text-left" onClick={() => { setForm(computer); setError(""); }}>
                 <strong className="block">{computer.name}</strong>
-                <span className="text-xs text-muted">{computer.kind === "windows" ? "Windows" : "Linux"} · {computer.host} · {computer.has_sign_in ? "Sign-in saved" : "No sign-in"}</span>
+                <span className="block truncate text-xs text-muted">{computer.kind === "windows" ? "Windows" : "Linux"} · {computer.host} · {computer.has_sign_in ? "Sign-in saved" : "No sign-in"}</span>
               </button>
-              <Button variant="ghost" size="sm" onClick={() => askConfirm({
-                title: `Remove ${computer.name}?`,
-                copy: "This deletes only this saved computer. Chats, bots, and other computers stay.",
-                name: computer.name,
-                submit: "Remove computer",
-                run: async () => {
-                  await api(`/api/computers/${computer.id}`, { method: "DELETE", json: { confirm_name: computer.name } });
-                  await queryClient.invalidateQueries({ queryKey: ["computers"] });
-                },
-              })}>Remove</Button>
+              <span className="flex shrink-0 items-center gap-1">
+                <Button variant="ghost" size="sm" onClick={() => { setForm(computer); setError(""); }}>Edit</Button>
+                <Button variant="ghost" size="sm" onClick={() => askConfirm({
+                  title: `Remove ${computer.name}?`,
+                  copy: "This deletes only this saved computer. Chats, bots, and other computers stay.",
+                  name: computer.name,
+                  submit: "Remove computer",
+                  run: async () => {
+                    await api(`/api/computers/${computer.id}`, { method: "DELETE", json: { confirm_name: computer.name } });
+                    await queryClient.invalidateQueries({ queryKey: ["computers"] });
+                  },
+                })}>Remove</Button>
+              </span>
             </li>
           ))}
         </ul>

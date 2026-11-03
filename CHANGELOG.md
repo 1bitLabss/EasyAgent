@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.3.49
+- A connection card has Test, Edit, and Remove. Test asks the server if it is there and answers in one line: "The server answered." or "Can't reach the model at <host>. Check the connection or address." No message is sent to the model and the At once line is not used.
+- Editing a connection is visible now. The Edit button opens the saved values, and clicking the card still works as before.
+- A saved computer can be edited from its row. Rooms and group projects open as cards like connections.
+
 ## 0.3.47
 - A local model waits 600 seconds for the first word and for retries. A slow or busy model says "Model is busy/slow". "Can't reach the model" is only for a connection that was refused or failed. Learning, replay, and the judge step aside while a chat is running or queued.
 - Your folder is the workspace. The bot's data directory is named as off-limits, and a refusal that blocks that directory says where to go instead. "It was not run." is not repeated.

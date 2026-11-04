@@ -627,6 +627,8 @@ NATIVE_TOOLS = [
         "routine",
         "Create, edit, delete, or list a routine: a cron job, a reminder, a recurring task, or a check every morning. "
         "action is create, edit, delete, or list. "
+        "Before create, say what you will make and get the person's yes first, unless their message clearly asked to schedule it. "
+        "Write prompt as a clean instruction for each run. Never copy the person's message word for word. "
         "Fields are name, prompt, cron, daily, weekdays, weekly, once, every_minutes, timezone, and quiet. "
         "A routine runs only while EasyAgent is open. It is not saved until the person confirms the card. "
         "Do not use Task Scheduler, schtasks, crontab, or launchd.",

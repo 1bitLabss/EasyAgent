@@ -270,6 +270,22 @@ def new_id() -> str:
     return str(uuid.uuid4())
 
 
+def _schedule_time_key(schedule: dict) -> tuple:
+    """What makes two routines fire at the same time. Used to spot duplicates."""
+    return (
+        str(schedule.get("kind") or "").strip().lower(),
+        str(schedule.get("cron") or "").strip(),
+        str(schedule.get("at") or "").strip(),
+        str(schedule.get("every_minutes") or "").strip(),
+        str(schedule.get("timezone") or "").strip(),
+    )
+
+
+def _schedule_prompt_key(schedule: dict) -> str:
+    """The routine prompt, folded so spacing and case do not hide a duplicate."""
+    return " ".join(str(schedule.get("prompt") or "").split()).lower()
+
+
 # Windows readers (antivirus, the indexer, another handle) deny the replace
 # for a moment. Ten tries about 0.2s apart cover roughly two seconds.
 _REPLACE_TRIES = 10
@@ -1113,6 +1129,11 @@ class Store:
     def add_schedule(self, bot_id: str, schedule: dict) -> dict:
         with self._lock:
             schedules = self.list_schedules(bot_id)
+            when = _schedule_time_key(schedule)
+            prompt = _schedule_prompt_key(schedule)
+            for row in schedules:
+                if _schedule_time_key(row) == when and _schedule_prompt_key(row) == prompt:
+                    raise StoreError("That routine already exists.", 400)
             schedules.append(schedule)
             atomic_write_json(self._schedules_path(bot_id), schedules)
         return schedule

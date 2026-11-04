@@ -2,14 +2,10 @@ import { useQuery } from "@tanstack/react-query";
 import { useEffect, useState, type ReactNode } from "react";
 import { api, queryClient, saveToken } from "@/api";
 import { CopyDiagnostics } from "@/components/Diagnostics";
-import { Face } from "@/components/Face";
-import { ThinkingBox } from "@/components/ThinkingBox";
-import { Markdown } from "@/components/Markdown";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogDescription, DialogTitle } from "@/components/ui/dialog";
 import { Input, Textarea } from "@/components/ui/input";
 import { Switch } from "@/components/ui/switch";
-import { contextNote } from "@/lib/run";
 import { useApp } from "@/store";
 import type { Bot, Computer, Endpoint, Project, Room } from "@/types";
 
@@ -133,142 +129,54 @@ export function ConnectionsScreen() {
 }
 
 export function RoomsScreen() {
-  const roomId = useApp((state) => state.roomId);
-  const setRoom = useApp((state) => state.setRoom);
   const askConfirm = useApp((state) => state.askConfirm);
+  const openRoom = useApp((state) => state.openRoom);
   const rooms = useQuery({ queryKey: ["rooms"], queryFn: () => api<Room[]>("/api/rooms") });
-  const bots = useQuery({ queryKey: ["bots"], queryFn: () => api<Bot[]>("/api/bots") });
-  const room = useQuery({
-    queryKey: ["room", roomId],
-    enabled: Boolean(roomId),
-    queryFn: () => api<Room>(`/api/rooms/${roomId}`),
-  });
   const [adding, setAdding] = useState(false);
   const [error, setError] = useState("");
-  const [draft, setDraft] = useState("");
-  if (!roomId || !room.data) {
-    return (
-      <Page kicker="Rooms" title="A separate conversation" lede="A room is not a private chat. Each bot you add replies here, and their own chats stay as they were.">
-        <div className="flex items-center justify-between">
-          <h2 className="font-medium">Rooms</h2>
-          <Button variant="ghost" size="sm" onClick={() => setAdding((open) => !open)}>Add</Button>
-        </div>
-        {adding ? (
-          <form className="space-y-2" onSubmit={(event) => {
-            event.preventDefault();
-            const name = String(new FormData(event.currentTarget).get("name") || "");
-            void api<Room>("/api/rooms", { method: "POST", json: { name } }).then((created) => {
-              setAdding(false);
-              setRoom(created.id);
-              return queryClient.invalidateQueries({ queryKey: ["rooms"] });
-            }).catch((reason: Error) => setError(reason.message));
-          }}>
-            <Input name="name" required maxLength={80} placeholder="Desk" />
-            <p className="text-xs text-muted">A room has its own transcript. The bots you add keep their private chats.</p>
-            {error ? <p className="text-sm text-danger">{error}</p> : null}
-            <Button type="submit" size="sm">Create room</Button>
-          </form>
-        ) : null}
-        {(rooms.data || []).length === 0 ? <p className="text-sm text-muted">No rooms yet. Create one, then add two or more bots.</p> : (
-          <ul className="space-y-2">{(rooms.data || []).map((item) => (
-            <li key={item.id} className="flex items-center justify-between gap-2 rounded-md border border-border px-3 py-2">
-              <button type="button" className="min-w-0 flex-1 truncate text-left text-sm hover:underline" onClick={() => setRoom(item.id)}>{item.name}</button>
-              <span className="flex shrink-0 items-center gap-1">
-                <Button variant="ghost" size="sm" onClick={() => setRoom(item.id)}>Open</Button>
-                <Button variant="ghost" size="sm" onClick={() => askConfirm({
-                  title: `Delete ${item.name}?`,
-                  copy: "This deletes the room and its messages. The bots and their private chats stay.",
-                  submit: "Delete room",
-                  run: async () => {
-                    await api(`/api/rooms/${item.id}`, { method: "DELETE" });
-                    await queryClient.invalidateQueries({ queryKey: ["rooms"] });
-                  },
-                })}>Delete</Button>
-              </span>
-            </li>
-          ))}</ul>
-        )}
-      </Page>
-    );
-  }
-  const open = room.data;
-  const members = (open.bot_ids || []).map((id) => (bots.data || []).find((bot) => bot.id === id)).filter(Boolean) as Bot[];
   return (
-    <section className="flex h-full min-h-0 flex-col">
-      <header className="border-b border-border px-4 py-3">
-        <p className="text-xs uppercase tracking-wide text-muted">Room</p>
-        <h1 className="text-xl font-semibold">{open.name}</h1>
-        <Button variant="ghost" size="sm" onClick={() => setRoom(null)}>All rooms</Button>
-        <ul className="mt-2 flex flex-wrap gap-2">
-          {members.map((bot) => (
-            <li key={bot.id} className="flex items-center gap-1 text-sm">
-              <Face color={bot.face_color} tiny /> {bot.name}
-              <button type="button" className="text-xs underline" onClick={() => void api(`/api/rooms/${open.id}/bots/${bot.id}`, { method: "DELETE" }).then(() => queryClient.invalidateQueries({ queryKey: ["room", open.id] }))}>Remove</button>
-            </li>
-          ))}
-        </ul>
-        <form className="mt-2 flex gap-2" onSubmit={(event) => {
-          event.preventDefault();
-          const bot_id = String(new FormData(event.currentTarget).get("bot_id") || "");
-          if (!bot_id) return;
-          void api(`/api/rooms/${open.id}/bots`, { method: "POST", json: { bot_id } }).then(() => queryClient.invalidateQueries({ queryKey: ["room", open.id] })).catch((reason: Error) => setError(reason.message));
-        }}>
-          <select name="bot_id" className="h-9 rounded-md border border-border bg-card px-2 text-sm">
-            <option value="">Add a bot</option>
-            {(bots.data || []).filter((bot) => !(open.bot_ids || []).includes(bot.id)).map((bot) => <option key={bot.id} value={bot.id}>{bot.name}</option>)}
-          </select>
-          <Button type="submit" size="sm">Add</Button>
-        </form>
-        {error ? <p className="text-sm text-danger">{error}</p> : null}
-      </header>
-      <div className="min-h-0 flex-1 overflow-y-auto px-4 py-4">
-        {(open.messages || []).length === 0 ? <p className="text-sm text-muted">Nothing in this room yet. Add the bots, then send. Each one replies here, in order. This does not write their private chats.</p> : (
-          <ol className="space-y-3">
-            {(open.messages || []).map((message, index) => {
-              const speaker = (bots.data || []).find((bot) => bot.id === message.speaker);
-              const last = index === (open.messages || []).length - 1;
-              return (
-                <li key={message.id || index} className="rounded-lg bg-card px-3 py-2">
-                  <p className="mb-1 flex items-center gap-2 text-xs text-muted">
-                    {speaker ? <Face color={speaker.face_color} tiny /> : null}
-                    {message.speaker_name || (message.role === "user" ? "You" : "Reply")}
-                  </p>
-                  {message.role !== "user" ? <ThinkingBox text={message.thinking} seconds={message.thought_seconds} /> : null}
-                  {message.role === "user" ? <p className="whitespace-pre-wrap">{message.content}</p> : <Markdown text={message.content || ""} />}
-                  {last && (message.choices || []).length > 1 ? (
-                    <div className="mt-2 flex flex-wrap gap-2">
-                      {(message.choices || []).map((choice) => (
-                        <Button key={choice} size="sm" variant="outline" onClick={() => {
-                          setDraft(choice);
-                          void api<Room>(`/api/rooms/${open.id}/messages`, { method: "POST", json: { content: choice } }).then((next) => {
-                            queryClient.setQueryData(["room", open.id], next);
-                            setDraft("");
-                          }).catch((reason: Error) => setError(reason.message));
-                        }}>{choice}</Button>
-                      ))}
-                    </div>
-                  ) : null}
-                </li>
-              );
-            })}
-          </ol>
-        )}
+    <Page kicker="Rooms" title="A separate conversation" lede="A room is not a private chat. Each bot you add replies here, and their own chats stay as they were.">
+      <div className="flex items-center justify-between">
+        <h2 className="font-medium">Rooms</h2>
+        <Button variant="ghost" size="sm" onClick={() => setAdding((open) => !open)}>Add</Button>
       </div>
-      <form className="border-t border-border p-3" onSubmit={(event) => {
-        event.preventDefault();
-        const content = draft.trim();
-        if (!content) return;
-        setDraft("");
-        void api<Room>(`/api/rooms/${open.id}/messages`, { method: "POST", json: { content } }).then((next) => {
-          queryClient.setQueryData(["room", open.id], next);
-          void api(`/api/rooms/${open.id}/read`, { method: "POST" });
-        }).catch((reason: Error) => setError(reason.message));
-      }}>
-        <p className="mb-2 text-xs text-muted">{contextNote(open.context, "room")}</p>
-        <Textarea value={draft} rows={3} placeholder="Message the room. Enter to send. Each bot replies in turn." onChange={(event) => setDraft(event.target.value)} />
-        <Button className="mt-2" type="submit">Send</Button>
-      </form>
-    </section>
+      {adding ? (
+        <form className="space-y-2" onSubmit={(event) => {
+          event.preventDefault();
+          const name = String(new FormData(event.currentTarget).get("name") || "");
+          void api<Room>("/api/rooms", { method: "POST", json: { name } }).then((created) => {
+            setAdding(false);
+            openRoom(created.id);
+            return queryClient.invalidateQueries({ queryKey: ["rooms"] });
+          }).catch((reason: Error) => setError(reason.message));
+        }}>
+          <Input name="name" required maxLength={80} placeholder="Desk" />
+          <p className="text-xs text-muted">A room has its own transcript. The bots you add keep their private chats.</p>
+          {error ? <p className="text-sm text-danger">{error}</p> : null}
+          <Button type="submit" size="sm">Create room</Button>
+        </form>
+      ) : null}
+      {(rooms.data || []).length === 0 ? <p className="text-sm text-muted">No rooms yet. Create one, then add two or more bots.</p> : (
+        <ul className="space-y-2">{(rooms.data || []).map((item) => (
+          <li key={item.id} className="flex items-center justify-between gap-2 rounded-md border border-border px-3 py-2">
+            <button type="button" className="min-w-0 flex-1 truncate text-left text-sm hover:underline" onClick={() => openRoom(item.id)}>{item.name}</button>
+            <span className="flex shrink-0 items-center gap-1">
+              <Button variant="ghost" size="sm" onClick={() => openRoom(item.id)}>Open</Button>
+              <Button variant="ghost" size="sm" onClick={() => askConfirm({
+                title: `Delete ${item.name}?`,
+                copy: "This deletes the room and its messages. The bots and their private chats stay.",
+                submit: "Delete room",
+                run: async () => {
+                  await api(`/api/rooms/${item.id}`, { method: "DELETE" });
+                  await queryClient.invalidateQueries({ queryKey: ["rooms"] });
+                },
+              })}>Delete</Button>
+            </span>
+          </li>
+        ))}</ul>
+      )}
+      <p className="text-xs text-muted">Opening a room shows its live chat. Add or remove bots inside the room.</p>
+    </Page>
   );
 }
 

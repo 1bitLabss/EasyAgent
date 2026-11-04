@@ -2,7 +2,8 @@ import { QueryClientProvider } from "@tanstack/react-query";
 import { cleanup, fireEvent, render, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { api, queryClient } from "@/api";
-import { ConnectionsScreen } from "./Places";
+import { useApp } from "@/store";
+import { ConnectionsScreen, RoomsScreen } from "./Places";
 
 vi.mock("@/api", async () => {
   const { QueryClient } = await import("@tanstack/react-query");
@@ -15,6 +16,9 @@ vi.mock("@/api", async () => {
       }
       if (path === "/api/endpoints/e1/test" && options?.method === "POST") {
         return { ok: true, detail: "The server answered." };
+      }
+      if (path === "/api/rooms") {
+        return [{ id: "r1", name: "Desk" }];
       }
       return {};
     }),
@@ -74,5 +78,24 @@ describe("Connections list", () => {
     await findByText("Home server");
     fireEvent.click(getByText("Edit"));
     await findByText("This model can see pictures");
+  });
+});
+
+describe("Rooms list", () => {
+  afterEach(() => {
+    useApp.setState({ roomId: null, screen: "chat" });
+  });
+
+  it("opens a room in the live room pane instead of a blocking page", async () => {
+    useApp.setState({ roomId: null, screen: "rooms" });
+    const { findByText, getByText } = render(
+      <QueryClientProvider client={queryClient}>
+        <RoomsScreen />
+      </QueryClientProvider>,
+    );
+    await findByText("Desk");
+    fireEvent.click(getByText("Open"));
+    expect(useApp.getState().screen).toBe("room");
+    expect(useApp.getState().roomId).toBe("r1");
   });
 });

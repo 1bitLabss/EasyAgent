@@ -1,9 +1,9 @@
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { api } from "@/api";
 import { ApprovalCard } from "@/components/ApprovalCard";
 import { useApp } from "@/store";
-import type { ChatMessage, Room } from "@/types";
+import type { Bot, ChatMessage, Room } from "@/types";
 
 type Member = { id: string; name: string; missing?: boolean; face_color?: string };
 type RoomView = Room & { members?: Member[]; pending_approvals?: { id: string; bot_id: string; why?: string; detail?: string }[] };
@@ -18,12 +18,30 @@ export function RoomPane() {
     enabled: Boolean(roomId),
     queryFn: () => api<RoomView>(`/api/rooms/${roomId}`),
   });
+  const bots = useQuery({ queryKey: ["bots"], queryFn: () => api<Bot[]>("/api/bots") });
   const [draft, setDraft] = useState("");
   const [pending, setPending] = useState("");
   const [statuses, setStatuses] = useState<Status[]>([]);
   const [approvals, setApprovals] = useState<{ bot_id: string; name: string }[]>([]);
   const [error, setError] = useState("");
   const data = room.data;
+  const messageCount = (data?.messages || []).length;
+
+  // Viewing the room marks it read, the same way opening a chat does.
+  const readSent = useRef("");
+  useEffect(() => {
+    if (!roomId || !messageCount) return;
+    const token = `${roomId}:${messageCount}`;
+    if (readSent.current === token) return;
+    const timer = window.setTimeout(() => {
+      if (readSent.current === token) return;
+      readSent.current = token;
+      void api(`/api/rooms/${roomId}/read`, { method: "POST", json: { through: messageCount } })
+        .then(() => queryClient.invalidateQueries({ queryKey: ["unread"] }))
+        .catch(() => undefined);
+    }, 500);
+    return () => window.clearTimeout(timer);
+  }, [roomId, messageCount, queryClient]);
 
   function rememberUser(message: ChatMessage) {
     if (!roomId) return;
@@ -64,9 +82,13 @@ export function RoomPane() {
             buffer = buffer.slice(split + 2);
             const payload = raw.split("\n").filter((line) => line.startsWith("data:")).map((line) => line.slice(5).trim()).join("\n");
             if (payload) {
-              const event = JSON.parse(payload) as { type?: string; room?: RoomView; bot_id?: string; name?: string; state?: string; label?: string; message?: ChatMessage };
+              const event = JSON.parse(payload) as { type?: string; room?: RoomView; bot_id?: string; name?: string; state?: string; label?: string; message?: ChatMessage; statuses?: Record<string, { name?: string; state?: string; label?: string }> };
               if (event.type === "user" && event.message) rememberUser(event.message);
               if (event.type === "approval" && event.bot_id) rememberApproval(event.bot_id, event.name || "");
+              if (event.type === "sync" && event.statuses) {
+                // A mid-turn reload: the server replays who is working right now.
+                setStatuses(Object.entries(event.statuses).map(([bot_id, item]) => ({ bot_id, name: item?.name || "", state: item?.state || "", label: item?.label || "" })));
+              }
               if (event.type === "bot_status" && event.bot_id) {
                 setStatuses((current) => {
                   const next = current.filter((item) => item.bot_id !== event.bot_id);
@@ -75,7 +97,7 @@ export function RoomPane() {
                 });
               }
               if (event.room) queryClient.setQueryData(["room", roomId], event.room);
-              if (event.type === "done") setPending("");
+              if (event.type === "done") { setPending(""); setStatuses([]); }
             }
             split = buffer.indexOf("\n\n");
           }
@@ -157,18 +179,39 @@ export function RoomPane() {
   const messages = data.messages || [];
   return (
     <section className="flex h-full min-h-0 flex-1 flex-col" data-testid="room-window">
-      <header className="flex items-center gap-2 border-b border-border px-4 py-3">
+      <header className="flex flex-wrap items-center gap-2 border-b border-border px-4 py-3">
         <h1 className="text-base font-semibold">{data.name}</h1>
-        <div className="flex flex-wrap gap-1">
+        <div className="flex flex-wrap items-center gap-1">
           {(data.members || []).map((member) => {
             const live = statuses.find((item) => item.bot_id === member.id);
             return (
-              <span key={member.id} data-testid="room-member-chip" data-state={live?.state || "idle"} className="rounded-full border border-border px-2 py-0.5 text-xs">
-                {member.name}
+              <span key={member.id} className="flex items-center gap-0.5">
+                <span data-testid="room-member-chip" data-state={live?.state || "idle"} className="rounded-full border border-border px-2 py-0.5 text-xs">
+                  {member.name}
+                </span>
+                <button
+                  type="button"
+                  className="px-0.5 text-xs text-muted underline"
+                  onClick={() => void api(`/api/rooms/${roomId}/bots/${member.id}`, { method: "DELETE" }).then(() => queryClient.invalidateQueries({ queryKey: ["room", roomId] }))}
+                >Remove</button>
               </span>
             );
           })}
         </div>
+        <form className="flex items-center gap-1" onSubmit={(event) => {
+          event.preventDefault();
+          const botId = String(new FormData(event.currentTarget).get("bot_id") || "");
+          if (!botId) return;
+          void api(`/api/rooms/${roomId}/bots`, { method: "POST", json: { bot_id: botId } })
+            .then(() => queryClient.invalidateQueries({ queryKey: ["room", roomId] }))
+            .catch((reason: Error) => setError(reason.message));
+        }}>
+          <select name="bot_id" defaultValue="" className="h-7 rounded-md border border-border bg-card px-1 text-xs">
+            <option value="">Add a bot</option>
+            {(bots.data || []).filter((bot) => !(data.members || []).some((member) => member.id === bot.id)).map((bot) => <option key={bot.id} value={bot.id}>{bot.name}</option>)}
+          </select>
+          <button type="submit" className="text-xs text-muted underline">Add</button>
+        </form>
         <button type="button" className="ml-auto text-sm text-muted" onClick={() => setScreen("chat")}>Close</button>
       </header>
       <div className="min-h-0 flex-1 space-y-3 overflow-y-auto px-4 py-4">

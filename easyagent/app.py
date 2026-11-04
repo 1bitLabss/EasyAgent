@@ -2243,6 +2243,14 @@ def create_app(data_dir: str | Path | None = None) -> FastAPI:
             raise HTTPException(500, "Removing a bot from a room changed that bot.")
         return _public_room(store, room)
 
+    @app.delete("/api/rooms/{room_id}")
+    def delete_room(room_id: str):
+        bots_before = _snapshot_bots(store)
+        room = store.delete_room(room_id)
+        if _snapshot_bots(store) != bots_before:
+            raise HTTPException(500, "Deleting a room changed a bot.")
+        return {"deleted": room["id"]}
+
     @app.post("/api/rooms/{room_id}/messages")
     async def post_room_message(room_id: str, body: MessageIn, request: Request):
         content = (body.content or "").strip()
@@ -4027,8 +4035,11 @@ def _room_targets(store: Store, room_id: str, content: str) -> list[str]:
         except StoreError:
             continue
         members.append(bot)
-    lowered = content.lower()
-    named = [bot["id"] for bot in members if f"@{bot.get('name', '')}".lower() in lowered]
+    named = []
+    for bot in members:
+        name = re.escape(str(bot.get("name", "")))
+        if re.search(rf"@{name}(?!\w)", content, re.IGNORECASE):
+            named.append(bot["id"])
     if named:
         return named
     return [bot["id"] for bot in members]

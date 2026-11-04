@@ -135,6 +135,7 @@ export function ConnectionsScreen() {
 export function RoomsScreen() {
   const roomId = useApp((state) => state.roomId);
   const setRoom = useApp((state) => state.setRoom);
+  const askConfirm = useApp((state) => state.askConfirm);
   const rooms = useQuery({ queryKey: ["rooms"], queryFn: () => api<Room[]>("/api/rooms") });
   const bots = useQuery({ queryKey: ["bots"], queryFn: () => api<Bot[]>("/api/bots") });
   const room = useQuery({
@@ -169,7 +170,23 @@ export function RoomsScreen() {
           </form>
         ) : null}
         {(rooms.data || []).length === 0 ? <p className="text-sm text-muted">No rooms yet. Create one, then add two or more bots.</p> : (
-          <ul className="space-y-2">{(rooms.data || []).map((item) => <li key={item.id}><button type="button" className="flex w-full items-center justify-between rounded-md border border-border px-3 py-2 text-left text-sm hover:bg-black/5 dark:hover:bg-white/10" onClick={() => setRoom(item.id)}>{item.name}<span className="text-xs text-muted">Open</span></button></li>)}</ul>
+          <ul className="space-y-2">{(rooms.data || []).map((item) => (
+            <li key={item.id} className="flex items-center justify-between gap-2 rounded-md border border-border px-3 py-2">
+              <button type="button" className="min-w-0 flex-1 truncate text-left text-sm hover:underline" onClick={() => setRoom(item.id)}>{item.name}</button>
+              <span className="flex shrink-0 items-center gap-1">
+                <Button variant="ghost" size="sm" onClick={() => setRoom(item.id)}>Open</Button>
+                <Button variant="ghost" size="sm" onClick={() => askConfirm({
+                  title: `Delete ${item.name}?`,
+                  copy: "This deletes the room and its messages. The bots and their private chats stay.",
+                  submit: "Delete room",
+                  run: async () => {
+                    await api(`/api/rooms/${item.id}`, { method: "DELETE" });
+                    await queryClient.invalidateQueries({ queryKey: ["rooms"] });
+                  },
+                })}>Delete</Button>
+              </span>
+            </li>
+          ))}</ul>
         )}
       </Page>
     );

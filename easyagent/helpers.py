@@ -257,11 +257,21 @@ async def _run_one(store: Store, bot: dict, endpoint: dict, spec: HelperSpec, *,
     try:
         while steps < spec.steps and time.monotonic() < deadline:
             turn_mod.raise_if_cancelled()
+            remaining = max(0.001, deadline - time.monotonic())
             try:
-                reply = await _complete(endpoint, bot, messages, yield_to_chats=yield_to_chats)
+                # The seconds budget must cut off a hung model call, not just be
+                # checked between steps. The hard cap is the wall-clock deadline.
+                async with asyncio.timeout(remaining):
+                    reply = await _complete(
+                        endpoint, bot, messages, yield_to_chats=yield_to_chats, timeout=remaining
+                    )
             except llm.YieldLater:
                 await asyncio.sleep(0.05)
                 continue
+            except TimeoutError:
+                status = "error"
+                result = "Stopped. The helper ran out of time."
+                break
             turn_mod.raise_if_cancelled()
             steps += 1
             nested = bool(FENCE_RE.search(reply or ""))
@@ -330,7 +340,9 @@ def _short(details: list[str]) -> str:
     return text
 
 
-async def _complete(endpoint: dict, bot: dict, messages: list[dict], *, yield_to_chats: bool) -> str:
+async def _complete(
+    endpoint: dict, bot: dict, messages: list[dict], *, yield_to_chats: bool, timeout: float = 120.0
+) -> str:
     model = (bot.get("model") or "").strip() or (endpoint.get("model") or "").strip() or None
     return await llm.complete(
         base_url=endpoint["base_url"],
@@ -339,4 +351,5 @@ async def _complete(endpoint: dict, bot: dict, messages: list[dict], *, yield_to
         messages=messages,
         tools=True,
         yield_to_chats=yield_to_chats,
+        timeout=timeout,
     )

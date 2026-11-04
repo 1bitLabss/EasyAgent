@@ -37,18 +37,29 @@ _KIND = {
 }
 
 _LOCK = threading.Lock()
-_INFLIGHT = 0
+# Children in flight, counted per chat (or per bot when the turn has no chat id).
+# A process-global counter let one chat's children starve every other chat.
+_INFLIGHT: dict[str, int] = {}
 
 
 def reset_for_tests() -> None:
-    global _INFLIGHT
     with _LOCK:
-        _INFLIGHT = 0
+        _INFLIGHT.clear()
 
 
-def inflight() -> int:
+def inflight(scope: str | None = None) -> int:
+    """Children running now. With a scope, only that chat's; without, all chats."""
     with _LOCK:
-        return _INFLIGHT
+        if scope is None:
+            return sum(_INFLIGHT.values())
+        return _INFLIGHT.get(scope, 0)
+
+
+def _scope(bot_id: str | None) -> str:
+    """The counter key: the parent chat when the turn has one, else the bot."""
+    slot = turn_mod.current_slot()
+    chat = str(getattr(slot, "chat_id", "") or "") if slot is not None else ""
+    return chat or str(bot_id or "")
 
 
 def isolated_messages(task: str, kinds: frozenset[str], names: list[str] | None = None) -> list[dict]:
@@ -95,20 +106,22 @@ def allowed_kinds(requested: list[str] | None, *, parent_kinds: frozenset[str] |
     return frozenset(_KIND[name] for name in allowed_names(requested, parent_kinds=parent_kinds))
 
 
-def _acquire() -> None:
-    global _INFLIGHT
+def _acquire(scope: str = "") -> None:
     from easyagent.tools import ToolError
 
     with _LOCK:
-        if _INFLIGHT >= MAX_CONCURRENT:
+        if _INFLIGHT.get(scope, 0) >= MAX_CONCURRENT:
             raise ToolError("Too many child agents are already running. It was not run.")
-        _INFLIGHT += 1
+        _INFLIGHT[scope] = _INFLIGHT.get(scope, 0) + 1
 
 
-def _release() -> None:
-    global _INFLIGHT
+def _release(scope: str = "") -> None:
     with _LOCK:
-        _INFLIGHT = max(0, _INFLIGHT - 1)
+        left = _INFLIGHT.get(scope, 0) - 1
+        if left > 0:
+            _INFLIGHT[scope] = left
+        else:
+            _INFLIGHT.pop(scope, None)
 
 
 def register_child(task: asyncio.Task) -> None:
@@ -161,26 +174,28 @@ async def run_delegate(store, bot_id: str | None, request) -> str:
     kinds = frozenset(_KIND[name] for name in names)
     if requested and not kinds:
         raise ToolError("That tool list is empty after the parent's limits. The child was not started.")
-    _acquire()
-    spec = HelperSpec(
-        name="Child", task=task[:4000], tools=kinds, steps=4, seconds=60, listed=tuple(names)
-    )
-    # The child context is built here so a test can see it is not the parent transcript.
-    _ = isolated_messages(spec.task, kinds, names)
-
-    async def _go() -> dict:
-        rows = await helpers.run_helpers(store, bot_id, [spec])
-        return rows[0] if rows else {"task": task, "result": "(empty reply)", "status": "error"}
-
-    child = asyncio.create_task(_go())
-    register_child(child)
+    scope = _scope(bot_id)
+    _acquire(scope)
     try:
+        spec = HelperSpec(
+            name="Child", task=task[:4000], tools=kinds, steps=4, seconds=60, listed=tuple(names)
+        )
+        # The child context is built here so a test can see it is not the parent transcript.
+        _ = isolated_messages(spec.task, kinds, names)
+
+        async def _go() -> dict:
+            rows = await helpers.run_helpers(store, bot_id, [spec])
+            return rows[0] if rows else {"task": task, "result": "(empty reply)", "status": "error"}
+
+        child = asyncio.create_task(_go())
+        register_child(child)
         try:
             row = await child
         except asyncio.CancelledError as exc:
             raise ToolError("Stopped. The child was cancelled with the parent.") from exc
     finally:
-        _release()
+        # The slot is released even if setup between acquire and the child task fails.
+        _release(scope)
     text = summary_for(str(row.get("task") or task), str(row.get("result") or ""))
     if row.get("status") == "error" and not str(row.get("result") or "").strip():
         raise ToolError(text or "The child could not finish.")

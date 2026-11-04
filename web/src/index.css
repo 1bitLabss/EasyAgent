@@ -211,6 +211,21 @@ body {
   outline: none;
 }
 
+@keyframes message-jump-flash {
+  from {
+    outline: 2px solid hsl(var(--foreground) / 0.5);
+    outline-offset: 4px;
+  }
+  to {
+    outline: 2px solid transparent;
+    outline-offset: 4px;
+  }
+}
+
+.message-row.message-jump {
+  animation: message-jump-flash 2s ease-out;
+}
+
 .pause-mark {
   position: absolute;
   top: calc(100% + 1px);

@@ -448,6 +448,8 @@ const Transcript = memo(function Transcript({
 export function ChatPane() {
   const botId = useApp((state) => state.botId);
   const chatId = useApp((state) => state.chatId);
+  const jumpTo = useApp((state) => state.jumpTo);
+  const setJumpTo = useApp((state) => state.setJumpTo);
   const selectChat = useApp((state) => state.selectChat);
   const setScreen = useApp((state) => state.setScreen);
   const bots = useQuery({ queryKey: ["bots"], queryFn: () => api<Bot[]>("/api/bots") });
@@ -670,6 +672,22 @@ export function ChatPane() {
     if (!el || !chat.data) return;
     if ((chat.data.window_start ?? 0) > 0 && el.scrollHeight <= el.clientHeight + 8) void loadOlder();
   }, [chat.data?.window_start, messageCount]);
+
+  useEffect(() => {
+    if (!jumpTo || !chat.data) return;
+    const target = scrollRef.current?.querySelector(`[data-message-id=${JSON.stringify(jumpTo)}]`);
+    if (target) {
+      userMoved.current = true;
+      setFollowing(false);
+      target.scrollIntoView({ block: "center" });
+      target.classList.add("message-jump");
+      window.setTimeout(() => target.classList.remove("message-jump"), 2000);
+      setJumpTo("");
+      return;
+    }
+    if ((chat.data.window_start ?? 0) > 0) void loadOlder();
+    else setJumpTo("");
+  }, [jumpTo, chat.data, messageCount]);
 
   useEffect(() => {
     setMenu(false);

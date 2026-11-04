@@ -9,6 +9,7 @@ export type Screen =
   | "computers"
   | "direction"
   | "about"
+  | "search"
   | "room";
 
 export type ConfirmRequest = {
@@ -33,6 +34,7 @@ type AppState = {
   tokenNeeded: boolean;
   tick: number;
   focus: string;
+  jumpTo: string;
   adding: boolean;
   confirm: ConfirmRequest | null;
   setScreen: (screen: Screen) => void;
@@ -55,6 +57,7 @@ type AppState = {
   setTokenNeeded: (needed: boolean) => void;
   bump: () => void;
   setFocus: (focus: string) => void;
+  setJumpTo: (messageId: string) => void;
   askConfirm: (confirm: ConfirmRequest) => void;
   closeConfirm: () => void;
 };
@@ -97,6 +100,7 @@ export const useApp = create<AppState>((set) => ({
   tokenNeeded: false,
   tick: 0,
   focus: "",
+  jumpTo: "",
   adding: false,
   confirm: null,
   setScreen: (screen) => set({ screen, railOpen: false, adding: false }),
@@ -134,6 +138,7 @@ export const useApp = create<AppState>((set) => ({
   setTokenNeeded: (tokenNeeded) => set({ tokenNeeded }),
   bump: () => set((state) => ({ tick: state.tick + 1 })),
   setFocus: (focus) => set({ focus, screen: "settings" }),
+  setJumpTo: (jumpTo) => set({ jumpTo }),
   askConfirm: (confirm) => set({ confirm }),
   closeConfirm: () => set({ confirm: null }),
 }));

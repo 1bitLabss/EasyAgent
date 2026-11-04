@@ -22,6 +22,7 @@ import {
   TokenGate,
 } from "@/screens/Places";
 import { SettingsScreen } from "@/screens/Settings";
+import { SearchScreen } from "@/screens/Search";
 import { savedBotId, useApp } from "@/store";
 import type { Bot } from "@/types";
 
@@ -79,6 +80,7 @@ export function App() {
     : screen === "computers" ? <ComputersScreen />
     : screen === "direction" ? <DirectionScreen />
     : screen === "about" ? <AboutScreen />
+    : screen === "search" ? <SearchScreen />
     : <ChatPane />;
 
   const sheetTitle = screen === "settings" ? "Settings"
@@ -88,6 +90,7 @@ export function App() {
     : screen === "computers" ? "Computers"
     : screen === "direction" ? "Direction"
     : screen === "about" ? "About"
+    : screen === "search" ? "Search"
     : "";
 
   return (

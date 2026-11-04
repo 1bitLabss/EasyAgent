@@ -132,6 +132,19 @@ export type Chat = ChatSummary & {
   yolo?: Yolo;
 };
 
+export type ChatSearchHit = {
+  bot_id: string;
+  bot_name: string;
+  chat_id: string;
+  chat_title: string;
+  message_id: string;
+  index: number;
+  role: string;
+  text: string;
+  created_at?: string;
+  score?: number;
+};
+
 export type Yolo = {
   on: boolean;
   until?: string | null;

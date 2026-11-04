@@ -236,11 +236,10 @@ def test_attached_file_is_shown_to_the_bot_and_a_handed_file_stays(tmp_path, mon
     )
     assert shot.status_code == 200, shot.text
     image = script.seen[1][-1]["content"]
-    assert isinstance(image, list)
-    assert any(
-        part.get("type") == "image_url" and str(part.get("image_url", {}).get("url", "")).startswith("data:image/png;base64,")
-        for part in image
-    )
+    # 0.3.50: pictures ride as image_url parts only when the connection says the model can see them.
+    assert isinstance(image, str)
+    assert "shot.png" in image
+    assert "cannot see pictures" in image
     reply = shot.json()["chat"]["messages"][-1]
     assert reply["content"] == "Here is the copy."
     assert reply["attachment"]["name"] == "back.txt"

@@ -159,6 +159,7 @@ def public_endpoint(endpoint: dict) -> dict:
         "first_token_seconds": _public_first_token_seconds(endpoint),
         "tool_temperature": _public_tool_temperature(endpoint),
         "n_ctx": clean_tokens(endpoint.get("n_ctx")),
+        "vision": bool(endpoint.get("vision")),
         "created_at": endpoint.get("created_at"),
         "fallback_ids": [str(item) for item in (endpoint.get("fallback_ids") or [])],
     }
@@ -417,6 +418,7 @@ class EndpointIn(BaseModel):
     tool_temperature: float | None = None
     n_ctx: int | None = None
     fallback_ids: list[str] | None = None
+    vision: bool | None = None
 
 
 class EndpointPatch(BaseModel):
@@ -433,6 +435,7 @@ class EndpointPatch(BaseModel):
     tool_temperature: float | None = None
     n_ctx: int | None = None
     fallback_ids: list[str] | None = None
+    vision: bool | None = None
 
 
 class ConfirmIn(BaseModel):
@@ -989,6 +992,7 @@ def create_app(data_dir: str | Path | None = None) -> FastAPI:
             first_token_seconds=clean_first_token_seconds(body.first_token_seconds) if "first_token_seconds" in body.model_fields_set else None,
             tool_temperature=clean_tool_temperature(body.tool_temperature) if "tool_temperature" in body.model_fields_set else None,
             fallback_ids=body.fallback_ids if "fallback_ids" in body.model_fields_set else None,
+            vision=body.vision if "vision" in body.model_fields_set else None,
         )
         return public_endpoint(record)
 
@@ -1019,6 +1023,8 @@ def create_app(data_dir: str | Path | None = None) -> FastAPI:
             tool_temperature_set="tool_temperature" in fields,
             fallback_ids=body.fallback_ids if "fallback_ids" in fields else None,
             fallback_ids_set="fallback_ids" in fields,
+            vision=bool(body.vision),
+            vision_set="vision" in fields,
         )
         if _snapshot_bots(store) != bots_before:
             raise HTTPException(500, "Saving a connection changed a bot or a chat.")
@@ -1754,7 +1760,9 @@ def create_app(data_dir: str | Path | None = None) -> FastAPI:
         name = _safe_filename(file.filename or "file")
         media = _media_type(file.content_type or "", data)
         try:
-            meta = store.save_chat_file(bot_id, chat_id, name=name, media_type=media, data=data)
+            meta = store.save_chat_file(
+                bot_id, chat_id, name=name, media_type=media, data=data, text=_attachment_text(name, media, data)
+            )
         except StoreError as exc:
             raise HTTPException(exc.status, exc.message) from exc
         return {"id": meta["id"], "name": meta["name"], "media_type": meta["media_type"]}
@@ -2726,10 +2734,54 @@ def _fact(store: Store, text: str) -> str:
     return redacted
 
 
+_TEXT_ATTACHMENT_MEDIA = (
+    "text/",
+    "application/json",
+    "application/xml",
+    "application/x-sh",
+    "application/x-yaml",
+    "application/yaml",
+    "application/csv",
+    "application/sql",
+    "application/javascript",
+    "application/typescript",
+)
+_TEXT_ATTACHMENT_SUFFIXES = (
+    ".txt", ".md", ".py", ".js", ".ts", ".tsx", ".jsx", ".json", ".csv", ".tsv", ".yaml", ".yml",
+    ".toml", ".ini", ".cfg", ".sh", ".bash", ".ps1", ".rs", ".go", ".c", ".h", ".cpp", ".java",
+    ".rb", ".php", ".html", ".css", ".sql", ".log", ".env", ".gitignore", ".dockerfile",
+)
+ATTACHMENT_TEXT_CHARS = 16_000
+
+
+def _attachment_text(name: str, media_type: str, data: bytes) -> str | None:
+    """The text a text-like file carries to the model. Binary files return None."""
+    lowered = (media_type or "").lower()
+    name_lower = (name or "").lower()
+    looks_text = lowered.startswith(_TEXT_ATTACHMENT_MEDIA) or name_lower.endswith(_TEXT_ATTACHMENT_SUFFIXES)
+    if not looks_text and b"\x00" not in (data[:2048] or b""):
+        # No declared type and no NUL in the head: treat small text-looking files as text.
+        looks_text = len(data) <= 200_000
+    if not looks_text:
+        return None
+    try:
+        text = data.decode("utf-8", errors="replace")
+    except Exception:
+        return None
+    text = text.strip()
+    if not text:
+        return None
+    if len(text) > ATTACHMENT_TEXT_CHARS:
+        text = text[:ATTACHMENT_TEXT_CHARS] + "\n… the file continues past what is shown."
+    return text
+
+
 def _attachment_for_message(store: Store, bot_id: str, chat_id: str, file_id: str | None) -> dict | None:
     if not file_id:
         return None
     meta, _data = store.read_chat_file(bot_id, chat_id, file_id)
+    # The stored chat row keeps only the reference. The extracted text lives in
+    # the file's meta so the transcript stays lean; _model_message reads it back.
     return {"id": meta["id"], "name": meta.get("name") or "file", "media_type": meta.get("media_type") or "application/octet-stream"}
 
 
@@ -2744,6 +2796,9 @@ def _public_attachment(attachment: dict | None) -> dict | None:
     excerpt = attachment.get("excerpt") or ""
     if isinstance(excerpt, str) and excerpt.strip():
         public["excerpt"] = excerpt
+    text = attachment.get("text")
+    if isinstance(text, str) and text.strip():
+        public["text"] = text
     source = attachment.get("path") or ""
     if isinstance(source, str) and source.strip():
         public["path"] = source
@@ -2762,8 +2817,13 @@ def _with_reaction(stored: dict, model: dict) -> dict:
     return {**model, "content": f"{note}\n\n{text}".strip()}
 
 
-def _model_message(store: Store, bot_id: str, chat_id: str, stored: dict, clipped: dict) -> dict:
-    """Show an attached file to the model without putting a typed path in its place."""
+def _model_message(store: Store, bot_id: str, chat_id: str, stored: dict, clipped: dict, vision: bool = False) -> dict:
+    """Show an attached file to the model without putting a typed path in its place.
+
+    New uploads carry their text on the attachment itself (see model_content).
+    Older rows predate that and are read from the store here. Images ride as
+    image_url parts only when the connection says the model can see them.
+    """
     content = clipped.get("content") or ""
     role = clipped.get("role") or "user"
     if isinstance(stored, dict) and stored.get("resume_cue") and role == "user":
@@ -2783,18 +2843,35 @@ def _model_message(store: Store, bot_id: str, chat_id: str, stored: dict, clippe
     attachment = stored.get("attachment") if isinstance(stored, dict) else None
     if not isinstance(attachment, dict) or not attachment.get("id"):
         return _with_reaction(stored, {"role": role, "content": content})
+    name = str(attachment.get("name") or "file")
+    media = str(attachment.get("media_type") or "")
+    has_text = isinstance(attachment.get("text"), str) and str(attachment.get("text")).strip()
+    if has_text:
+        # The text already rode along inside model_content. Nothing more to add.
+        return _with_reaction(stored, {"role": role, "content": content})
     try:
         meta, data = store.read_chat_file(bot_id, chat_id, attachment["id"])
     except StoreError:
         return _with_reaction(stored, {"role": role, "content": content})
-    name = meta.get("name") or "file"
-    media = meta.get("media_type") or ""
-    if media.startswith("image/") and len(data) <= 400_000:
+    name = meta.get("name") or name
+    media = meta.get("media_type") or media
+    meta_text = meta.get("text")
+    if isinstance(meta_text, str) and meta_text.strip():
+        # Extracted at upload time. Rebuild from the raw message so the
+        # "contents are not shown" placeholder from model_content drops out.
+        base = str(stored.get("content") or "").strip()
+        body = redact(store, meta_text)
+        return _with_reaction(stored, {"role": role, "content": f"{base}\n\nAttached file {name}:\n{body}".strip()})
+    if media.startswith("image/"):
+        if not vision or len(data) > 400_000:
+            note = f"[The person attached \"{name}\" ({media}). This model cannot see pictures, so the picture is not shown.]"
+            base = str(stored.get("content") or "").strip()
+            return _with_reaction(stored, {"role": role, "content": f"{base}\n\n{note}".strip()})
         encoded = base64.b64encode(data).decode("ascii")
         return _with_reaction(stored, {
             "role": role,
             "content": [
-                {"type": "text", "text": content or "Look at the attached picture."},
+                {"type": "text", "text": str(stored.get("content") or "").strip() or "Look at the attached picture."},
                 {"type": "image_url", "image_url": {"url": f"data:{media};base64,{encoded}"}},
             ],
         })
@@ -2807,11 +2884,13 @@ def _model_message(store: Store, bot_id: str, chat_id: str, stored: dict, clippe
         if len(text) > 8000:
             text = text[:7980].rstrip() + "\n[file truncated]"
         if text.strip():
+            base = str(stored.get("content") or "").strip()
             return _with_reaction(
                 stored,
-                {"role": role, "content": f"{content}\n\nAttached file {name}:\n{text}".strip()},
+                {"role": role, "content": f"{base}\n\nAttached file {name}:\n{text}".strip()},
             )
-    return _with_reaction(stored, {"role": role, "content": f"{content}\n\nAttached file {name}.".strip()})
+    # Nothing more to show: model_content already left the "not shown" note in place.
+    return _with_reaction(stored, {"role": role, "content": content})
 
 
 def _snapshot_rooms(store: Store) -> dict[str, bytes]:
@@ -3532,7 +3611,7 @@ def _turn_messages(store: Store, bot_id: str, chat: dict) -> tuple[dict, list[di
 
     desktop = attach_desktop(bot)
     note_system_tokens(estimate_tokens(len(system)))
-    pairs = _model_pairs(store, bot_id, chat, view)
+    pairs = _model_pairs(store, bot_id, chat, view, vision=bool(endpoint.get("vision") if isinstance(endpoint, dict) else False))
     slot = turn_mod.current_slot()
     if slot is None or not slot.resend_id:
         named = turn_mod.slot_for(store, chat.get("id") or "")
@@ -3573,7 +3652,7 @@ def _insert_pins(messages: list[dict], pins: list[dict]) -> list[dict]:
     return [*messages[:index], *pins, *messages[index:]]
 
 
-def _model_pairs(store: Store, bot_id: str, chat: dict, view) -> list[tuple]:
+def _model_pairs(store: Store, bot_id: str, chat: dict, view, vision: bool = False) -> list[tuple]:
     """Pair each tail row with the stored message it came from. Harness rows are already gone.
 
     Pin rows are not stored messages. They are inserted later, in front of the
@@ -3594,7 +3673,7 @@ def _model_pairs(store: Store, bot_id: str, chat: dict, view) -> list[tuple]:
     if len(stored) != len(body):
         return [(None, item) for item in body]
     return [
-        (row, _model_message(store, bot_id, chat["id"], row, item))
+        (row, _model_message(store, bot_id, chat["id"], row, item, vision=vision))
         for row, item in zip(stored, body)
     ]
 

@@ -8,6 +8,7 @@ export type Endpoint = {
   max_tokens?: number;
   stall_seconds?: number;
   first_token_seconds?: number;
+  vision?: boolean;
 };
 
 export type Bot = {

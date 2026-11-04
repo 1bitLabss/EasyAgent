@@ -280,11 +280,23 @@ def model_content(message: dict) -> str:
 
     A stored error line (for example a connection error that names an old
     server address) is not replayed. The model gets a short neutral note.
-    Harness rows are omitted before this runs.
+    Harness rows are omitted before this runs. An attached file's text rides
+    along so the model sees what the person attached.
     """
     if message.get("error"):
         return ERROR_PLACEHOLDER
-    return message.get("content") or ""
+    content = message.get("content") or ""
+    attachment = message.get("attachment")
+    if isinstance(attachment, dict):
+        name = str(attachment.get("name") or "file")
+        text = attachment.get("text")
+        if isinstance(text, str) and text.strip():
+            content = f"{content}\n\nAttached file {name}:\n{text}".strip()
+        else:
+            media = str(attachment.get("media_type") or "file")
+            note = f"[The person attached \"{name}\" ({media}). Its contents are not shown here.]"
+            content = f"{content}\n\n{note}".strip()
+    return content
 
 
 def _payload_len(content: str, limit: int | None = None) -> int:

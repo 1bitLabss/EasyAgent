@@ -64,4 +64,15 @@ describe("Connections list", () => {
     await waitFor(() => expect(mocked.mock.calls.some(([path, options]) => path === "/api/endpoints/e1/test" && options?.method === "POST")).toBe(true));
     await findByText("The server answered.");
   });
+
+  it("offers a vision switch on the connection form", async () => {
+    const { findByText, getByText } = render(
+      <QueryClientProvider client={queryClient}>
+        <ConnectionsScreen />
+      </QueryClientProvider>,
+    );
+    await findByText("Home server");
+    fireEvent.click(getByText("Edit"));
+    await findByText("This model can see pictures");
+  });
 });

@@ -51,6 +51,7 @@ export function ConnectionsScreen() {
             max_tokens: Number(data.get("max_tokens") || 4096),
             stall_seconds: Number(data.get("stall_seconds") || 45),
             first_token_seconds: Number(data.get("first_token_seconds") || 120),
+            vision: data.get("vision") === "on",
           };
           const request = editing
             ? api(`/api/endpoints/${editing.id}`, { method: "PATCH", json: body })
@@ -68,6 +69,10 @@ export function ConnectionsScreen() {
           {editing?.has_api_key ? <label className="flex items-center gap-2 text-sm"><input name="clear_api_key" type="checkbox" /> Clear the saved key</label> : null}
           <label className="block text-sm">Model name <span className="text-muted">optional</span>
             <Input name="model" maxLength={120} defaultValue={editing?.model || ""} className="mt-1" />
+          </label>
+          <label className="flex items-center gap-2 text-sm">
+            <input name="vision" type="checkbox" defaultChecked={Boolean(editing?.vision)} />
+            This model can see pictures <span className="text-muted">attached images are shown to it</span>
           </label>
           <label className="block text-sm">Requests at a time <span className="text-muted">1–32. Local servers usually handle 1. Raise it if yours runs several.</span>
             <Input name="max_parallel" type="number" min={1} max={32} required defaultValue={editing?.max_parallel || 1} className="mt-1" />

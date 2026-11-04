@@ -617,6 +617,7 @@ class Store:
         first_token_seconds: int | None = None,
         tool_temperature: float | None = None,
         fallback_ids: list | None = None,
+        vision: bool | None = None,
     ) -> dict:
         record = {
             "id": self._parse_id(endpoint_id) if endpoint_id else new_id(),
@@ -628,6 +629,8 @@ class Store:
             "max_parallel": clamp_parallel(max_parallel),
             "created_at": now_iso(),
         }
+        if vision is not None:
+            record["vision"] = bool(vision)
         if n_ctx is not None:
             record["n_ctx"] = int(n_ctx)
         if max_tokens is not None:
@@ -695,6 +698,8 @@ class Store:
         tool_temperature_set: bool = False,
         fallback_ids: list | None = None,
         fallback_ids_set: bool = False,
+        vision: bool | None = None,
+        vision_set: bool = False,
     ) -> dict:
         """Change one saved connection. Bot directories and chats are not opened."""
         endpoint_id = self._parse_id(endpoint_id)
@@ -749,6 +754,11 @@ class Store:
                     match["fallback_ids"] = cleaned
                 else:
                     match.pop("fallback_ids", None)
+            if vision_set:
+                if vision:
+                    match["vision"] = True
+                else:
+                    match.pop("vision", None)
             match.pop("detected_n_ctx", None)
             atomic_write_json(self.endpoints_path, endpoints)
         return self._hydrate_endpoint(match)
@@ -2337,6 +2347,7 @@ class Store:
         media_type: str,
         data: bytes,
         source: str | None = None,
+        text: str | None = None,
     ) -> dict:
         if not data:
             raise StoreError("That file was empty. It was not kept.", 400)
@@ -2348,6 +2359,8 @@ class Store:
         meta = {"id": file_id, "name": name, "media_type": media_type, "size": len(data)}
         if source:
             meta["source"] = source
+        if text:
+            meta["text"] = text
         try:
             _io_path(directory).mkdir(parents=True, exist_ok=True)
             _io_path(target).write_bytes(data)

@@ -1039,10 +1039,23 @@ def _collect_calls(bucket: dict[int, dict], choice: dict) -> None:
     for call in source:
         if not isinstance(call, dict):
             continue
+        raw_index = call.get("index")
         try:
-            index = int(call.get("index") or 0)
+            index = int(raw_index or 0)
         except (TypeError, ValueError):
             index = 0
+        if raw_index is None and bucket:
+            # Older Ollama leaves index off every delta. A fresh id on top of
+            # a slot that already has a name is the next call, not a piece of
+            # the last one, so open a new slot instead of gluing the names.
+            # Anything else without an index continues the last open slot.
+            last_key = max(bucket)
+            last = bucket[last_key]
+            fresh = bool(call.get("id")) and str(call["id"]) != str(last.get("id") or "")
+            if fresh and last.get("name"):
+                index = last_key + 1
+            else:
+                index = last_key
         slot = bucket.setdefault(index, {"id": "", "name": "", "arguments": ""})
         if call.get("id"):
             slot["id"] = str(call["id"])

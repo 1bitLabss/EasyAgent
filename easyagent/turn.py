@@ -122,7 +122,11 @@ def cancelled() -> bool:
     if event is None or not event.is_set():
         return False
     slot = _slot.get()
-    if slot is not None and slot.cancel is event:
+    if slot is None:
+        # This context never bound a turn: the flag was inherited from an
+        # outer context (a server thread, a queued task) and is not our stop.
+        return False
+    if slot.cancel is event:
         worker = slot.worker
         if worker is None or worker.done():
             return False

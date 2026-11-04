@@ -1369,6 +1369,45 @@ def create_app(data_dir: str | Path | None = None) -> FastAPI:
         except SearchError as exc:
             raise HTTPException(400, str(exc)) from exc
 
+    @app.get("/api/chat-search")
+    def get_chat_search(q: str = "", limit: int = 30):
+        """User-facing search across every bot's saved chats. Best passages first."""
+        from easyagent.retrieve import search_passages
+
+        query = (q or "").strip()
+        if len(query) < 2:
+            return {"results": []}
+        try:
+            cap = max(1, min(100, int(limit)))
+        except (TypeError, ValueError):
+            cap = 30
+        results: list[dict] = []
+        for bot in store.list_bots():
+            bot_id = str(bot.get("id") or "")
+            if not bot_id:
+                continue
+            try:
+                passages = search_passages(store, bot_id, query, limit=cap)
+            except StoreError:
+                continue
+            for passage in passages:
+                results.append(
+                    {
+                        "bot_id": bot_id,
+                        "bot_name": str(bot.get("name") or "Bot"),
+                        "chat_id": passage.chat_id,
+                        "chat_title": passage.title,
+                        "message_id": passage.message_id,
+                        "index": passage.index,
+                        "role": passage.role,
+                        "text": passage.text,
+                        "created_at": passage.created_at,
+                        "score": round(float(passage.score), 4),
+                    }
+                )
+        results.sort(key=lambda item: item["score"], reverse=True)
+        return {"results": results[:cap]}
+
     @app.get("/api/bots/{bot_id}/browser")
     def get_browser(bot_id: str):
         store.get_bot(bot_id)

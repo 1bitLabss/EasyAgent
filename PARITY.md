@@ -71,7 +71,19 @@
 EasyAgent **already beats Hermes** on: containment, script gating, verified learning, honesty receipts, evals, rooms, remote computers, routines UX.
 Hermes leads on: **media (vision/TTS/generation), platform breadth, desktop GUI control, usage tracking, user-facing chat search, first-run experience.**
 
-## Recommended build order (each = one shippable release)
+## Build order — revised 2026-11-04 per Nathan's directive
+*Directive: real work shifts to EasyAgent, Hermes gets dropped. Coding, tool calling, scheduled jobs, and group chats must be smooth and polished first — daily-driver reliability beats consumer polish.*
+
+0. ✅ **0.3.50 — "The bot can see"** (shipped `495d1a0`): attachments reach the model; per-connection vision switch.
+0. ✅ **Audit phase**: read-only audits of routines, tool-calling/coding, and rooms against daily-driver bar (findings drive the fix queue below).
+1. **0.3.51 — "Find anything"**: user-facing chat search (`/api/chat-search` shipped; screen + jump-to-message in progress) + usage line per reply.
+2. **0.3.52 — "Work kit"**: persistent Python kernel + parallel delegation fan-out. The two things the Director workflow still needs from Hermes.
+3. **0.3.53 — pillar fixes**: whatever the audits flag as blocker/weakness in routines, tool-call parsing with local models, and room behavior. Fix queue ordered by audit severity.
+4. **0.3.54 — "Talk to me"**: TTS via edge-tts (free) + audio reply cards.
+5. **0.3.55 — "First minute"**: first-run wizard (auto-detect Ollama/llama.cpp → connection+bot → first reply <60s).
+6. **Backlog**: browser→vault fill, WhatsApp/Slack bridges, image generation (fal), computer_use, MCP export, preview pane.
+
+## Original recommended build order (superseded, kept for history)
 1. **0.3.50 — "The bot can see"**: attachments reach the model (text inline + path for read_file) + per-connection vision toggle (image_url parts). Biggest replace-Hermes unlock. ~2-3 days.
 2. **0.3.51 — "Talk to me"**: TTS via edge-tts (free, no key) + audio reply cards + STT fallback (server-side whisper.cpp option). Grokbot voice feel. ~2 days.
 3. **0.3.52 — "Find anything"**: user-facing chat search (reuse BM25 index, add search UI + jump-to-message) + token/time usage line per reply and per day. ~2 days.

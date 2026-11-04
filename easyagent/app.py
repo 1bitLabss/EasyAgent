@@ -49,6 +49,8 @@ from easyagent.turnctx import model_turn, visible_prepare
 from easyagent.schedule import (
     ScheduleError,
     active_routines,
+    cancel_schedule,
+    claim_routine_now,
     compile_routine,
     describe,
     parse_cron,
@@ -708,6 +710,16 @@ class ReadIn(BaseModel):
 
     model_config = ConfigDict(extra="ignore")
     through: int | None = None
+
+
+_run_now_tasks: set = set()
+
+
+def _watch_run_now(task) -> None:
+    """Hold run-now tasks so the loop keeps them, then retire each one."""
+    _run_now_tasks.discard(task)
+    if not task.cancelled():
+        task.exception()  # Retrieve it. A failed run already left its job row.
 
 
 @asynccontextmanager
@@ -1562,7 +1574,23 @@ def create_app(data_dir: str | Path | None = None) -> FastAPI:
         match = next((item for item in store.list_schedules(bot_id) if item.get("id") == _safe_id(schedule_id)), None)
         if match is None:
             raise HTTPException(404, "Schedule not found.")
-        return await run_routine_now(store, bot, match)
+        # Claim now, in this request, so a double-click cannot queue two runs.
+        if not claim_routine_now(bot, match):
+            raise HTTPException(409, "This routine is already running.")
+        task = asyncio.create_task(run_routine_now(store, bot, match, claimed=True))
+        _run_now_tasks.add(task)
+        task.add_done_callback(_watch_run_now)
+        return {"started": True, "schedule_id": match["id"], "name": match.get("name") or "Routine"}
+
+    @app.post("/api/bots/{bot_id}/schedules/{schedule_id}/stop")
+    def stop_schedule(bot_id: str, schedule_id: str):
+        store.get_bot(bot_id)
+        match = next((item for item in store.list_schedules(bot_id) if item.get("id") == _safe_id(schedule_id)), None)
+        if match is None:
+            raise HTTPException(404, "Schedule not found.")
+        if not cancel_schedule(str(match.get("id") or "")):
+            raise HTTPException(409, "This routine is not running.")
+        return {"stopped": match["id"]}
 
     @app.get("/api/bots/{bot_id}/routines/active")
     def routines_active(bot_id: str):

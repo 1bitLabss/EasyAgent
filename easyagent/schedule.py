@@ -161,6 +161,13 @@ async def _tracked_run(store: Store, bot: dict, schedule: dict, slot: str, momen
             "started_at": now_iso(),
             "finished_at": now_iso(),
         }
+    finally:
+        # A claim made by the tick must not outlive the run, even if _run_one
+        # failed before its own cleanup started.
+        claimed_id = str(schedule.get("id") or "")
+        if claimed_id:
+            _RUNNING.pop(claimed_id, None)
+            _CANCEL.pop(claimed_id, None)
     store.append_job(bot["id"], entry)
     _remember_run(store, bot["id"], schedule, entry, moment)
     if entry.get("status") == "error":
@@ -190,6 +197,9 @@ async def run_due_schedules(store: Store, now: datetime | None = None, *, backgr
             claimed: list[tuple[dict, str]] = []
             changed = migrate_schedules(schedules)
             for schedule in schedules:
+                if routine_running(str(schedule.get("id") or "")):
+                    # A run is already in flight or queued. The slot waits its turn.
+                    continue
                 try:
                     slot = due_slot(schedule, moment)
                 except (ScheduleError, ValueError, TypeError, ZoneInfoNotFoundError):
@@ -210,6 +220,9 @@ async def run_due_schedules(store: Store, now: datetime | None = None, *, backgr
                 copy = dict(schedule)
                 copy["_missed"] = age is not None and age > MISSED_AFTER_SECONDS
                 claimed.append((copy, slot))
+                # Claim inside the lock so the next tick cannot start a second run
+                # before this task gets its first step on the loop.
+                claim_routine_now(bot, copy)
             if changed:
                 store.save_schedules(bot["id"], schedules)
             for schedule, slot in claimed:
@@ -238,9 +251,17 @@ async def schedule_loop(store: Store, stop: asyncio.Event) -> None:
             continue
 
 
-async def run_routine_now(store: Store, bot: dict, schedule: dict) -> dict:
+async def run_routine_now(store: Store, bot: dict, schedule: dict, *, claimed: bool = False) -> dict:
     """One extra run. It does not consume the next scheduled slot."""
-    entry = await _run_one(store, bot, schedule, "now:" + now_iso())
+    schedule_id = str(schedule.get("id") or "")
+    if not claimed and not claim_routine_now(bot, schedule):
+        raise ScheduleError("This routine is already running.")
+    try:
+        entry = await _run_one(store, bot, schedule, "now:" + now_iso())
+    finally:
+        if schedule_id:
+            _RUNNING.pop(schedule_id, None)
+            _CANCEL.pop(schedule_id, None)
     store.append_job(bot["id"], entry)
     _remember_run(store, bot["id"], schedule, entry, datetime.now().astimezone())
     if entry.get("status") == "error":
@@ -288,10 +309,18 @@ async def _run_one(store: Store, bot: dict, schedule: dict, slot: str) -> dict:
     system += f"\n\n# Direction\n{direction}"
     messages = [{"role": "system", "content": system}, {"role": "user", "content": prompt or routine_name}]
     schedule_id = str(schedule.get("id") or "")
-    cancel = asyncio.Event()
+    cancel = _CANCEL.get(schedule_id) if schedule_id else None
+    if not isinstance(cancel, asyncio.Event):
+        cancel = asyncio.Event()
     if schedule_id:
         _CANCEL[schedule_id] = cancel
-        _RUNNING[schedule_id] = {"bot_id": bot.get("id"), "name": routine_name, "schedule_id": schedule_id}
+        row = _RUNNING.get(schedule_id)
+        if isinstance(row, dict):
+            # The claim row already exists (scheduler tick or run-now route).
+            row["bot_id"] = bot.get("id")
+            row["name"] = routine_name
+        else:
+            _RUNNING[schedule_id] = {"bot_id": bot.get("id"), "name": routine_name, "schedule_id": schedule_id}
     token = unattended()
     conn = gate.bind_connection(endpoint, name, store=store)
     wait_token = None
@@ -813,6 +842,31 @@ async def _post_outside(store: Store, bot: dict, schedule: dict, text: str, name
 
 def active_routines(bot_id: str) -> list[dict]:
     return [dict(item) for item in _RUNNING.values() if item.get("bot_id") == bot_id]
+
+
+def routine_running(schedule_id: str) -> bool:
+    """True while a run of this routine is claimed, queued, or in flight."""
+    return str(schedule_id or "") in _RUNNING
+
+
+def claim_routine_now(bot: dict, schedule: dict) -> bool:
+    """Mark a routine as running so a second trigger cannot start a second run.
+
+    False when a run is already in flight or queued for this routine. The claim
+    row and its cancel event live until the run's finally block clears them, so
+    a stop works even while the run waits for the connection.
+    """
+    schedule_id = str(schedule.get("id") or "")
+    if not schedule_id or schedule_id in _RUNNING:
+        return False
+    _RUNNING[schedule_id] = {
+        "bot_id": bot.get("id"),
+        "name": schedule.get("name") or "Routine",
+        "schedule_id": schedule_id,
+        "state": "queued",
+    }
+    _CANCEL[schedule_id] = asyncio.Event()
+    return True
 
 
 def cancel_schedule(schedule_id: str) -> bool:

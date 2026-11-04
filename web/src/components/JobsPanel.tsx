@@ -54,6 +54,11 @@ export function JobsPanel() {
     await queryClient.invalidateQueries({ queryKey: ["routines"] });
   }
 
+  async function stop(row: JobRow) {
+    await api(`/api/bots/${row.bot_id}/schedules/${row.id}/stop`, { method: "POST" });
+    await queryClient.invalidateQueries({ queryKey: ["routines"] });
+  }
+
   return (
     <aside className="flex h-full w-[360px] shrink-0 flex-col border-l border-border bg-background" data-testid="jobs-panel">
       <header className="flex items-center justify-between px-3 py-3">
@@ -87,7 +92,18 @@ export function JobsPanel() {
               <button type="button" data-testid="job-pause" className="text-xs underline" onClick={() => void pause(row)}>
                 {row.state === "paused" ? "Resume" : "Pause"}
               </button>
-              <button type="button" className="text-xs underline" onClick={() => void api(`/api/bots/${row.bot_id}/schedules/${row.id}/run`, { method: "POST" })}>Run now</button>
+              <button
+                type="button"
+                className="text-xs underline"
+                onClick={() => void api(`/api/bots/${row.bot_id}/schedules/${row.id}/run`, { method: "POST" }).then(() => queryClient.invalidateQueries({ queryKey: ["routines"] }))}
+              >
+                Run now
+              </button>
+              {row.state === "running" || row.state === "queued" ? (
+                <button type="button" data-testid="job-stop" className="text-xs underline" onClick={() => void stop(row)}>
+                  Stop
+                </button>
+              ) : null}
               <button
                 type="button"
                 data-testid="job-delete"

@@ -3,6 +3,7 @@
 import asyncio
 import json
 import threading
+import time
 
 import pytest
 from datetime import datetime, timezone, tzinfo
@@ -436,22 +437,29 @@ def test_run_now_posts_without_consuming_the_next_slot(tmp_path, monkeypatch):
 
     monkeypatch.setattr("easyagent.llm.complete", complete)
     app = create_app(tmp_path)
-    client = TestClient(app)
-    endpoint = client.post("/api/endpoints", json={"name": "local", "base_url": "http://127.0.0.1:9/v1"}).json()
-    bot = client.post("/api/bots", json={"name": "Ann", "endpoint_id": endpoint["id"]}).json()
-    created = client.post(
-        f"/api/bots/{bot['id']}/schedules",
-        json={"name": "Morning", "prompt": "Brief me.", "weekdays": "8:00 AM", "timezone": "America/Chicago"},
-    )
-    assert created.status_code == 200, created.text
-    before = created.json().get("last_slot")
-    ran = client.post(f"/api/bots/{bot['id']}/schedules/{created.json()['id']}/run")
-    assert ran.status_code == 200, ran.text
-    assert ran.json()["output"] == "ran just now"
-    stored = client.get(f"/api/bots/{bot['id']}/schedules").json()[0]
-    assert stored.get("last_slot") == before
-    chat = client.get(f"/api/bots/{bot['id']}/ongoing").json()
-    assert any(item.get("routine_name") == "Morning" and item.get("content") == "ran just now" for item in chat["messages"])
+    with TestClient(app) as client:
+        endpoint = client.post("/api/endpoints", json={"name": "local", "base_url": "http://127.0.0.1:9/v1"}).json()
+        bot = client.post("/api/bots", json={"name": "Ann", "endpoint_id": endpoint["id"]}).json()
+        created = client.post(
+            f"/api/bots/{bot['id']}/schedules",
+            json={"name": "Morning", "prompt": "Brief me.", "weekdays": "8:00 AM", "timezone": "America/Chicago"},
+        )
+        assert created.status_code == 200, created.text
+        before = created.json().get("last_slot")
+        ran = client.post(f"/api/bots/{bot['id']}/schedules/{created.json()['id']}/run")
+        assert ran.status_code == 200, ran.text
+        assert ran.json()["started"] is True
+        # The run happens in the background. The chat shows it when it lands.
+        chat = {}
+        deadline = time.monotonic() + 10
+        while time.monotonic() < deadline:
+            chat = client.get(f"/api/bots/{bot['id']}/ongoing").json()
+            if any(item.get("routine_name") == "Morning" and item.get("content") == "ran just now" for item in chat["messages"]):
+                break
+            time.sleep(0.05)
+        assert any(item.get("routine_name") == "Morning" and item.get("content") == "ran just now" for item in chat["messages"])
+        stored = client.get(f"/api/bots/{bot['id']}/schedules").json()[0]
+        assert stored.get("last_slot") == before
 
 
 def test_a_routine_shell_uses_the_same_guarded_runner(tmp_path, monkeypatch):

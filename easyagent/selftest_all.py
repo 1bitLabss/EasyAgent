@@ -631,11 +631,24 @@ def _check_routines(client: httpx.Client, bot_id: str) -> tuple[str, str]:
         return status, detail
     ran = client.post(
         f"/api/bots/{bot_id}/schedules/{schedule['id']}/run",
-        timeout=_CHAT_TIMEOUT,
+        timeout=10,
     )
     if ran.status_code != 200:
         return "FAIL", _one_line(ran.text)
-    entry = ran.json()
+    # Run now answers at once and the run finishes in the background.
+    # Wait for its entry to land in the job log.
+    entry: dict = {}
+    deadline = time.monotonic() + _CHAT_TIMEOUT
+    while time.monotonic() < deadline:
+        jobs = client.get(f"/api/bots/{bot_id}/jobs", timeout=10)
+        if jobs.status_code == 200:
+            for item in reversed(jobs.json()):
+                if item.get("schedule_id") == schedule["id"]:
+                    entry = item
+                    break
+        if entry.get("status") in {"error", "stopped"} or "routine-ok" in str(entry.get("output") or entry.get("result") or "").lower():
+            break
+        time.sleep(1)
     output = str(entry.get("output") or entry.get("result") or "")
     if entry.get("status") == "error" or "routine-ok" not in output.lower():
         return "FAIL", _one_line(entry.get("error") or output or "the routine did not answer")

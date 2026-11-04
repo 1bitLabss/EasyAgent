@@ -4128,19 +4128,19 @@ async def _stream_room_turn(store: Store, room_id: str, user_message: dict, targ
     try:
         yield _sse({"type": "user", "message": user_message})
         await publish(_sse({"type": "user", "message": user_message}))
-        snapshot = store.get_room(room_id)
 
-        async def one(bot_id: str, index: int) -> None:
+        async def one(bot_id: str, advance: asyncio.Event) -> None:
+            """One bot's turn. Bots answer one after another: each bot re-reads
+            the room when its turn starts, so it sees what earlier bots said."""
             name = bot_name(bot_id)
-            state = "queued" if index else "thinking"
-            label = f"{name} is thinking…" if state == "thinking" else f"{name} queued"
-            run["statuses"][bot_id] = {"state": state, "label": label, "name": name}
-            await publish(_room_status(bot_id, name, state, label))
             if cancel.is_set():
                 run["statuses"][bot_id] = {"state": "error", "label": f"{name} stopped", "name": name}
                 return
+            run["statuses"][bot_id] = {"state": "thinking", "label": f"{name} is thinking…", "name": name}
+            await publish(_room_status(bot_id, name, "thinking", f"{name} is thinking…"))
             from easyagent.safety import list_pending
 
+            snapshot = store.get_room(room_id)
             task = asyncio.create_task(_complete_for_room_bot(store, snapshot, bot_id))
             announced = False
             while not task.done():
@@ -4156,10 +4156,16 @@ async def _stream_room_turn(store: Store, room_id: str, user_message: dict, targ
                     approval = _sse({"type": "approval", "bot_id": bot_id, "card": card})
                     await publish(note)
                     await publish(approval)
+                    # A waiting approval must not hold up the other bots.
+                    advance.set()
                 try:
                     await asyncio.wait_for(asyncio.shield(task), timeout=0.4)
                 except asyncio.TimeoutError:
                     continue
+                except Exception:
+                    # The completion failed; task.result() below turns it into
+                    # an error message instead of ending this bot's turn silently.
+                    break
             if cancel.is_set() and not task.done():
                 run["statuses"][bot_id] = {"state": "error", "label": f"{name} stopped", "name": name}
                 await publish(_room_status(bot_id, name, "error", f"{name} stopped"))
@@ -4201,13 +4207,28 @@ async def _stream_room_turn(store: Store, room_id: str, user_message: dict, targ
 
         mine: asyncio.Queue = asyncio.Queue(maxsize=256)
         listeners.append(mine)
-        tasks = [asyncio.create_task(one(bot_id, index)) for index, bot_id in enumerate(targets)]
         for bot_id in targets:
             name = bot_name(bot_id)
             state = "thinking" if bot_id == targets[0] else "queued"
             label = f"{name} is thinking…" if state == "thinking" else f"{name} queued"
+            run["statuses"][bot_id] = {"state": state, "label": label, "name": name}
             yield _room_status(bot_id, name, state, label)
-        pending = set(tasks)
+
+        async def chain() -> None:
+            started: list[asyncio.Task] = []
+            for bot_id in targets:
+                advance = asyncio.Event()
+                task = asyncio.create_task(one(bot_id, advance))
+                started.append(task)
+                # The next bot starts when this one has answered, failed, or
+                # gone waiting for an approval — never before.
+                waiter = asyncio.create_task(advance.wait())
+                await asyncio.wait({task, waiter}, return_when=asyncio.FIRST_COMPLETED)
+                waiter.cancel()
+            await asyncio.gather(*started, return_exceptions=True)
+
+        runner = asyncio.create_task(chain())
+        pending = {runner}
         while pending or not mine.empty():
             try:
                 item = await asyncio.wait_for(mine.get(), timeout=0.5)
@@ -4219,9 +4240,8 @@ async def _stream_room_turn(store: Store, room_id: str, user_message: dict, targ
             if item:
                 yield item
             pending = {task for task in pending if not task.done()}
-        for task in tasks:
-            with suppress(Exception):
-                await task
+        with suppress(Exception):
+            await runner
         done = _sse({"type": "done", "room": _public_room(store, store.get_room(room_id))})
         await publish(done)
         yield done
@@ -6791,6 +6811,7 @@ async def _finish_and_maybe_ask(
     if helpers:
         rows = await run_helpers(store, bot_id, helpers)
         summary = for_model(rows) or "The helper finished with nothing to report."
+        failed_all = bool(rows) and all(row.get("status") == "error" for row in rows)
         finished = _append_parent_result(
             store,
             bot_id,
@@ -6800,6 +6821,13 @@ async def _finish_and_maybe_ask(
             failed=any(row.get("status") == "error" for row in rows),
             child_chat_id=None,
         )
+        # The raw helper row stays as the audit trail. One no-tools call folds
+        # the finding into this bot's own words, the way a child ask is folded.
+        # A stopped turn, an all-error batch, or a failed call keeps the raw row.
+        if not ask and for_model(rows) and not failed_all and not turn_mod.cancelled():
+            folded = await _answer_after_helpers(store, bot_id, chat_id, summary)
+            if folded is not None:
+                finished = folded
     if not ask:
         named = consult_target(user_text, names) or side_consult(user_text, names, during_job)
         if not named:
@@ -6827,6 +6855,31 @@ async def _finish_and_maybe_ask(
     return await _answer_in_parent_words(store, bot_id, chat_id, str(finished.get("reply") or ""))
 
 
+def _synthesis_history(chat: dict) -> list[dict]:
+    """The plain user/assistant words of a chat. Status rows and notes stay out."""
+    history: list[dict] = []
+    for item in chat.get("messages") or []:
+        if not isinstance(item, dict):
+            continue
+        role = item.get("role")
+        if role not in {"user", "assistant"}:
+            continue
+        if item.get("kind") in {
+            "status",
+            "activity",
+            "pickup",
+            "resume-offer",
+            "resume-note",
+            "resume-dismissed",
+            "connection",
+        }:
+            continue
+        content = str(item.get("content") or "").strip()
+        if content:
+            history.append({"role": role, "content": content})
+    return history
+
+
 async def _answer_in_parent_words(store: Store, bot_id: str, chat_id: str, child_text: str) -> dict:
     """One no-tools call. The child's reply is context. The saved text is this bot's answer."""
     from easyagent.check import ANSWER_NOW, NO_ANSWER
@@ -6841,26 +6894,7 @@ async def _answer_in_parent_words(store: Store, bot_id: str, chat_id: str, child
     if endpoint is not None:
         chat = store.get_chat(bot_id, chat_id)
         name = " ".join(str(bot.get("name") or "EasyAgent").split()) or "EasyAgent"
-        history: list[dict] = []
-        for item in chat.get("messages") or []:
-            if not isinstance(item, dict):
-                continue
-            role = item.get("role")
-            if role not in {"user", "assistant"}:
-                continue
-            if item.get("kind") in {
-                "status",
-                "activity",
-                "pickup",
-                "resume-offer",
-                "resume-note",
-                "resume-dismissed",
-                "connection",
-            }:
-                continue
-            content = str(item.get("content") or "").strip()
-            if content:
-                history.append({"role": role, "content": content})
+        history = _synthesis_history(chat)
         messages = [
             {
                 "role": "system",
@@ -6885,6 +6919,53 @@ async def _answer_in_parent_words(store: Store, bot_id: str, chat_id: str, child
         spoken = strip_helper_fences(strip_subagent_fences(raw or "", keep_shape=True), keep_shape=True)
     if not spoken.strip():
         spoken = NO_ANSWER
+    return _finish_reply(store, bot_id, chat_id, spoken, [])
+
+
+async def _answer_after_helpers(store: Store, bot_id: str, chat_id: str, helper_text: str) -> dict | None:
+    """One no-tools call folding the helper's finding into this bot's own words.
+
+    The raw helper row is already saved as the audit trail. This adds the
+    parent's answer on top of it. A missing endpoint or a failed call adds
+    nothing and returns None, so the raw row stands as the answer.
+    """
+    from easyagent.check import ANSWER_NOW
+    from easyagent.helpers import strip_helper_fences
+
+    bot = store.get_bot(bot_id)
+    try:
+        endpoint = store.get_endpoint(bot["endpoint_id"])
+    except StoreError:
+        endpoint = None
+    if endpoint is None:
+        return None
+    chat = store.get_chat(bot_id, chat_id)
+    name = " ".join(str(bot.get("name") or "EasyAgent").split()) or "EasyAgent"
+    history = _synthesis_history(chat)
+    messages = [
+        {
+            "role": "system",
+            "content": (
+                f"You are {name}. "
+                "Write the answer in your own words. Do not call a tool. Do not start a helper."
+            ),
+        },
+        *history[-12:],
+        {"role": "user", "content": f"{ANSWER_NOW}\n\nThe helper reported:\n{helper_text}"},
+    ]
+    try:
+        raw = await llm.complete(
+            base_url=endpoint["base_url"],
+            api_key=endpoint.get("api_key") or None,
+            model=chosen_model(bot, endpoint),
+            messages=messages,
+            tools=False,
+        )
+    except llm.ProviderError:
+        return None
+    spoken = strip_helper_fences(strip_subagent_fences(raw or "", keep_shape=True), keep_shape=True)
+    if not spoken.strip() or turn_mod.cancelled():
+        return None
     return _finish_reply(store, bot_id, chat_id, spoken, [])
 
 

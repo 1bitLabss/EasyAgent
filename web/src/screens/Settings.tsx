@@ -990,7 +990,7 @@ export function SettingsScreen() {
           <h3 className="text-sm font-medium">Job log</h3>
           {(jobs.data || []).length === 0 ? <Note>Nothing has fired yet.</Note> : (
             <ul className="space-y-1 text-xs text-muted">
-              {(jobs.data || []).slice(0, 12).map((job, index) => (
+              {(jobs.data || []).slice(-12).reverse().map((job, index) => (
                 <li key={job.id || index}>{job.status || "done"} · {job.error || job.result || job.prompt || ""}</li>
               ))}
             </ul>

@@ -142,7 +142,25 @@ def describe(schedule: dict) -> str:
 
 
 async def _tracked_run(store: Store, bot: dict, schedule: dict, slot: str, moment: datetime) -> dict:
-    entry = await _run_one(store, bot, schedule, slot)
+    try:
+        entry = await _run_one(store, bot, schedule, slot)
+    except Exception as exc:
+        # Anything _run_one did not catch still has to leave a trace in the log.
+        from easyagent.tools import redact
+
+        entry = {
+            "id": new_id(),
+            "schedule_id": schedule.get("id"),
+            "name": (schedule.get("name") or "Routine"),
+            "slot": slot,
+            "prompt": (schedule.get("prompt") or "").strip(),
+            "status": "error",
+            "output": "",
+            "result": "",
+            "error": redact(store, str(exc) or exc.__class__.__name__),
+            "started_at": now_iso(),
+            "finished_at": now_iso(),
+        }
     store.append_job(bot["id"], entry)
     _remember_run(store, bot["id"], schedule, entry, moment)
     if entry.get("status") == "error":

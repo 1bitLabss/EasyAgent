@@ -1184,7 +1184,8 @@ class Store:
         with self._lock:
             jobs = self.list_jobs(bot_id)
             jobs.append(entry)
-            atomic_write_json(self._job_log_path(bot_id), jobs)
+            # Newest last, oldest dropped. An hourly routine must not grow the file forever.
+            atomic_write_json(self._job_log_path(bot_id), jobs[-500:])
         return entry
 
     # --- chats -------------------------------------------------------------
@@ -1622,6 +1623,14 @@ class Store:
         room["updated_at"] = now_iso()
         self.save_room(room)
         return self.get_room(room["id"])
+
+    def delete_room(self, room_id: str) -> dict:
+        """Remove one room and its transcript. The bots and their chats stay."""
+        room = self.get_room(room_id)
+        path = self._room_path(room["id"])
+        if path.is_file():
+            path.unlink()
+        return room
 
     # --- projects ----------------------------------------------------------
 

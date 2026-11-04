@@ -22,7 +22,7 @@ import { cn } from "@/lib/utils";
 import { keepLoadedHistory, mergeChat, sameMessage, shareChat, type MessagePage } from "@/lib/window";
 import { useApp } from "@/store";
 import { RETRY_REASON, attachLive, canResume, chatStillPolling, flightFor, pausesDismissed, retryMessage, retryUnsent, sendMessage, sendNow, settleIncoming, stopAndSendStored, stopMessage, useLive } from "@/stream";
-import type { Bot, Chat, ChatMessage } from "@/types";
+import type { Bot, Chat, ChatMessage, ChatSummary } from "@/types";
 
 const REACTIONS = ["👍", "👎", "❤️", "👀"];
 const PAUSE_LINE = new Set([
@@ -185,6 +185,23 @@ const MessageRow = memo(function MessageRow({
   const chip = chipText(message);
   const mine = message.role === "user";
   const showBubble = messageHasBubble(message);
+  async function openChildChat(childChatId: string) {
+    // The child's chat usually belongs to the child bot, not this one. Find its owner and open it.
+    const bots = await queryClient
+      .fetchQuery<Bot[]>({ queryKey: ["bots"], queryFn: () => api<Bot[]>("/api/bots") })
+      .catch(() => [] as Bot[]);
+    const ids = [botId, ...(bots || []).map((item) => item.id).filter((id) => id !== botId)];
+    for (const id of ids) {
+      if (!id) continue;
+      const chats = await queryClient
+        .fetchQuery<ChatSummary[]>({ queryKey: ["chats", id], queryFn: () => api<ChatSummary[]>(`/api/bots/${id}/chats`) })
+        .catch(() => [] as ChatSummary[]);
+      if ((chats || []).some((chat) => chat.id === childChatId)) {
+        useApp.getState().openBot(id, childChatId);
+        return;
+      }
+    }
+  }
   // An empty assistant row is not a reply. "Interrupted, resuming" is only
   // shown when a resume saved that sentence. It is not invented here.
   if (
@@ -221,9 +238,22 @@ const MessageRow = memo(function MessageRow({
         {message.missed ? <p className="mb-1 text-xs" data-testid="missed-run">Missed run</p> : null}
         {message.routine_name ? <p className="mb-1 text-xs opacity-70">Routine · {message.routine_name}</p> : null}
         {message.speaker_name ? <p className="mb-1 text-xs opacity-70">{message.speaker_name}</p> : null}
+        {message.subagent ? <p className="mb-1 text-xs opacity-70" data-testid="subagent-label">Child agent</p> : null}
         <div className={mine ? "whitespace-pre-wrap" : ""} data-testid="message-text">
           {mine ? (message.content || "") : <Markdown text={message.content || ""} streaming={streaming || freeze} freeze={freeze} />}
         </div>
+        {message.child_chat_id ? (
+          <div className="mt-2">
+            <button
+              type="button"
+              className="rounded-full bg-white px-3 py-1 text-sm text-foreground"
+              data-testid="open-child-chat"
+              onClick={() => void openChildChat(message.child_chat_id || "")}
+            >
+              Open child chat
+            </button>
+          </div>
+        ) : null}
         {chip ? <p className="mt-2 block truncate text-xs" data-testid={`chip-${message.chip}`} title={chipTitle(message)}>{chip}</p> : null}
         {message.chip === "held" && message.id && botId && chatId ? (
           <div className="mt-2">
@@ -791,6 +821,9 @@ export function ChatPane() {
   );
   const asked = askedLine(bot.endpoint_name || "", rows);
   const pill = workingLine(live?.run || open?.run, now);
+  // The newest saved row is a child's result and the bot is still busy: the
+  // child agents are still working. No new endpoint, only the run state we have.
+  const childWorking = running && !streamingReply && rows[rows.length - 1]?.subagent === true;
   const checklist = (open?.plan?.steps || []).filter((step) => step && step.text);
   const active = Boolean(open && (running || (flight?.sending && live && live.phase !== "error" && live.phase !== "stopped")));
   const presenceStep = named;
@@ -968,6 +1001,11 @@ export function ChatPane() {
               ) : null}
               {live && (live.phase === "stopped" || live.phase === "error") ? (
                 <div className="sys-line" role="status"><p className="text-danger">{live.text.startsWith("Stopped") ? live.text : `Stopped: ${live.text}`}</p></div>
+              ) : null}
+              {childWorking ? (
+                <div className="sys-line" role="status" data-testid="child-working">
+                  <p>Child agents are working.</p>
+                </div>
               ) : null}
               <LiveStatus
                 key="live-status"

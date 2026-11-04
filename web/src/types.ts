@@ -110,6 +110,8 @@ export type ChatMessage = {
   limit_label?: string;
   queued?: boolean;
   about?: string;
+  subagent?: boolean;
+  child_chat_id?: string;
 };
 
 export type ChatSummary = {

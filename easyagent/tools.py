@@ -3479,7 +3479,7 @@ async def _routine_proposal(store: Store, request: ToolRequest, bot_id: str | No
                     shown = preview(row)
                 except Exception:
                     shown = str(row.get("cron") or row.get("kind") or "")
-                lines.append(f"- {row.get('name') or 'Routine'}: {shown}")
+                lines.append(f"- [{row.get('id') or '?'}] {row.get('name') or 'Routine'}: {shown}")
         lines.append(OPEN_NOTE)
         return "\n".join(lines)
     if is_unattended():
@@ -3491,10 +3491,36 @@ async def _routine_proposal(store: Store, request: ToolRequest, bot_id: str | No
             "detail": spec.get("name") or request.path or action,
         })
         raise ToolError("A routine cannot create, edit, or enable another routine.")
+    def _shown(row: dict) -> str:
+        try:
+            return preview(row)
+        except Exception:
+            return str(row.get("cron") or row.get("kind") or "")
+
+    target_row: dict | None = None
+    if action in {"delete", "pause", "resume", "edit"}:
+        rows = store.list_schedules(bot_id) if bot_id else []
+        schedule_id = str(spec.get("id") or "").strip()
+        if schedule_id:
+            target_row = next((row for row in rows if row.get("id") == schedule_id), None)
+        else:
+            wanted = (spec.get("name") or request.path or "").strip()
+            if wanted:
+                matches = [row for row in rows if (row.get("name") or "").strip().lower() == wanted.lower()]
+                if len(matches) == 1:
+                    spec["id"] = matches[0].get("id") or ""
+                    target_row = matches[0]
+                elif matches:
+                    listing = "; ".join(f"{row.get('id')}: {_shown(row)}" for row in matches)
+                    raise ToolError(
+                        f"{len(matches)} routines are named {wanted}. Ask which one: {listing}"
+                    )
+                else:
+                    raise ToolError(f"No routine is named {wanted}.")
     try:
         if action == "delete":
             name = spec.get("name") or request.path or "this routine"
-            shown = "This routine will move to Trash."
+            shown = _shown(target_row) if target_row else "This routine will move to Trash."
             prompt = spec.get("prompt") or ""
         elif action in {"pause", "resume"}:
             name = spec.get("name") or request.path or "this routine"

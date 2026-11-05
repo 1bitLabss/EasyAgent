@@ -122,11 +122,7 @@ def cancelled() -> bool:
     if event is None or not event.is_set():
         return False
     slot = _slot.get()
-    if slot is None:
-        # This context never bound a turn: the flag was inherited from an
-        # outer context (a server thread, a queued task) and is not our stop.
-        return False
-    if slot.cancel is event:
+    if slot is not None and slot.cancel is event:
         worker = slot.worker
         if worker is None or worker.done():
             return False
@@ -136,6 +132,16 @@ def cancelled() -> bool:
 def raise_if_cancelled() -> None:
     if cancelled():
         raise TurnCancelled()
+
+
+def cancel_is_orphaned() -> bool:
+    """True when a stop flag is set in this context but no turn slot is bound here.
+
+    Such a flag was inherited from an outer context (a server thread that ran
+    an earlier turn) and does not belong to the code about to start.
+    """
+    event = _cancel.get()
+    return event is not None and event.is_set() and _slot.get() is None
 
 
 def renew_cancel() -> None:

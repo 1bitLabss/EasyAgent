@@ -4132,6 +4132,11 @@ async def _stream_room_turn(store: Store, room_id: str, user_message: dict, targ
         async def one(bot_id: str, advance: asyncio.Event) -> None:
             """One bot's turn. Bots answer one after another: each bot re-reads
             the room when its turn starts, so it sees what earlier bots said."""
+            # The streaming task can inherit a stop flag left in the server
+            # thread's context by an unrelated earlier turn. A flag with no
+            # slot of ours bound is such an orphan: this new turn starts clean.
+            if turn_mod.cancel_is_orphaned():
+                turn_mod.renew_cancel()
             name = bot_name(bot_id)
             if cancel.is_set():
                 run["statuses"][bot_id] = {"state": "error", "label": f"{name} stopped", "name": name}

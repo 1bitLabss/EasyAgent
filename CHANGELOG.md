@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.3.50
+- The bot can see attachments. Text files ride to the model, and pictures need the connection's can-see-pictures switch.
+- Search your chats from the sidebar: live results across every bot, and a click jumps to the message and flashes it.
+- Rooms answer in turn, so a later bot sees what an earlier bot said. A waiting approval no longer blocks the chain.
+- A room opens as a live chat everywhere: approvals render as cards, Stop works, thinking statuses survive a reload, and the rail shows unread dots.
+- A room can be deleted. A mention matches whole words, so @Ann no longer wakes Anna.
+- A scheduled job can no longer vanish silently: an unexpected error writes a job entry and shows what broke. The job log shows the newest runs first and keeps up to 500.
+- A routine is confirmed before it is saved, and its prompt is a clean instruction, not your whole sentence. An exact duplicate is refused. Run answers at once, running or queued work has a Stop button, and two runs of one routine never overlap.
+- Same-named routines can be handled now: the bot lists each one's id and asks which, and the delete card shows the schedule so identical names look different.
+- A helper's result gets an answer in the parent bot's own words. Child agents are visible: their rows are labelled, each links to the child chat, and a plain status line says when they are working. A child's seconds budget now hard-caps a hung model call, and one chat can no longer starve another chat's children.
+- Stop behaves: a stop left over from an earlier turn no longer silently cancels a room's replies, and each room turn starts clean.
+- A streamed tool call from a server that omits the index field no longer merges into one garbled call.
+
 ## 0.3.49
 - A connection card has Test, Edit, and Remove. Test asks the server if it is there and answers in one line: "The server answered." or "Can't reach the model at <host>. Check the connection or address." No message is sent to the model and the At once line is not used.
 - Editing a connection is visible now. The Edit button opens the saved values, and clicking the card still works as before.

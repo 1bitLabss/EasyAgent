@@ -158,10 +158,21 @@ import asyncio  # noqa: E402
 
 import pytest  # noqa: E402
 
+from easyagent.features import reset_routine_turn  # noqa: E402
 from easyagent.safety import list_pending, resolve_card  # noqa: E402
 from easyagent.schedule import compile_routine  # noqa: E402
 from easyagent.tools import ToolError, ToolRequest, execute  # noqa: E402
+from easyagent import turn as turn_mod  # noqa: E402
 from tests.test_schedule import seed  # noqa: E402
+
+
+def fresh_turn_context() -> None:
+    """Start this test the way a real turn starts: a clear stop flag and no
+    routine-card state. A direct execute() call binds no slot, so without
+    this it inherits whatever an earlier test in the same process left in
+    this thread's context (a stopped turn's flag cancels by default)."""
+    turn_mod.renew_cancel()
+    reset_routine_turn()
 
 
 def routine(name="Morning", prompt="Brief me.", **fields):
@@ -203,6 +214,7 @@ def _run_with_card(store, bot_id: str, spec: dict) -> str:
 
 def test_delete_by_name_removes_the_routine(tmp_path):
     store, bot, _endpoint = seed(tmp_path)
+    fresh_turn_context()
     store.add_schedule(bot["id"], routine(name="Morning", prompt="Brief me."))
     text = _run_with_card(store, bot["id"], {"action": "delete", "name": "Morning"})
     assert "Trash" in text
@@ -212,6 +224,7 @@ def test_delete_by_name_removes_the_routine(tmp_path):
 
 def test_two_same_names_refuse_and_the_error_lists_both_ids(tmp_path):
     store, bot, _endpoint = seed(tmp_path)
+    fresh_turn_context()
     first = routine(name="every day 8:0 AM CT", prompt="First.")
     second = routine(name="every day 8:0 AM CT", prompt="Second.")
     store.add_schedule(bot["id"], first)
@@ -231,6 +244,7 @@ def test_two_same_names_refuse_and_the_error_lists_both_ids(tmp_path):
 
 def test_no_routine_with_that_name_is_refused(tmp_path):
     store, bot, _endpoint = seed(tmp_path)
+    fresh_turn_context()
     store.add_schedule(bot["id"], routine(name="Morning", prompt="Brief me."))
     with pytest.raises(ToolError) as exc:
         asyncio.run(execute(store, _request({"action": "delete", "name": "Nope"}), bot["id"]))
@@ -240,6 +254,7 @@ def test_no_routine_with_that_name_is_refused(tmp_path):
 
 def test_delete_by_id_works_when_names_are_identical(tmp_path):
     store, bot, _endpoint = seed(tmp_path)
+    fresh_turn_context()
     first = routine(name="every day 8:0 AM CT", prompt="First.")
     second = routine(name="every day 8:0 AM CT", prompt="Second.")
     store.add_schedule(bot["id"], first)
@@ -255,6 +270,7 @@ def test_delete_by_id_works_when_names_are_identical(tmp_path):
 
 def test_delete_by_name_card_shows_the_schedule_preview(tmp_path):
     store, bot, _endpoint = seed(tmp_path)
+    fresh_turn_context()
     store.add_schedule(bot["id"], routine(name="Morning", prompt="Brief me."))
     spec = {"action": "delete", "name": "Morning"}
     _run_with_card(store, bot["id"], spec)
@@ -263,6 +279,7 @@ def test_delete_by_name_card_shows_the_schedule_preview(tmp_path):
 
 def test_list_output_includes_each_routine_id(tmp_path):
     store, bot, _endpoint = seed(tmp_path)
+    fresh_turn_context()
     first = routine(name="Morning", prompt="Brief me.")
     second = routine(name="Evening", prompt="Wind down.", daily="9:00 PM")
     store.add_schedule(bot["id"], first)

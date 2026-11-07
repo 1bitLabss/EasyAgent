@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.3.52
+- An answer to a message you sent mid-reply now streams smoothly. It used to lose its first words and paint in few-word flashes; the first token is now never dropped and the fallback view refreshes four times as often.
+- Fan-out children get their own chat. Every delegate or helper child now has a transcript you can open — its task, what it did, and what it found. It lives with its parent chat and goes away with it.
+- A child's live row now links to that transcript while it works, not just after.
+
 ## 0.3.51
 - Python keeps its state between calls in the same chat. Variables and imports you made last call are still there this call. Stop, a timeout, or a reset clears them, and the bot says so instead of failing quietly. A python step says "Running Python", not "Connecting".
 - Child agents show up while they work: one row per child with its task, a Working/Done/Failed/Stopped chip, elapsed time, and a link to the child's chat when it has one.

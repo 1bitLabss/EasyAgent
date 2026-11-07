@@ -84,6 +84,7 @@ export function PhoneAccess() {
                 className="h-60 w-60 rounded-md bg-[#f6f4ef]"
               />
               <p className="text-sm">On an iPhone, open the Camera app and point it at this code. Safari opens EasyAgent. From that page, Share, then Add to Home Screen.</p>
+              <p className="text-sm text-muted" data-testid="phone-install-hint">After the page opens on your phone, use the browser menu and choose Add to Home Screen to install EasyAgent.</p>
               <p className="break-all font-mono text-xs text-muted" data-testid="pair-url">{data.pair_url}</p>
             </div>
           ) : null}

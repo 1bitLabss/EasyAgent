@@ -1,5 +1,9 @@
 /* EasyAgent shell. Chats are never cached. */
-const CACHE = "easyagent-shell-0.3.0";
+// The app registers this file as /sw.js?v=<app version> (see web/src/main.tsx),
+// so an upgrade installs a fresh service worker and the activate step below
+// deletes every other shell cache. No stale shells across upgrades.
+const VERSION = new URL(self.location.href).searchParams.get("v") || "dev";
+const CACHE = `easyagent-shell-${VERSION}`;
 const SHELL = ["/", "/manifest.webmanifest", "/static/icons/icon-192.png", "/static/icons/icon-512.png", "/static/face.svg", "/static/mascot.svg"];
 
 self.addEventListener("install", (event) => {

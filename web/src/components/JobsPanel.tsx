@@ -1,8 +1,26 @@
 import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { useEffect, useState } from "react";
 import { api } from "@/api";
 import { formatElapsed } from "@/lib/run";
+import { cn } from "@/lib/utils";
 import { useApp } from "@/store";
 import { Elapsed } from "./Elapsed";
+
+/** Same breakpoint as the mobile layout rules in index.css. */
+const NARROW_QUERY = "(max-width: 980px), (hover: none) and (pointer: coarse)";
+
+function useNarrowLayout() {
+  const [narrow, setNarrow] = useState(() => window.matchMedia?.(NARROW_QUERY).matches ?? false);
+  useEffect(() => {
+    if (!window.matchMedia) return;
+    const query = window.matchMedia(NARROW_QUERY);
+    const onChange = () => setNarrow(query.matches);
+    query.addEventListener("change", onChange);
+    onChange();
+    return () => query.removeEventListener("change", onChange);
+  }, []);
+  return narrow;
+}
 
 export type JobRow = {
   id: string;
@@ -38,6 +56,7 @@ function when(value?: string | null): string {
 }
 
 export function JobsPanel() {
+  const narrow = useNarrowLayout();
   const setJobs = useApp((state) => state.setJobs);
   const highlight = useApp((state) => state.highlightJob);
   const openBot = useApp((state) => state.openBot);
@@ -78,7 +97,13 @@ export function JobsPanel() {
   }
 
   return (
-    <aside className="flex h-full w-[360px] shrink-0 flex-col border-l border-border bg-background" data-testid="jobs-panel">
+    <aside
+      className={cn(
+        "flex h-full shrink-0 flex-col bg-background",
+        narrow ? "jobs-panel w-full border-t border-border" : "w-[360px] border-l border-border",
+      )}
+      data-testid="jobs-panel"
+    >
       <header className="flex items-center justify-between px-3 py-3">
         <h2 className="text-sm font-semibold">Jobs {busy ? <span data-testid="jobs-badge">{busy}</span> : null}</h2>
         <button type="button" className="text-sm text-muted" onClick={() => setJobs(false)} aria-label="Close jobs">Close</button>

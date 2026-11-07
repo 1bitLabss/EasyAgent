@@ -1,5 +1,5 @@
 import { useQuery } from "@tanstack/react-query";
-import { LayoutGrid, Moon, Plus, Search, Sun, UserRound } from "lucide-react";
+import { LayoutGrid, Moon, Plus, Search, Smartphone, Sun, UserRound } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { api, queryClient } from "@/api";
@@ -274,6 +274,16 @@ export function Sidebar() {
         <div className="rail-tools mt-2 flex flex-col items-center gap-1 pb-1">
           <button type="button" aria-label="Add bot" title="Add bot" className="flex h-10 w-10 items-center justify-center rounded-full text-foreground hover:bg-black/5 dark:hover:bg-white/10" onClick={() => setAdding(true)}>
             <Plus className="h-5 w-5" />
+          </button>
+          <button
+            type="button"
+            aria-label="Connect your phone"
+            title="Connect your phone"
+            data-testid="rail-phone"
+            className="rail-phone flex h-10 w-10 items-center justify-center rounded-full text-muted hover:bg-black/5 dark:hover:bg-white/10"
+            onClick={() => setFocus("phone")}
+          >
+            <Smartphone className="h-4 w-4" />
           </button>
           <button
             type="button"

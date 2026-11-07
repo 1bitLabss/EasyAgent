@@ -1,7 +1,7 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { render, screen } from "@testing-library/react";
+import { cleanup, render, screen } from "@testing-library/react";
 import type { ReactNode } from "react";
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { JobsPanel } from "./JobsPanel";
 import { RoomPane } from "./RoomPane";
 import { useApp } from "@/store";
@@ -34,6 +34,11 @@ function wrap(node: ReactNode) {
   return <QueryClientProvider client={client}>{node}</QueryClientProvider>;
 }
 
+afterEach(() => {
+  cleanup();
+  vi.unstubAllGlobals();
+});
+
 describe("jobs and rooms", () => {
   it("shows an empty jobs panel that names the open-app rule", async () => {
     useApp.setState({ jobsOpen: true, highlightJob: "" });
@@ -48,5 +53,38 @@ describe("jobs and rooms", () => {
     expect(screen.getAllByTestId("room-member-chip").map((node) => node.textContent)).toEqual(["Alpha", "Bravo"]);
     expect(screen.getByTestId("room-speaker").textContent).toBe("Alpha");
     expect(document.querySelector("#draft")).toBeNull();
+  });
+});
+
+function stubViewport(matches: boolean) {
+  vi.stubGlobal("matchMedia", (query: string) => ({
+    matches,
+    media: query,
+    onchange: null,
+    addEventListener: vi.fn(),
+    removeEventListener: vi.fn(),
+    addListener: vi.fn(),
+    removeListener: vi.fn(),
+    dispatchEvent: vi.fn(),
+  }));
+}
+
+describe("jobs panel phone layout", () => {
+  it("goes full width at a narrow viewport instead of the fixed 360px aside", async () => {
+    stubViewport(true);
+    useApp.setState({ jobsOpen: true, highlightJob: "" });
+    render(wrap(<JobsPanel />));
+    const panel = await screen.findByTestId("jobs-panel");
+    expect(panel.className).toContain("w-full");
+    expect(panel.className).not.toContain("w-[360px]");
+  });
+
+  it("keeps the fixed 360px aside on desktop viewports", async () => {
+    stubViewport(false);
+    useApp.setState({ jobsOpen: true, highlightJob: "" });
+    render(wrap(<JobsPanel />));
+    const panel = await screen.findByTestId("jobs-panel");
+    expect(panel.className).toContain("w-[360px]");
+    expect(panel.className).not.toContain("w-full");
   });
 });

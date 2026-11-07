@@ -586,6 +586,17 @@ html[data-desktop="macos"] .rail {
     padding-bottom: 0;
   }
 
+  /* The phone pairing path is the install path on phones, so make it stand out. */
+  .rail-phone {
+    color: hsl(var(--foreground));
+    background: rgba(0, 0, 0, 0.06);
+    outline: 1px solid hsl(var(--border));
+  }
+
+  .dark .rail-phone {
+    background: rgba(255, 255, 255, 0.1);
+  }
+
   button,
   .rail button,
   .composer button,

@@ -4685,6 +4685,7 @@ def _write_live(
     reply: str | None = None,
     force: bool = False,
     start: bool = False,
+    open_slot: bool = False,
 ) -> dict | None:
     """Persist the running step. A locked chat file does not stop the reply."""
     slot = turn_mod.slot_for(store, chat_id)
@@ -4697,6 +4698,11 @@ def _write_live(
     def once() -> dict | None:
         chat = store.get_chat(bot_id, chat_id)
         run = _apply_run(chat, status=status, step=step, reason=reason, start=start)
+        if open_slot:
+            # A resumed answer gets its live row before the first token, so the
+            # first run event already names it. The screen switches over in time
+            # for the first word instead of dropping it.
+            _live_slot(chat)
         if step:
             _upsert_activity(chat, step)
         if thinking and thinking.strip():
@@ -7528,7 +7534,15 @@ async def _stream_reply(
     endpoint = _require_endpoint(store, bot_id)
     await _refresh_window(store, bot, endpoint)
     endpoint, messages = _turn_messages(store, bot_id, chat)
-    opened = _write_live(store, bot_id, chat_id, step="Waiting on model", start=not continue_run, force=True)
+    opened = _write_live(
+        store,
+        bot_id,
+        chat_id,
+        step="Waiting on model",
+        start=not continue_run,
+        force=True,
+        open_slot=continue_run,
+    )
     if opened:
         yield _sse({"type": "run", "run": opened})
     yield _sse({"type": "status", "text": "Waiting on model"})

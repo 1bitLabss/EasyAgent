@@ -58,6 +58,8 @@ export type Flight = {
   watchGen?: number;
   /** The partial as it looked when the user row was inserted. It does not grow after that. */
   frozen?: FrozenReply;
+  /** Words that arrived before the run event naming the new reply. Merged when the switch lands. */
+  pending?: string;
   /** This flight has seen the server call the run running. An idle cache after that is the end. */
   sawRunning?: boolean;
 };
@@ -231,7 +233,9 @@ export function chatStillPolling(botId: string, chatId: string, status?: string 
   if (runIsFinished(botId, chatId, status, runId)) return false;
   const flight = flightFor(botId, chatId);
   if (flight && !flight.replaced && flight.sending && flight.live && Date.now() - flight.live.heardAt < 5000) return false;
-  return status === "running" ? 2000 : false;
+  // The stream is not carrying this run. The saved live row grows every second
+  // or so, so a 2 s poll paints the answer in few-word steps. Ask more often.
+  return status === "running" ? 500 : false;
 }
 
 export function settleIncoming(botId: string, chatId: string, chat: Chat): Chat {
@@ -502,7 +506,8 @@ function apply(event: Record<string, unknown>, flight: Flight) {
     if (run.status === "running") flight.sawRunning = true;
     const statusChanged = (live.run?.status || "") !== (run.status || "");
     const replyId = run.reply_id || live.replyId || "";
-    const switched = Boolean(live.replyId && replyId && live.replyId !== replyId);
+    const priorId = live.replyId || flight.frozen?.replyId || "";
+    const switched = Boolean(priorId && replyId && priorId !== replyId);
     if (switched) {
       const kept = flight.frozen?.text || live.text || "";
       const reason = flight.frozen?.reasoning || live.reasoning || "";
@@ -517,10 +522,11 @@ function apply(event: Record<string, unknown>, flight: Flight) {
       label: holdPause ? PAUSE_TEXT : keepPause ? live.label : (run.current_step || live.label),
       run,
       replyId,
-      text: flight.frozen ? flight.frozen.text : switched ? "" : live.text,
+      text: flight.frozen ? flight.frozen.text : switched ? flight.pending || "" : live.text,
       reasoning: flight.frozen ? flight.frozen.reasoning : switched ? "" : live.reasoning,
-      chars: switched ? 0 : live.chars,
+      chars: switched ? (flight.pending || "").length : live.chars,
     }), statusChanged || switched);
+    if (switched) flight.pending = undefined;
     return;
   }
   if (event.type === "sync" && event.chat && typeof event.chat === "object") {
@@ -721,6 +727,11 @@ function apply(event: Record<string, unknown>, flight: Flight) {
           tokens: Math.floor(chars / 4),
         });
     const reset = Boolean(event.reset);
+    if (flight.frozen && (flight.frozen.text || "").length) {
+      // The resumed answer can start speaking before the run event names it.
+      // Hold these words instead of dropping them; the switch merges them in.
+      flight.pending = reset ? chunk : (flight.pending || "") + chunk;
+    }
     const nextText = flight.frozen && (flight.frozen.text || "").length
       ? flight.frozen.text
       : mergeAnswer(live.text, chunk, reset);

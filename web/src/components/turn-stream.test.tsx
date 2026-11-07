@@ -176,3 +176,91 @@ describe("one turn of reasoning, a tool, and the answer", () => {
     expect(screen.getByTestId("jump-latest")).toBeTruthy();
   });
 });
+
+const PARTIAL = "The east pier is half listed.";
+const RESUMED = "The kiln is warm.";
+const NEW_RUN = {
+  type: "run",
+  run: {
+    id: "run-2",
+    status: "running",
+    started_at: "2026-10-22T18:03:00Z",
+    last_activity_at: "2026-10-22T18:03:01Z",
+    current_step: "Writing",
+    reason: "",
+    reply_id: "reply-new",
+  },
+};
+
+describe("interrupt switch: the resumed answer keeps every word", () => {
+  afterEach(() => {
+    cleanup();
+    resetStreamForTests();
+    queryClient.clear();
+    useApp.setState({ botId: null, chatId: null, screen: "chat" });
+  });
+
+  function frozenWorld() {
+    queryClient.setQueryData(["bots"], [bot()]);
+    queryClient.setQueryData(["ongoing", "bot-1"], { id: "chat-1" });
+    queryClient.setQueryData(
+      ["chat", "bot-1", "chat-1"],
+      chat([asked, { id: "reply-old", role: "assistant", content: "", created_at: "2026-10-22T18:01:00Z" }]),
+    );
+    queryClient.setQueryData(["approvals", "bot-1"], []);
+    useApp.getState().openBot("bot-1", "chat-1");
+    paint();
+    act(() => {
+      setFlightForTests(
+        "bot-1",
+        "chat-1",
+        {
+          phase: "reply",
+          label: "Writing",
+          text: PARTIAL,
+          reasoning: "",
+          run: null,
+          heardAt: Date.now(),
+          replyId: "reply-old",
+        },
+        true,
+        { replyId: "reply-old", text: PARTIAL, reasoning: "" },
+      );
+    });
+  }
+
+  function botBubbles(): string[] {
+    return Array.from(document.querySelectorAll(".bubble-bot")).map((node) => node.textContent || "");
+  }
+
+  it("shows the first resumed delta and pins the frozen partial when the run names the new reply", () => {
+    frozenWorld();
+    act(() => {
+      pushEventForTests("bot-1", "chat-1", NEW_RUN);
+      pushEventForTests("bot-1", "chat-1", { type: "delta", text: RESUMED });
+    });
+    const bubbles = botBubbles();
+    expect(bubbles.some((text) => text.includes(RESUMED))).toBe(true);
+    // The interrupted partial is pinned into the transcript, not thrown away.
+    const cached = queryClient.getQueryData<Chat>(["chat", "bot-1", "chat-1"]);
+    expect(cached?.messages?.find((item) => item.id === "reply-old")?.content).toBe(PARTIAL);
+  });
+
+  it("keeps deltas that arrive before the run event naming the new reply", () => {
+    frozenWorld();
+    act(() => {
+      pushEventForTests("bot-1", "chat-1", { type: "delta", text: RESUMED });
+    });
+    // While still frozen the partial stays on screen; nothing blanks.
+    expect(botBubbles().some((text) => text.includes(PARTIAL))).toBe(true);
+    act(() => {
+      pushEventForTests("bot-1", "chat-1", NEW_RUN);
+    });
+    // The switch merges the buffered words; the first delta was not lost.
+    expect(botBubbles().some((text) => text.includes(RESUMED))).toBe(true);
+    act(() => {
+      pushEventForTests("bot-1", "chat-1", { type: "delta", text: " And ready." });
+    });
+    expect(botBubbles().some((text) => text.includes(`${RESUMED} And ready.`))).toBe(true);
+  });
+});

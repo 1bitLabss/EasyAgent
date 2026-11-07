@@ -1,11 +1,11 @@
 import { useSyncExternalStore } from "react";
 import { api, queryClient, reportClientEvent, streamPost } from "@/api";
-import { noteActivity, settleActivity, type ActivityStep } from "@/lib/activity";
+import { noteActivity, settleActivity, settleChildren, type ActivityStep } from "@/lib/activity";
 import { activityLine, isToolStatus } from "@/lib/run";
 import { mergeChat, sameRun } from "@/lib/window";
 import { moodForBadge, pokeFace } from "@/lib/mood";
 import { useApp } from "@/store";
-import type { Chat, ChatMessage, Run } from "@/types";
+import type { Chat, ChatMessage, ChildRow, Run } from "@/types";
 
 // Flush cadence ported from Hermes desktop (MIT, Nous Research):
 // apps/desktop/src/app/session/hooks/use-message-stream/utils.ts
@@ -28,6 +28,7 @@ export type Live = {
   run: Run | null;
   heardAt: number;
   steps?: ActivityStep[];
+  children?: ChildRow[];
   thoughtAt?: number;
   thoughtSeconds?: number;
   reasoningLive?: boolean;
@@ -329,6 +330,7 @@ function carry(live: Live, patch: Partial<Live>): Live {
     run: patch.run === undefined ? live.run : patch.run,
     heardAt: Date.now(),
     steps: patch.steps ?? live.steps,
+    children: patch.children === undefined ? live.children : patch.children,
     thoughtAt: patch.thoughtAt === undefined ? live.thoughtAt : patch.thoughtAt,
     thoughtSeconds: patch.thoughtSeconds === undefined ? live.thoughtSeconds : patch.thoughtSeconds,
     reasoningLive: patch.reasoningLive === undefined ? live.reasoningLive : patch.reasoningLive,
@@ -583,6 +585,9 @@ function apply(event: Record<string, unknown>, flight: Flight) {
     return;
   }
   if (event.type === "stopped") {
+    if (live.children?.some((item) => item.state === "running")) {
+      remember(flight, carry(live, { children: settleChildren(live.children) }), true);
+    }
     finish(flight, event.chat as Chat | undefined);
     return;
   }
@@ -628,6 +633,31 @@ function apply(event: Record<string, unknown>, flight: Flight) {
       chars: modelWait ? live.chars : 0,
       waitAt: modelWait ? live.waitAt || Date.now() : Date.now(),
     }));
+    return;
+  }
+  if (event.type === "child_status") {
+    const id = String(event.child_id || "");
+    if (!id) return;
+    const rawState = String(event.state || "running");
+    const incoming: ChildRow = {
+      child_id: id,
+      name: String(event.name || "Child agent"),
+      task_excerpt: String(event.task_excerpt || ""),
+      state: rawState === "done" || rawState === "error" || rawState === "stopped" ? rawState : "running",
+      child_chat_id: event.child_chat_id ? String(event.child_chat_id) : null,
+      elapsed: typeof event.elapsed === "number" ? event.elapsed : 0,
+    };
+    const current = live.children || [];
+    const known = current.findIndex((item) => item.child_id === id);
+    const children = known >= 0
+      ? current.map((item) =>
+        item.child_id === id
+          // A finish event can drop the chat id. The one from the start stays.
+          ? { ...item, ...incoming, child_chat_id: incoming.child_chat_id || item.child_chat_id }
+          : item,
+      )
+      : [...current, incoming];
+    remember(flight, carry(live, { children }));
     return;
   }
   if (event.type === "replay") {
@@ -723,6 +753,7 @@ function apply(event: Record<string, unknown>, flight: Flight) {
       reasoning: "",
       reasoningLive: false,
       steps: settleActivity(live.steps, "failed"),
+      children: settleChildren(live.children),
     }), true);
     if (event.chat) finish(flight, event.chat as Chat);
     return;

@@ -1,4 +1,4 @@
-import type { ChatMessage } from "@/types";
+import type { ChatMessage, ChildRow, ChildState } from "@/types";
 import { formatElapsed } from "@/lib/run";
 
 export type ActivityState = "running" | "done" | "failed";
@@ -68,6 +68,12 @@ export function noteActivity(
 export function settleActivity(steps: ActivityStep[] | undefined, state: ActivityState = "done"): ActivityStep[] | undefined {
   if (!steps?.some((item) => item.state === "running")) return steps;
   return steps.map((item) => (item.state === "running" ? { ...item, state } : item));
+}
+
+/** Children still running when the turn stops or fails are shown as stopped. */
+export function settleChildren(children: ChildRow[] | undefined, state: ChildState = "stopped"): ChildRow[] | undefined {
+  if (!children?.some((item) => item.state === "running")) return children;
+  return children.map((item) => (item.state === "running" ? { ...item, state } : item));
 }
 
 export function activityLabel(step: ActivityStep): string {

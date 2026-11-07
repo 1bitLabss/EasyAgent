@@ -1,5 +1,5 @@
 import { useQuery } from "@tanstack/react-query";
-import { MessageSquare, Terminal } from "lucide-react";
+import { Loader2, MessageSquare, Terminal } from "lucide-react";
 import { memo, useCallback, useEffect, useLayoutEffect, useRef, useState, type ReactNode } from "react";
 import { useStickToBottom } from "use-stick-to-bottom";
 import { api, queryClient, sharedToken } from "@/api";
@@ -15,14 +15,14 @@ import { chipText, chipTitle } from "@/lib/chips";
 import { yoloClock, yoloRemaining } from "@/lib/yolo";
 import { activityLabel, askedLine } from "@/lib/activity";
 import { deriveUserHistory } from "@/lib/composer-history";
-import { describeRun, faceStateFor, runPresence, runTone, shownStep, workingLine } from "@/lib/run";
+import { describeRun, faceStateFor, formatElapsed, runPresence, runTone, shownStep, workingLine } from "@/lib/run";
 import { arrangeBusy, hideWhileSending, messageHasBubble, placeLiveReply, reactionWho, rowKey, shownThinking } from "@/lib/transcript";
 import type { FrozenReply } from "@/stream";
 import { cn } from "@/lib/utils";
 import { keepLoadedHistory, mergeChat, sameMessage, shareChat, type MessagePage } from "@/lib/window";
 import { useApp } from "@/store";
 import { RETRY_REASON, attachLive, canResume, chatStillPolling, flightFor, pausesDismissed, retryMessage, retryUnsent, sendMessage, sendNow, settleIncoming, stopAndSendStored, stopMessage, useLive } from "@/stream";
-import type { Bot, Chat, ChatMessage, ChatSummary } from "@/types";
+import type { Bot, Chat, ChatMessage, ChatSummary, ChildRow } from "@/types";
 
 const REACTIONS = ["👍", "👎", "❤️", "👀"];
 const PAUSE_LINE = new Set([
@@ -138,6 +138,77 @@ function Quiet({ icon, text, detail }: { icon?: ReactNode; text: string; detail?
   );
 }
 
+/** The child's chat usually belongs to the child bot, not this one. Find its owner and open it. */
+async function openChildChat(botId: string | null, childChatId: string) {
+  if (!childChatId) return;
+  const bots = await queryClient
+    .fetchQuery<Bot[]>({ queryKey: ["bots"], queryFn: () => api<Bot[]>("/api/bots") })
+    .catch(() => [] as Bot[]);
+  const ids = [botId, ...(bots || []).map((item) => item.id).filter((id) => id !== botId)];
+  for (const id of ids) {
+    if (!id) continue;
+    const chats = await queryClient
+      .fetchQuery<ChatSummary[]>({ queryKey: ["chats", id], queryFn: () => api<ChatSummary[]>(`/api/bots/${id}/chats`) })
+      .catch(() => [] as ChatSummary[]);
+    if ((chats || []).some((chat) => chat.id === childChatId)) {
+      useApp.getState().openBot(id, childChatId);
+      return;
+    }
+  }
+}
+
+const CHILD_STATE_LABEL: Record<ChildRow["state"], string> = {
+  running: "Working",
+  done: "Done",
+  error: "Failed",
+  stopped: "Stopped",
+};
+
+/** Live rows for subagents running at once. One row per child, updated in place. */
+function ChildrenPanel({ botId, rows }: { botId: string | null; rows: ChildRow[] }) {
+  return (
+    <div className="sys-line flex-col" role="status" data-testid="children-panel">
+      <p>Child agents</p>
+      {rows.map((child) => {
+        const startedAt = Date.now() - Math.max(0, child.elapsed) * 1000;
+        return (
+          <div
+            key={child.child_id}
+            data-testid="child-row"
+            data-child-id={child.child_id}
+            data-state={child.state}
+            className={cn("flex flex-wrap items-center justify-center gap-2", child.state === "error" && "bg-danger/10 text-danger")}
+          >
+            <span data-testid={`child-name-${child.child_id}`}>{child.name}</span>
+            {child.task_excerpt ? <span className="text-muted">{child.task_excerpt}</span> : null}
+            <span data-testid={`child-state-${child.child_id}`} className="rounded-full bg-black/5 px-2 py-0.5 text-xs dark:bg-white/10">
+              {child.state === "running" ? <Loader2 className="mr-1 inline h-3 w-3 animate-spin" aria-hidden="true" /> : null}
+              {CHILD_STATE_LABEL[child.state]}
+            </span>
+            <Elapsed>
+              {(clock) => (
+                <span data-testid={`child-elapsed-${child.child_id}`}>
+                  {formatElapsed(Math.max(0, (clock - startedAt) / 1000))}
+                </span>
+              )}
+            </Elapsed>
+            {child.child_chat_id ? (
+              <button
+                type="button"
+                className="rounded-full bg-white px-3 py-1 text-sm text-foreground"
+                data-testid="open-child-chat"
+                onClick={() => void openChildChat(botId, child.child_chat_id || "")}
+              >
+                Open child chat
+              </button>
+            ) : null}
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
 const MessageRow = memo(function MessageRow({
   message,
   last,
@@ -185,23 +256,6 @@ const MessageRow = memo(function MessageRow({
   const chip = chipText(message);
   const mine = message.role === "user";
   const showBubble = messageHasBubble(message);
-  async function openChildChat(childChatId: string) {
-    // The child's chat usually belongs to the child bot, not this one. Find its owner and open it.
-    const bots = await queryClient
-      .fetchQuery<Bot[]>({ queryKey: ["bots"], queryFn: () => api<Bot[]>("/api/bots") })
-      .catch(() => [] as Bot[]);
-    const ids = [botId, ...(bots || []).map((item) => item.id).filter((id) => id !== botId)];
-    for (const id of ids) {
-      if (!id) continue;
-      const chats = await queryClient
-        .fetchQuery<ChatSummary[]>({ queryKey: ["chats", id], queryFn: () => api<ChatSummary[]>(`/api/bots/${id}/chats`) })
-        .catch(() => [] as ChatSummary[]);
-      if ((chats || []).some((chat) => chat.id === childChatId)) {
-        useApp.getState().openBot(id, childChatId);
-        return;
-      }
-    }
-  }
   // An empty assistant row is not a reply. "Interrupted, resuming" is only
   // shown when a resume saved that sentence. It is not invented here.
   if (
@@ -248,7 +302,7 @@ const MessageRow = memo(function MessageRow({
               type="button"
               className="rounded-full bg-white px-3 py-1 text-sm text-foreground"
               data-testid="open-child-chat"
-              onClick={() => void openChildChat(message.child_chat_id || "")}
+              onClick={() => void openChildChat(botId, message.child_chat_id || "")}
             >
               Open child chat
             </button>
@@ -821,8 +875,8 @@ export function ChatPane() {
   );
   const asked = askedLine(bot.endpoint_name || "", rows);
   const pill = workingLine(live?.run || open?.run, now);
-  // The newest saved row is a child's result and the bot is still busy: the
-  // child agents are still working. No new endpoint, only the run state we have.
+  // Older servers send no child_status events. The newest saved row being a
+  // child's result while the run is busy is the only signal there.
   const childWorking = running && !streamingReply && rows[rows.length - 1]?.subagent === true;
   const checklist = (open?.plan?.steps || []).filter((step) => step && step.text);
   const active = Boolean(open && (running || (flight?.sending && live && live.phase !== "error" && live.phase !== "stopped")));
@@ -1002,7 +1056,9 @@ export function ChatPane() {
               {live && (live.phase === "stopped" || live.phase === "error") ? (
                 <div className="sys-line" role="status"><p className="text-danger">{live.text.startsWith("Stopped") ? live.text : `Stopped: ${live.text}`}</p></div>
               ) : null}
-              {childWorking ? (
+              {live?.children?.length ? (
+                <ChildrenPanel botId={botId} rows={live.children} />
+              ) : childWorking ? (
                 <div className="sys-line" role="status" data-testid="child-working">
                   <p>Child agents are working.</p>
                 </div>

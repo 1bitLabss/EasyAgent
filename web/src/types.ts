@@ -114,6 +114,18 @@ export type ChatMessage = {
   child_chat_id?: string;
 };
 
+export type ChildState = "running" | "done" | "error" | "stopped";
+
+/** One live subagent from a child_status stream event. */
+export type ChildRow = {
+  child_id: string;
+  name: string;
+  task_excerpt: string;
+  state: ChildState;
+  child_chat_id: string | null;
+  elapsed: number;
+};
+
 export type ChatSummary = {
   id: string;
   bot_id: string;

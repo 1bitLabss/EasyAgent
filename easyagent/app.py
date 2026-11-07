@@ -747,6 +747,9 @@ async def _lifespan(app: FastAPI):
         flush_pending_to_file(app.state.store, reason="shutdown")
         flush_overflow_to_file(app.state.store, reason="shutdown")
         running = turn_mod.stop_all("the server restarted")
+        from easyagent import kernel as kernel_mod
+
+        kernel_mod.shutdown_all()
         for worker in running:
             worker.cancel()
         relay_task.cancel()
@@ -1530,6 +1533,11 @@ def create_app(data_dir: str | Path | None = None) -> FastAPI:
         endpoints_before = store.endpoints_path.read_bytes()
         skills_before = _snapshot_skills(store)
         direction_before = store.direction_path.read_bytes() if store.direction_path.exists() else b""
+        # A live Python session may be sitting inside the bot's workspace
+        # folder. It has to close before the folder goes, or the delete fails.
+        from easyagent import kernel as kernel_mod
+
+        kernel_mod.drop_bot(store)
         deleted = store.delete_bot(bot_id, body.confirm_name)
         for other_id, snapshot in others.items():
             if _snapshot_chats(store, other_id) != snapshot:
@@ -1682,6 +1690,9 @@ def create_app(data_dir: str | Path | None = None) -> FastAPI:
         skills_before = _snapshot_skills(store)
         direction_before = store.direction_path.read_bytes() if store.direction_path.exists() else b""
         deleted = store.delete_chat(bot_id, chat_id)
+        from easyagent import kernel as kernel_mod
+
+        kernel_mod.drop(store, chat_id)
         chats_after = _snapshot_chats(store, bot_id)
         if target in chats_after:
             raise HTTPException(500, "Deleting a chat left the transcript on disk.")
@@ -1982,6 +1993,9 @@ def create_app(data_dir: str | Path | None = None) -> FastAPI:
         store.get_chat(bot_id, chat_id)
         worker = turn_mod.current_worker(store, chat_id)
         turn_mod.interrupt(store, chat_id, "you pressed Stop")
+        from easyagent import kernel as kernel_mod
+
+        kernel_mod.interrupt(store, chat_id)
         if worker is not None and not worker.done():
             with suppress(asyncio.TimeoutError):
                 await asyncio.wait_for(asyncio.shield(worker), timeout=8)
@@ -2062,6 +2076,9 @@ def create_app(data_dir: str | Path | None = None) -> FastAPI:
         _require_endpoint(store, bot_id)
         worker = turn_mod.current_worker(store, chat_id)
         turn_mod.interrupt(store, chat_id, "you pressed Stop")
+        from easyagent import kernel as kernel_mod
+
+        kernel_mod.interrupt(store, chat_id)
         from easyagent.plan import PlanError, release_for_send
 
         if worker is not None and not worker.done():
@@ -6817,18 +6834,20 @@ async def _finish_and_maybe_ask(
         rows = await run_helpers(store, bot_id, helpers)
         summary = for_model(rows) or "The helper finished with nothing to report."
         failed_all = bool(rows) and all(row.get("status") == "error" for row in rows)
-        finished = _append_parent_result(
-            store,
-            bot_id,
-            chat_id,
-            summary,
-            speaker="Helper",
-            failed=any(row.get("status") == "error" for row in rows),
-            child_chat_id=None,
-        )
-        # The raw helper row stays as the audit trail. One no-tools call folds
-        # the finding into this bot's own words, the way a child ask is folded.
-        # A stopped turn, an all-error batch, or a failed call keeps the raw row.
+        # One row per child. One child failing no longer paints the others red.
+        for row in rows:
+            finished = _append_parent_result(
+                store,
+                bot_id,
+                chat_id,
+                str(row.get("result") or "").strip() or "The helper finished with nothing to report.",
+                speaker=str(row.get("name") or "Helper"),
+                failed=row.get("status") == "error",
+                child_chat_id=row.get("child_chat_id"),
+            )
+        # The raw helper rows stay as the audit trail. One no-tools call folds
+        # the findings into this bot's own words, the way a child ask is folded.
+        # A stopped turn, an all-error batch, or a failed call keeps the raw rows.
         if not ask and for_model(rows) and not failed_all and not turn_mod.cancelled():
             folded = await _answer_after_helpers(store, bot_id, chat_id, summary)
             if folded is not None:
@@ -7520,6 +7539,12 @@ async def _stream_reply(
         thought_seconds = 0
         model_mark: float | None = None
         model_chars = 0
+        # Children started this turn (delegate_task calls, helper fences) push
+        # child_status events here; the pumps below pass them to the stream live.
+        child_events: asyncio.Queue = asyncio.Queue()
+        child_slot = turn_mod.slot_for(store, chat_id)
+        child_slot.child_events = child_events
+        child_slot.child_publisher = child_events.put_nowait
 
         def note_thought() -> None:
             nonlocal thought_started
@@ -7619,6 +7644,14 @@ async def _stream_reply(
                 saved = _pause_for_repeat(store, bot_id, chat_id, text)
                 yield _sse({"type": "done", "chat": saved})
                 return
+            if kind == "child_status":
+                try:
+                    parsed = json.loads(text)
+                except (TypeError, json.JSONDecodeError):
+                    parsed = None
+                if isinstance(parsed, dict):
+                    yield _sse(parsed)
+                continue
             if kind == "status":
                 if text not in {"Thinking", "Waiting on model"} and not str(text).startswith("Waiting on model"):
                     model_mark = None
@@ -7732,20 +7765,37 @@ async def _stream_reply(
             saved.append(stored["name"])
         if not visible.strip() and not choices and not reacted:
             visible = "Saved skill: " + ", ".join(saved) if saved else "(empty reply)"
-        result = await _finish_and_maybe_ask(
-            store,
-            bot_id,
-            chat_id,
-            visible,
-            saved,
-            choices,
-            made,
-            thought,
-            quiet=reacted and not visible.strip(),
-            check=checked,
-            lesson=lesson,
-            thought_seconds=thought_seconds or (max(1, int(round(time.monotonic() - thought_started))) if thought_started is not None else 0),
+        finish_task = asyncio.create_task(
+            _finish_and_maybe_ask(
+                store,
+                bot_id,
+                chat_id,
+                visible,
+                saved,
+                choices,
+                made,
+                thought,
+                quiet=reacted and not visible.strip(),
+                check=checked,
+                lesson=lesson,
+                thought_seconds=thought_seconds or (max(1, int(round(time.monotonic() - thought_started))) if thought_started is not None else 0),
+            )
         )
+        # Helper fences run inside the finish step. Pass their child_status
+        # events to the stream while it works, so the fan-out is live there too.
+        try:
+            while True:
+                try:
+                    event = child_events.get_nowait()
+                    yield _sse(event)
+                except asyncio.QueueEmpty:
+                    if finish_task.done():
+                        break
+                    await asyncio.sleep(0.05)
+        except BaseException:
+            finish_task.cancel()
+            raise
+        result = finish_task.result()
         if drain and not turn_mod.cancelled():
             async for extra in _continue_queued(store, bot_id, chat_id):
                 yield extra
@@ -7882,6 +7932,9 @@ async def _stream_reply(
         reset_first_scale(scale_token)
         reset_limits(length)
         gate.reset_connection(conn)
+        if getattr(child_slot, "child_events", None) is child_events:
+            child_slot.child_events = None
+            child_slot.child_publisher = None
         reason = turn_mod.cancel_reason()
         if turn_mod.cancelled() and reason and not turn_mod.pause_requested():
             _settle_interrupted(store, bot_id, chat_id, reason)

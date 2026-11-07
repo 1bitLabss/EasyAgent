@@ -526,7 +526,7 @@ NATIVE_TOOLS = [
     ),
     _tool(
         "python",
-        "Run Python in this bot's workspace. code is the script. timeout is seconds, default 120, max 900. Prints and the exit code come back. Network and files outside the workspace still follow the same safety rules as the terminal.",
+        "Run Python in this bot's workspace. Variables and imports stay alive between python calls in the same chat. code is the script. timeout is seconds, default 120, max 900. Stop clears the saved state. Prints and errors come back. Network and files outside the workspace still follow the same safety rules as the terminal.",
         {"code": _STRING, "timeout": {"type": "integer", "description": "seconds; default 120, max 900"}},
         ["code"],
     ),

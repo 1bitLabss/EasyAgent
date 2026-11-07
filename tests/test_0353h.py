@@ -73,11 +73,12 @@ def test_a_helper_result_is_folded_into_a_parent_reply(tmp_path, monkeypatch):
     messages = sent.json()["chat"]["messages"]
     contents = [item.get("content") or "" for item in messages]
     assert any("Checking with a helper now." in item for item in contents)
-    # The raw helper row is still stored, marker and all, as the audit trail.
+    # The raw helper rows are still stored, marker and all, as the audit trail.
+    # Each child gets its own row, under the name the parent gave it.
     helper_rows = [
         item
         for item in messages
-        if item.get("subagent") and item.get("speaker_name") == "Helper"
+        if item.get("subagent") and item.get("speaker_name") == "Scout"
     ]
     assert helper_rows and MARKER in helper_rows[-1]["content"]
     # The follow-up parent reply is the last message, in the parent's words.
@@ -116,7 +117,7 @@ def test_a_failed_synthesis_call_keeps_the_raw_helper_row(tmp_path, monkeypatch)
     messages = sent.json()["chat"]["messages"]
     assert tape.synthesis_calls(), "the synthesis call was attempted"
     # Nothing was appended on top; the raw row is the last word. Degrade, never lose.
-    assert messages[-1].get("speaker_name") == "Helper"
+    assert messages[-1].get("speaker_name") == "Scout"
     assert MARKER in messages[-1]["content"]
     client.close()
 
@@ -139,7 +140,7 @@ def test_all_helpers_errored_skips_the_synthesis_call(tmp_path, monkeypatch):
     assert sent.status_code == 200, sent.text
     messages = sent.json()["chat"]["messages"]
     assert not tape.synthesis_calls()
-    assert messages[-1].get("speaker_name") == "Helper"
+    assert messages[-1].get("speaker_name") == "Scout"
     assert messages[-1].get("error") is True
     assert "boom" in messages[-1]["content"]
     client.close()

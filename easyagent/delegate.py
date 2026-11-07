@@ -40,11 +40,18 @@ _LOCK = threading.Lock()
 # Children in flight, counted per chat (or per bot when the turn has no chat id).
 # A process-global counter let one chat's children starve every other chat.
 _INFLIGHT: dict[str, int] = {}
+# A fourth child used to be refused outright and its work lost. Now it waits
+# its turn up to this many seconds, then gives up with the same plain refusal.
+QUEUE_WAIT_SECONDS = 30.0
+# One semaphore per (event loop, scope): an asyncio.Semaphore wakes waiters on
+# the loop it was created on, so sharing one across loops would cross wires.
+_SEMAPHORES: dict[tuple[int, str], "asyncio.Semaphore"] = {}
 
 
 def reset_for_tests() -> None:
     with _LOCK:
         _INFLIGHT.clear()
+    _SEMAPHORES.clear()
 
 
 def inflight(scope: str | None = None) -> int:
@@ -106,12 +113,29 @@ def allowed_kinds(requested: list[str] | None, *, parent_kinds: frozenset[str] |
     return frozenset(_KIND[name] for name in allowed_names(requested, parent_kinds=parent_kinds))
 
 
-def _acquire(scope: str = "") -> None:
+def _semaphore(scope: str) -> "asyncio.Semaphore":
+    key = (id(asyncio.get_running_loop()), scope)
+    sem = _SEMAPHORES.get(key)
+    if sem is None:
+        sem = asyncio.Semaphore(MAX_CONCURRENT)
+        _SEMAPHORES[key] = sem
+    return sem
+
+
+async def _acquire(scope: str = "", timeout: float | None = None) -> None:
+    """Take one of this chat's child slots.
+
+    A fourth call waits its turn instead of losing its work. It only gives up
+    after the wait budget, and then refuses in plain words.
+    """
     from easyagent.tools import ToolError
 
+    wait = QUEUE_WAIT_SECONDS if timeout is None else timeout
+    try:
+        await asyncio.wait_for(_semaphore(scope).acquire(), wait)
+    except (TimeoutError, asyncio.TimeoutError):
+        raise ToolError("Too many child agents are already running. It was not run.") from None
     with _LOCK:
-        if _INFLIGHT.get(scope, 0) >= MAX_CONCURRENT:
-            raise ToolError("Too many child agents are already running. It was not run.")
         _INFLIGHT[scope] = _INFLIGHT.get(scope, 0) + 1
 
 
@@ -122,6 +146,46 @@ def _release(scope: str = "") -> None:
             _INFLIGHT[scope] = left
         else:
             _INFLIGHT.pop(scope, None)
+    try:
+        sem = _SEMAPHORES.get((id(asyncio.get_running_loop()), scope))
+    except RuntimeError:
+        return
+    if sem is not None:
+        sem.release()
+
+
+def emit_child_status(
+    child_id: str,
+    name: str,
+    task: str,
+    state: str,
+    child_chat_id: str | None = None,
+    elapsed: float = 0.0,
+) -> None:
+    """Push one child_status event onto this turn's chat stream.
+
+    Same plumbing as register_child: it rides the turn slot. With no stream
+    bound (a direct call, a routine) it is a no-op.
+    """
+    slot = turn_mod.current_slot()
+    publisher = getattr(slot, "child_publisher", None) if slot is not None else None
+    if publisher is None:
+        return
+    try:
+        publisher(
+            {
+                "type": "child_status",
+                "child_id": str(child_id or ""),
+                "name": " ".join(str(name or "Child").split())[:40] or "Child",
+                "task_excerpt": " ".join(str(task or "").split())[:120],
+                "state": str(state or ""),
+                "child_chat_id": str(child_chat_id) if child_chat_id else None,
+                "elapsed": round(float(elapsed or 0.0), 2),
+            }
+        )
+    except Exception:
+        # Progress is never worth breaking the run over.
+        pass
 
 
 def register_child(task: asyncio.Task) -> None:
@@ -175,7 +239,7 @@ async def run_delegate(store, bot_id: str | None, request) -> str:
     if requested and not kinds:
         raise ToolError("That tool list is empty after the parent's limits. The child was not started.")
     scope = _scope(bot_id)
-    _acquire(scope)
+    await _acquire(scope)
     try:
         spec = HelperSpec(
             name="Child", task=task[:4000], tools=kinds, steps=4, seconds=60, listed=tuple(names)

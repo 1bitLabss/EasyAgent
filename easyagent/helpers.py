@@ -202,9 +202,15 @@ def _end(tokens) -> None:
 
 
 async def run_helpers(store: Store, bot_id: str, specs: list[HelperSpec]) -> list[dict]:
-    """Run the helpers. One slot means one at a time. Stop cancels every one still going."""
+    """Run the helpers. One slot means one at a time. Stop cancels every one still going.
+
+    Each child reports itself onto the chat stream as it starts and finishes,
+    so a fan-out shows live per-child progress instead of one generic line.
+    """
     if not specs:
         return []
+    from easyagent.delegate import emit_child_status
+
     bot = store.get_bot(bot_id)
     try:
         endpoint = store.get_endpoint(bot["endpoint_id"])
@@ -213,16 +219,46 @@ async def run_helpers(store: Store, bot_id: str, specs: list[HelperSpec]) -> lis
     slots = clamp_parallel((endpoint or {}).get("max_parallel"))
     if endpoint is None:
         return [_failed(spec, "This bot's connection is missing.") for spec in specs]
+
+    def _report(spec: HelperSpec, child_id: str, state: str, started: float, row: dict | None = None) -> None:
+        emit_child_status(
+            child_id,
+            spec.name,
+            spec.task,
+            state,
+            (row or {}).get("child_chat_id"),
+            time.monotonic() - started,
+        )
+
     if slots <= 1:
         rows = []
         for spec in specs:
             turn_mod.raise_if_cancelled()
-            rows.append(await _run_one(store, bot, endpoint, spec, yield_to_chats=True))
+            child_id = new_id()
+            started = time.monotonic()
+            _report(spec, child_id, "running", started)
+            try:
+                row = await _run_one(store, bot, endpoint, spec, yield_to_chats=True)
+            except (turn_mod.TurnCancelled, asyncio.CancelledError):
+                _report(spec, child_id, "stopped", started)
+                raise
+            _report(spec, child_id, str(row.get("status") or "done"), started, row)
+            rows.append(row)
         return rows
-    tasks = [
-        asyncio.create_task(_run_one(store, bot, endpoint, spec, yield_to_chats=False))
-        for spec in specs
-    ]
+
+    async def tracked(spec: HelperSpec) -> dict:
+        child_id = new_id()
+        started = time.monotonic()
+        _report(spec, child_id, "running", started)
+        try:
+            row = await _run_one(store, bot, endpoint, spec, yield_to_chats=False)
+        except (turn_mod.TurnCancelled, asyncio.CancelledError):
+            _report(spec, child_id, "stopped", started)
+            raise
+        _report(spec, child_id, str(row.get("status") or "done"), started, row)
+        return row
+
+    tasks = [asyncio.create_task(tracked(spec)) for spec in specs]
     try:
         return list(await asyncio.gather(*tasks))
     except (turn_mod.TurnCancelled, asyncio.CancelledError):

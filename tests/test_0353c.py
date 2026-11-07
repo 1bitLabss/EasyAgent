@@ -37,18 +37,27 @@ def _world(tmp_path):
 
 def test_the_counter_is_per_chat_not_process_global():
     reset_for_tests()
-    for _ in range(MAX_CONCURRENT):
-        _acquire("chat-a")
-    with pytest.raises(ToolError, match="Too many child agents"):
-        _acquire("chat-a")
-    # A different chat is not starved by chat-a's full set of children.
-    _acquire("chat-b")
-    assert inflight("chat-a") == MAX_CONCURRENT
-    assert inflight("chat-b") == 1
-    assert inflight() == MAX_CONCURRENT + 1
-    _release("chat-a")
-    _acquire("chat-a")
-    assert inflight("chat-a") == MAX_CONCURRENT
+
+    async def scene():
+        for _ in range(MAX_CONCURRENT):
+            await _acquire("chat-a")
+        # A fourth child waits its turn instead of losing its work.
+        waiting = asyncio.create_task(_acquire("chat-a", timeout=5))
+        await asyncio.sleep(0.05)
+        assert not waiting.done()
+        _release("chat-a")
+        await waiting
+        assert inflight("chat-a") == MAX_CONCURRENT
+        # A full chat still gives up with the plain refusal after the wait.
+        with pytest.raises(ToolError, match="Too many child agents"):
+            await _acquire("chat-a", timeout=0.1)
+        # A different chat is not starved by chat-a's full set of children.
+        await _acquire("chat-b")
+        assert inflight("chat-a") == MAX_CONCURRENT
+        assert inflight("chat-b") == 1
+        assert inflight() == MAX_CONCURRENT + 1
+
+    asyncio.run(scene())
     reset_for_tests()
     assert inflight() == 0
 
@@ -79,12 +88,11 @@ def test_two_chats_each_run_children_without_starving_each_other(tmp_path, monke
         busy_one = [asyncio.create_task(child(chat_one, f"a{i}")) for i in range(MAX_CONCURRENT)]
         # chat_two starts while chat_one already holds its full per-chat set.
         also_two = asyncio.create_task(child(chat_two, "b0"))
-        # chat_one's next child is refused at its own cap, not by chat_two.
+        # chat_one's fourth child queues at its own cap, not by chat_two,
+        # and runs when a slot frees instead of losing its work.
         fourth = asyncio.create_task(child(chat_one, "a3"))
-        with pytest.raises(ToolError, match="Too many child agents"):
-            await fourth
-        results = await asyncio.gather(*busy_one, also_two)
-        assert len(running) == MAX_CONCURRENT + 1
+        results = await asyncio.gather(*busy_one, also_two, fourth)
+        assert "a3" in running
         assert "b0" in running
         assert all("ok" in text for text in results)
 
@@ -130,6 +138,7 @@ def test_a_failure_before_the_child_starts_does_not_leak_a_slot(monkeypatch):
         asyncio.run(run_delegate(None, "bot", request))
     assert delegate.inflight() == 0
     # The slot is usable again, so nothing leaked.
-    _acquire("bot")
+    asyncio.run(_acquire("bot"))
     assert inflight("bot") == 1
     _release("bot")
+    reset_for_tests()

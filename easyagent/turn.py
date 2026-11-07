@@ -51,6 +51,11 @@ class Slot:
         self.claimed_at = 0.0
         self.child_tasks: list = []
         self.child_procs: list = []
+        # Live per-child progress for the chat stream. The turn pump sets
+        # child_events; delegate and helpers publish into it as children start
+        # and finish, so a fan-out shows each child instead of one generic line.
+        self.child_events = None
+        self.child_publisher = None
         # Hermes interrupt_control fields. The queue file is the durable FIFO;
         # these hold only the in-flight steer and redirect for this turn.
         self._pending_steer: str | None = None

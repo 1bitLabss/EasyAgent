@@ -1973,6 +1973,8 @@ def status_label(request: ToolRequest) -> str:
         return "Looking"
     if request.kind == "memory":
         return "Remembering"
+    if request.kind == "python":
+        return "Running Python"
     if request.kind == "shell":
         excerpt = _step_excerpt(request.command)
         if sys.platform == "win32":
@@ -3641,7 +3643,12 @@ async def execute(store: Store, request: ToolRequest, bot_id: str | None = None)
 
 
 async def _run_python(store: Store, request: ToolRequest, bot_id: str | None) -> str:
-    """Write the script in the workspace and run it. The terminal's safety rules still apply."""
+    """Run the code in this chat's live Python session. The terminal's safety rules still apply.
+
+    Variables and imports stay alive between python calls in one chat. Stop
+    clears them. Under the contained sandbox the session cannot run, so the
+    code falls back to the one-shot write-and-run path below.
+    """
     import sys
     import uuid
     from pathlib import Path
@@ -3655,13 +3662,19 @@ async def _run_python(store: Store, request: ToolRequest, bot_id: str | None) ->
         root = Path(bot_workspace(store, bot_id or "", create=True))
     except Exception:
         root = Path(turn_mod.tool_cwd())
+    wait = request.timeout if request.timeout and request.timeout > 0 else 120
+    if wait > 900:
+        wait = 900
+    from easyagent import kernel
+
+    text = await asyncio.to_thread(kernel.execute, store, code, wait, str(root))
+    if text is not None:
+        note_turn_effect()
+        return text
     folder = root / ".ea-run"
     folder.mkdir(parents=True, exist_ok=True)
     path = folder / f"run-{uuid.uuid4().hex[:8]}.py"
     path.write_text(code + "\n", encoding="utf-8")
-    wait = request.timeout if request.timeout and request.timeout > 0 else 120
-    if wait > 900:
-        wait = 900
     command = f'"{sys.executable}" "{path}"'
     return await _execute_now(store, ToolRequest(kind="shell", command=command, timeout=wait), bot_id)
 
@@ -8974,19 +8987,48 @@ async def run_turn(
                         if resume:
                             continue
                         return
-                batch_label = status_label(work[0])
-                open_tool_step(batch_label)
-                yield "status", batch_label
+                children = [item for item in work if item.kind == "delegate"]
+                fan_out = len(work) > 1 and len(children) == len(work)
+                if fan_out:
+                    # A fan-out gets one step per child call, not one shared
+                    # line, so each child shows up in the activity list.
+                    for item in work:
+                        step_label = status_label(item)
+                        open_tool_step(step_label)
+                        yield "status", step_label
+                else:
+                    batch_label = status_label(work[0])
+                    open_tool_step(batch_label)
+                    yield "status", batch_label
                 if model_slot is not None:
                     model_slot.sealing = False
                     model_slot._executing_tools = True
                 try:
-                    results = await _run_together(store, work, bot_id)
+                    _slot_ref = turn_mod.current_slot()
+                    child_q = getattr(_slot_ref, "child_events", None) if _slot_ref is not None else None
+                    if children and child_q is not None:
+                        # Children report as they go. Pass each report on
+                        # while the batch is still running, live.
+                        gather = asyncio.create_task(_run_together(store, work, bot_id))
+                        while True:
+                            try:
+                                event = child_q.get_nowait()
+                            except asyncio.QueueEmpty:
+                                if gather.done():
+                                    break
+                                await asyncio.sleep(0.05)
+                            else:
+                                yield "child_status", json.dumps(event)
+                        while not child_q.empty():
+                            yield "child_status", json.dumps(child_q.get_nowait())
+                        results = gather.result()
+                    else:
+                        results = await _run_together(store, work, bot_id)
                 finally:
                     if model_slot is not None:
                         model_slot._executing_tools = False
                 close_tool_step("failed" if results and all(error is not None for _item, _result, error in results) else "done")
-                yield "status", batch_label
+                yield "status", status_label(work[-1]) if fan_out else batch_label
                 details: list[str] = []
                 added: list[str] = []
                 progress = False

@@ -108,10 +108,14 @@ def test_allow_list_drops_tools_the_parent_cannot_use():
 
 def test_depth_and_concurrency_caps():
     reset_for_tests()
-    for _ in range(MAX_CONCURRENT):
-        _acquire()
-    with pytest.raises(ToolError, match="Too many child agents"):
-        _acquire()
+
+    async def caps():
+        for _ in range(MAX_CONCURRENT):
+            await _acquire()
+        with pytest.raises(ToolError, match="Too many child agents"):
+            await _acquire(timeout=0.1)
+
+    asyncio.run(caps())
     reset_for_tests()
     request = ToolRequest(kind="delegate", body="look", command="[]")
     depth = helpers._depth.set(1)

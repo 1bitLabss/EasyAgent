@@ -18,7 +18,12 @@ import threading
 from datetime import datetime, timezone
 from pathlib import Path
 
-from easyagent.access import configured_token, is_lan, is_local, lan_ip, token_matches
+from easyagent.access import (
+    access_decision,
+    configured_token,
+    lan_ip,
+    token_matches,
+)
 
 FIREWALL_HINT = (
     "Windows Defender Firewall, Advanced settings, Inbound Rules: "
@@ -172,14 +177,8 @@ class PhoneBook:
 
 
 def access_for(host: str | None, presented: str, phone: PhoneBook) -> str:
-    """allow, refuse, or need_token."""
-    if is_local(host):
-        return "allow"
-    if not is_lan(host) or not phone.enabled:
-        return "refuse"
-    if phone.accepts(presented):
-        return "allow"
-    return "need_token"
+    """allow, refuse, or need_token. One decision, in access.py."""
+    return access_decision(host, presented, phone)
 
 
 def status_payload(phone: PhoneBook, port: int, *, listening: bool) -> dict:

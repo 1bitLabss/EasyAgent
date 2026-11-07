@@ -13,6 +13,8 @@ import ipaddress
 import os
 import secrets
 import socket
+import threading
+import time
 from pathlib import Path
 
 # Starlette's TestClient uses the host name "testclient". That value is not
@@ -115,6 +117,56 @@ def access_decision(host: str | None, presented: str, phone=None) -> str:
     if accepts and accepts(presented):
         return "allow"
     return "need_token"
+
+
+class TokenGuessGuard:
+    """A per-address counter of wrong tokens. In-process, no dependencies.
+
+    After ``max_wrong`` wrong tokens inside ``window_seconds``, that address
+    cannot try another token until ``lockout_seconds`` pass. Requests that
+    carry no token are not counted, so the token gate stays open for someone
+    who simply has not paired yet.
+    """
+
+    def __init__(
+        self,
+        max_wrong: int = 20,
+        window_seconds: float = 300.0,
+        lockout_seconds: float = 300.0,
+        clock=time.monotonic,
+    ) -> None:
+        self.max_wrong = max(1, int(max_wrong))
+        self.window_seconds = float(window_seconds)
+        self.lockout_seconds = float(lockout_seconds)
+        self._clock = clock
+        self._lock = threading.Lock()
+        self._wrong: dict[str, list[float]] = {}
+        self._locked_until: dict[str, float] = {}
+
+    def locked(self, host: str | None) -> bool:
+        now = self._clock()
+        with self._lock:
+            return now < self._locked_until.get(host or "", 0.0)
+
+    def note_wrong(self, host: str | None) -> None:
+        key = host or ""
+        now = self._clock()
+        with self._lock:
+            if now < self._locked_until.get(key, 0.0):
+                self._locked_until[key] = now + self.lockout_seconds
+                return
+            recent = [t for t in self._wrong.get(key, []) if now - t < self.window_seconds]
+            recent.append(now)
+            if len(recent) >= self.max_wrong:
+                self._locked_until[key] = now + self.lockout_seconds
+                recent = []
+            self._wrong[key] = recent
+
+    def note_ok(self, host: str | None) -> None:
+        key = host or ""
+        with self._lock:
+            self._wrong.pop(key, None)
+            self._locked_until.pop(key, None)
 
 
 def token_matches(presented: str, expected: str) -> bool:

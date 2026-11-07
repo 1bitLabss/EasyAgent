@@ -23,7 +23,15 @@ from easyagent import gate
 from easyagent import llm
 from easyagent import retry
 from easyagent import turn as turn_mod
-from easyagent.access import contained_file, is_lan, is_local, is_shell, presented_token, refusal_html
+from easyagent.access import (
+    TokenGuessGuard,
+    contained_file,
+    is_lan,
+    is_local,
+    is_shell,
+    presented_token,
+    refusal_html,
+)
 from easyagent.phone import (
     LanPort,
     PhoneBook,
@@ -792,15 +800,18 @@ def create_app(data_dir: str | Path | None = None) -> FastAPI:
     app.state.store = store
     app.state.phone = PhoneBook(store.root)
     app.state.lan = LanPort()
+    app.state.token_guard = TokenGuessGuard()
 
     @app.middleware("http")
     async def remote_access(request: Request, call_next):
         host = request.client.host if request.client else None
         presented = presented_token(request.headers)
         phone = request.app.state.phone
+        guard = request.app.state.token_guard
         decision = access_for(host, presented, phone)
         if decision == "allow" and not is_local(host):
             phone.claim_if_invite(presented, request.headers.get("user-agent") or "")
+            guard.note_ok(host)
         if decision == "refuse":
             if is_lan(host) and not phone.enabled:
                 kind = "off"
@@ -813,6 +824,14 @@ def create_app(data_dir: str | Path | None = None) -> FastAPI:
                 return HTMLResponse(refusal_html(kind), status_code=403, headers=headers)
             return JSONResponse({"detail": detail}, status_code=403, headers=headers)
         if decision == "need_token" and not is_shell(request.url.path):
+            if presented:
+                guard.note_wrong(host)
+                if guard.locked(host):
+                    return JSONResponse(
+                        {"detail": "Too many wrong tokens. Wait a few minutes and try again."},
+                        status_code=429,
+                        headers={"Cache-Control": "no-store"},
+                    )
             return JSONResponse(
                 {"detail": "This phone needs a pairing token."},
                 status_code=401,

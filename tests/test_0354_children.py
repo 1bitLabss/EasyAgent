@@ -152,7 +152,9 @@ def test_a_three_way_fan_out_reports_each_child_live(tmp_path, monkeypatch):
         # Running came before the end state, and both ride the same child_id.
         assert len({item["child_id"] for item in items}) == 1
         assert all(item["task_excerpt"] for item in items)
-        assert all(item["child_chat_id"] is None for item in items)
+        # Every event carries the child's own transcript chat, running first.
+        assert all(item["child_chat_id"] for item in items)
+        assert len({item["child_chat_id"] for item in items}) == 1
         assert all(item["elapsed"] >= 0 for item in items)
         first = next(i for i, item in enumerate(events) if item is items[0])
         assert first < done_at
@@ -210,7 +212,7 @@ def test_delegate_task_children_emit_child_status(tmp_path, monkeypatch):
     assert {item["name"] for item in children} == {"Child"}
     assert {item["task_excerpt"] for item in running} == {"count the boats", "check the tide"}
     assert all(item["state"] == "done" for item in finished)
-    assert all(item["child_chat_id"] is None for item in children)
+    assert all(item["child_chat_id"] for item in children)
 
     # One activity step per child call, not one shared batch step.
     steps = {

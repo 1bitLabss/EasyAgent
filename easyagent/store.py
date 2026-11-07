@@ -1246,7 +1246,10 @@ class Store:
                 continue
             if not ID_RE.fullmatch(path.stem):
                 continue
-            chat = read_json(path)
+            chat = read_json(path) or {}
+            # A fan-out child chat lives inside its parent chat, not the sidebar.
+            if chat.get("child"):
+                continue
             items.append(
                 {
                     "id": chat["id"],
@@ -1554,6 +1557,29 @@ class Store:
             if files.parent.resolve() != chats.resolve():
                 raise StoreError("Refusing to delete that path.", 400)
             shutil.rmtree(_io_path(files))
+        # A fan-out child chat lives and dies with its parent chat. No trash bin.
+        if chats.is_dir():
+            for other in chats.iterdir():
+                if (
+                    not other.is_file()
+                    or other.is_symlink()
+                    or other.suffix != ".json"
+                    or not ID_RE.fullmatch(other.stem)
+                ):
+                    continue
+                try:
+                    sibling = read_json(other) or {}
+                except Exception:
+                    continue
+                if not sibling.get("child"):
+                    continue
+                link = sibling.get("child_of")
+                if not isinstance(link, dict) or str(link.get("chat_id") or "") != chat_id:
+                    continue
+                sibling_files = self._child(chats, other.stem)
+                if sibling_files.is_dir() and sibling_files.parent.resolve() == chats.resolve():
+                    shutil.rmtree(_io_path(sibling_files))
+                other.unlink()
         return chat
 
     # --- rooms -------------------------------------------------------------

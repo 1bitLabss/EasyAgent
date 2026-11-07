@@ -17,7 +17,7 @@ from easyagent import llm
 from easyagent import turn as turn_mod
 from easyagent.gate import clamp_parallel
 from easyagent.safety import mark_untrusted
-from easyagent.store import Store, new_id
+from easyagent.store import Store, new_id, now_iso
 
 FENCE_RE = re.compile(r"```helper[ \t]*\r?\n(.*?)```", re.DOTALL | re.IGNORECASE)
 _TOOLS = frozenset({"files", "shell", "search", "search_files", "browser", "mcp", "memory", "project", "history", "bridge"})
@@ -201,11 +201,15 @@ def _end(tokens) -> None:
     _allowed.reset(tokens[1])
 
 
-async def run_helpers(store: Store, bot_id: str, specs: list[HelperSpec]) -> list[dict]:
+async def run_helpers(
+    store: Store, bot_id: str, specs: list[HelperSpec], parent_chat_id: str | None = None
+) -> list[dict]:
     """Run the helpers. One slot means one at a time. Stop cancels every one still going.
 
     Each child reports itself onto the chat stream as it starts and finishes,
     so a fan-out shows live per-child progress instead of one generic line.
+    Each child also gets its own transcript chat under this bot, so the
+    "Open child chat" button has something real to open.
     """
     if not specs:
         return []
@@ -217,6 +221,7 @@ async def run_helpers(store: Store, bot_id: str, specs: list[HelperSpec]) -> lis
     except Exception:
         endpoint = None
     slots = clamp_parallel((endpoint or {}).get("max_parallel"))
+    parent_chat_id = parent_chat_id or _parent_chat_id()
     if endpoint is None:
         return [_failed(spec, "This bot's connection is missing.") for spec in specs]
 
@@ -236,11 +241,14 @@ async def run_helpers(store: Store, bot_id: str, specs: list[HelperSpec]) -> lis
             turn_mod.raise_if_cancelled()
             child_id = new_id()
             started = time.monotonic()
-            _report(spec, child_id, "running", started)
+            child_chat = _open_child_chat(store, bot_id, parent_chat_id, spec)
+            _report(spec, child_id, "running", started, {"child_chat_id": (child_chat or {}).get("id")})
             try:
-                row = await _run_one(store, bot, endpoint, spec, yield_to_chats=True)
+                row = await _run_one(
+                    store, bot, endpoint, spec, yield_to_chats=True, child_chat=child_chat
+                )
             except (turn_mod.TurnCancelled, asyncio.CancelledError):
-                _report(spec, child_id, "stopped", started)
+                _report(spec, child_id, "stopped", started, {"child_chat_id": (child_chat or {}).get("id")})
                 raise
             _report(spec, child_id, str(row.get("status") or "done"), started, row)
             rows.append(row)
@@ -249,11 +257,14 @@ async def run_helpers(store: Store, bot_id: str, specs: list[HelperSpec]) -> lis
     async def tracked(spec: HelperSpec) -> dict:
         child_id = new_id()
         started = time.monotonic()
-        _report(spec, child_id, "running", started)
+        child_chat = _open_child_chat(store, bot_id, parent_chat_id, spec)
+        _report(spec, child_id, "running", started, {"child_chat_id": (child_chat or {}).get("id")})
         try:
-            row = await _run_one(store, bot, endpoint, spec, yield_to_chats=False)
+            row = await _run_one(
+                store, bot, endpoint, spec, yield_to_chats=False, child_chat=child_chat
+            )
         except (turn_mod.TurnCancelled, asyncio.CancelledError):
-            _report(spec, child_id, "stopped", started)
+            _report(spec, child_id, "stopped", started, {"child_chat_id": (child_chat or {}).get("id")})
             raise
         _report(spec, child_id, str(row.get("status") or "done"), started, row)
         return row
@@ -276,10 +287,64 @@ def _failed(spec: HelperSpec, detail: str) -> dict:
         "status": "error",
         "result": detail,
         "steps": 0,
+        "child_chat_id": None,
     }
 
 
-async def _run_one(store: Store, bot: dict, endpoint: dict, spec: HelperSpec, *, yield_to_chats: bool) -> dict:
+def _parent_chat_id() -> str:
+    """The chat this turn is running on. Empty outside a bound turn (a routine)."""
+    slot = turn_mod.current_slot()
+    return str(getattr(slot, "chat_id", "") or "") if slot is not None else ""
+
+
+def _open_child_chat(store: Store, bot_id: str, parent_chat_id: str, spec: HelperSpec) -> dict | None:
+    """The child's own transcript chat, filed under the parent's bot.
+
+    The task row is written first so a crash leaves evidence of what was asked.
+    None when there is no parent chat to hang it on (a routine run).
+    """
+    if not parent_chat_id:
+        return None
+    try:
+        chat = store.create_chat(bot_id)
+        chat["title"] = " ".join(spec.task.split())[:60] or spec.name
+        chat["child"] = True
+        chat["child_of"] = {"chat_id": parent_chat_id}
+        chat["messages"].append(
+            {"id": new_id(), "role": "user", "content": spec.task, "created_at": now_iso()}
+        )
+        chat["updated_at"] = now_iso()
+        store.save_chat(chat)
+    except Exception:
+        return None
+    return chat
+
+
+def _append_child_row(store: Store, chat: dict | None, content: str, *, error: bool = False) -> None:
+    """One assistant row on the child's own transcript. Never worth breaking the run over."""
+    text = str(content or "").strip()
+    if chat is None or not text:
+        return
+    row = {"id": new_id(), "role": "assistant", "content": text, "created_at": now_iso()}
+    if error:
+        row["error"] = True
+    chat["messages"].append(row)
+    chat["updated_at"] = now_iso()
+    try:
+        store.save_chat(chat)
+    except Exception:
+        pass
+
+
+async def _run_one(
+    store: Store,
+    bot: dict,
+    endpoint: dict,
+    spec: HelperSpec,
+    *,
+    yield_to_chats: bool,
+    child_chat: dict | None = None,
+) -> dict:
     messages = [
         {"role": "system", "content": _system(spec.name, spec.tools, spec.listed)},
         {"role": "user", "content": spec.task},
@@ -290,6 +355,7 @@ async def _run_one(store: Store, bot: dict, endpoint: dict, spec: HelperSpec, *,
     tool_token = llm.only_tools(spec.listed if spec.listed else _names_for(spec.tools))
     status = "done"
     result = ""
+    last_batch = ""
     try:
         while steps < spec.steps and time.monotonic() < deadline:
             turn_mod.raise_if_cancelled()
@@ -335,6 +401,8 @@ async def _run_one(store: Store, bot: dict, endpoint: dict, spec: HelperSpec, *,
                     details.append(await execute(store, request, bot["id"]))
                 except ToolError as exc:
                     details.append(str(exc))
+            _append_child_row(store, child_chat, _short(details))
+            last_batch = _short(details)
             if time.monotonic() >= deadline or steps >= spec.steps:
                 status = "stopped"
                 result = _short(details) or "Stopped. The helper reached its budget."
@@ -358,6 +426,10 @@ async def _run_one(store: Store, bot: dict, endpoint: dict, spec: HelperSpec, *,
         _end(tokens)
     if len(result) > 2000:
         result = result[:1980].rstrip() + "\n[shortened]"
+    # The child's own transcript ends with what it found. A stopped-with-budget
+    # result that just repeats the last tool batch is not written twice.
+    if result and result != last_batch:
+        _append_child_row(store, child_chat, result, error=(status == "error"))
     return {
         "id": new_id(),
         "name": spec.name,
@@ -366,6 +438,7 @@ async def _run_one(store: Store, bot: dict, endpoint: dict, spec: HelperSpec, *,
         "status": status,
         "result": result,
         "steps": steps,
+        "child_chat_id": (child_chat or {}).get("id"),
     }
 
 

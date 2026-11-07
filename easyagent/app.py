@@ -1679,7 +1679,21 @@ def create_app(data_dir: str | Path | None = None) -> FastAPI:
         target = f"{safe_chat}.json"
         if target not in chats_before:
             store.get_chat(bot_id, chat_id)
-        kept_before = {name: blob for name, blob in chats_before.items() if name != target}
+
+        def _cascaded_child(name: str, blob: bytes) -> bool:
+            """A fan-out child chat of this chat. The cascade is meant to remove it."""
+            try:
+                doc = json.loads(blob)
+            except ValueError:
+                return False
+            link = doc.get("child_of") if isinstance(doc, dict) and doc.get("child") else None
+            return isinstance(link, dict) and str(link.get("chat_id") or "") == safe_chat
+
+        kept_before = {
+            name: blob
+            for name, blob in chats_before.items()
+            if name != target and not _cascaded_child(name, blob)
+        }
         other_bots = {
             bot["id"]: _snapshot_chats(store, bot["id"])
             for bot in store.list_bots()

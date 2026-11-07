@@ -1,6 +1,8 @@
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { api } from "@/api";
+import { formatElapsed } from "@/lib/run";
 import { useApp } from "@/store";
+import { Elapsed } from "./Elapsed";
 
 export type JobRow = {
   id: string;
@@ -16,6 +18,16 @@ export type JobRow = {
   running?: boolean;
   queued_for?: string;
   state?: string;
+};
+
+/** A child agent working right now, from the live registry. */
+export type LiveChildRow = {
+  child_id: string;
+  name: string;
+  task_excerpt: string;
+  bot_id: string;
+  chat_id: string | null;
+  started_at: number;
 };
 
 function when(value?: string | null): string {
@@ -35,7 +47,13 @@ export function JobsPanel() {
     queryFn: () => api<JobRow[]>("/api/routines"),
     refetchInterval: 4000,
   });
+  const children = useQuery({
+    queryKey: ["children"],
+    queryFn: () => api<LiveChildRow[]>("/api/children"),
+    refetchInterval: 4000,
+  });
   const rows = jobs.data || [];
+  const working = children.data || [];
   const busy = rows.filter((row) => row.state === "running" || row.state === "queued").length;
 
   async function pause(row: JobRow) {
@@ -65,6 +83,35 @@ export function JobsPanel() {
         <h2 className="text-sm font-semibold">Jobs {busy ? <span data-testid="jobs-badge">{busy}</span> : null}</h2>
         <button type="button" className="text-sm text-muted" onClick={() => setJobs(false)} aria-label="Close jobs">Close</button>
       </header>
+      <section className="border-b border-border px-3 pb-3" data-testid="working-now">
+        <h3 className="mb-1 text-xs font-semibold uppercase text-muted">Working now</h3>
+        {children.isLoading ? (
+          <p className="text-sm text-muted">Checking who is working…</p>
+        ) : working.length === 0 ? (
+          <p className="text-sm text-muted" data-testid="working-now-empty">Nothing is working.</p>
+        ) : (
+          <ul className="space-y-2">
+            {working.map((child) => (
+              <li key={child.child_id} data-testid="working-child-row" data-child-id={child.child_id}>
+                <button
+                  type="button"
+                  className="block w-full rounded-lg border border-border p-2 text-left text-sm"
+                  disabled={!child.chat_id}
+                  onClick={() => child.chat_id && void openBot(child.bot_id, child.chat_id)}
+                >
+                  <strong>{child.name}</strong>
+                  <span className="mt-0.5 block text-xs text-muted">{child.task_excerpt}</span>
+                  <span className="mt-1 block text-xs">
+                    <Elapsed>
+                      {(now) => formatElapsed(Math.max(0, (now - child.started_at * 1000) / 1000))}
+                    </Elapsed>
+                  </span>
+                </button>
+              </li>
+            ))}
+          </ul>
+        )}
+      </section>
       {jobs.isLoading ? <p className="px-3 text-sm text-muted">Loading jobs…</p> : null}
       {jobs.isError ? <p className="px-3 text-sm text-danger" role="alert">{(jobs.error as Error).message}</p> : null}
       {!jobs.isLoading && rows.length === 0 ? (

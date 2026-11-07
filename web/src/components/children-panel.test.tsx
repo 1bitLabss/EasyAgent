@@ -1,7 +1,7 @@
 import { QueryClientProvider } from "@tanstack/react-query";
 import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { queryClient } from "@/api";
+import { api, queryClient } from "@/api";
 import { useApp } from "@/store";
 import { pushEventForTests, resetStreamForTests, setFlightForTests } from "@/stream";
 import type { Bot, Chat, ChatMessage } from "@/types";
@@ -21,6 +21,7 @@ vi.mock("@/api", async () => {
     queryClient: client,
     api: vi.fn(async (path: string) => {
       if (path === "/api/bots") return [parentBot(), childBot()];
+      if (path.endsWith("/child-steer")) return { answer: "The child will read it before its next step." };
       if (path.includes("/ongoing")) return path.startsWith(`/api/bots/${CHILD_BOT_ID}`) ? null : { id: CHAT_ID };
       if (path.includes("/approvals")) return [];
       if (path.includes("/read")) return {};
@@ -246,6 +247,37 @@ describe("live children panel", () => {
     expect(bubbles.length).toBeGreaterThanOrEqual(2);
     expect(failed.length).toBe(1);
     expect(failed[0]?.textContent).toContain("Basil");
+  });
+
+  it("offers a steer line only while the child runs and posts the note", async () => {
+    seedChat([asked]);
+    paint();
+    startFlight();
+
+    act(() => {
+      pushEventForTests(BOT_ID, CHAT_ID, childEvent("c1", "Cedar", "running", { child_chat_id: CHILD_CHAT_ID }));
+      pushEventForTests(BOT_ID, CHAT_ID, childEvent("c2", "Basil", "running"));
+    });
+
+    // Only the running child with its own chat gets the input.
+    const input = await screen.findByTestId("child-steer-input");
+    expect(screen.getAllByTestId("child-steer-input").length).toBe(1);
+    fireEvent.change(input, { target: { value: "go faster" } });
+    await act(async () => {
+      fireEvent.click(screen.getByTestId("child-steer-send"));
+    });
+    await screen.findByTestId("child-steered");
+    expect(api).toHaveBeenCalledWith(
+      `/api/bots/${BOT_ID}/chats/${CHILD_CHAT_ID}/child-steer`,
+      expect.objectContaining({ method: "POST", json: { text: "go faster" } }),
+    );
+
+    // When the child finishes, the steer line goes away.
+    act(() => {
+      pushEventForTests(BOT_ID, CHAT_ID, childEvent("c1", "Cedar", "done", { child_chat_id: CHILD_CHAT_ID, elapsed: 12 }));
+    });
+    expect(screen.queryByTestId("child-steer-input")).toBeNull();
+    expect(screen.queryByTestId("child-steered")).toBeNull();
   });
 });
 

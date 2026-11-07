@@ -625,6 +625,13 @@ class AskIn(BaseModel):
     task: str
 
 
+class ChildSteerIn(BaseModel):
+    """One line passed to a running child. It reads it before its next step."""
+
+    model_config = ConfigDict(extra="ignore")
+    text: str = ""
+
+
 class RoomIn(BaseModel):
     model_config = ConfigDict(extra="ignore")
     name: str
@@ -867,6 +874,13 @@ def create_app(data_dir: str | Path | None = None) -> FastAPI:
     @app.get("/api/routines")
     def all_routines():
         return routine_views(store)
+
+    @app.get("/api/children")
+    def all_children():
+        # Who is working right now: the live child registry, oldest first.
+        from easyagent.delegate import list_children
+
+        return list_children(store)
 
     @app.post("/api/diag/client-event")
     async def client_event(request: Request):
@@ -1959,6 +1973,29 @@ def create_app(data_dir: str | Path | None = None) -> FastAPI:
                 return followed or result
         finally:
             await _finish_turn(store, bot_id, chat_id)
+
+    @app.post("/api/bots/{bot_id}/chats/{chat_id}/child-steer")
+    def child_steer(bot_id: str, chat_id: str, body: ChildSteerIn):
+        """Pass a note to a running child. It reads it before its next step."""
+        text = " ".join((body.text or "").split())
+        if not text:
+            raise HTTPException(400, "Write something first.")
+        chat = store.get_chat(bot_id, chat_id)
+        from easyagent import delegate
+
+        if not chat.get("child") or not delegate.child_chat_running(bot_id, chat_id):
+            return {"answer": "That child is not running right now."}
+        from easyagent.plan import _read_queue, _write_queue, drop_queue
+
+        payload = _read_queue(store, bot_id, chat_id)
+        payload["items"].append({"id": new_id(), "content": text, "at": now_iso()})
+        _write_queue(store, bot_id, chat_id, payload)
+        if not delegate.child_chat_running(bot_id, chat_id):
+            # It finished between the check and the write. Do not leave the note
+            # sitting in a queue nobody will read.
+            drop_queue(store, bot_id, chat_id)
+            return {"answer": "That child is not running right now."}
+        return {"answer": "The child will read it before its next step."}
 
     @app.post("/api/bots/{bot_id}/chats/{chat_id}/retry")
     async def retry_message(bot_id: str, chat_id: str, request: Request):

@@ -538,7 +538,9 @@ NATIVE_TOOLS = [
     ),
     _tool(
         "helper",
-        "Hand one self-contained task to a helper. It does not see this chat.",
+        "Hand one self-contained task to a helper. It does not see this chat. "
+        "A helper fence can carry a schema: line with a JSON schema; the helper must then answer "
+        "with JSON matching it and gets one correction try.",
         {"name": _STRING, "task": _STRING, "tools": _STRING},
         ["task"],
     ),
@@ -657,8 +659,21 @@ NATIVE_TOOLS = [
     _tool(
         "delegate_task",
         "Run one task in a child agent. The child has its own context and only the tools you name. "
-        "It cannot approve more than you can, and it does not inherit /yolo. You receive only its summary.",
-        {"task": _STRING, "tools": {"type": "array", "items": _STRING}},
+        "It cannot approve more than you can, and it does not inherit /yolo. You receive only its summary. "
+        "schema is an optional JSON schema. When set, the child must answer with JSON matching it; "
+        "it gets one correction try. The schema can list properties of type string, number, integer, "
+        "boolean, or array of string, plus a required list.",
+        {
+            "task": _STRING,
+            "tools": {"type": "array", "items": _STRING},
+            "schema": {
+                "type": "object",
+                "description": (
+                    "Optional JSON schema. When set, the child must answer with JSON matching it; "
+                    "it gets one correction try."
+                ),
+            },
+        },
         ["task"],
     ),
 ]
@@ -876,8 +891,12 @@ def _fence_for_call(call: dict) -> str:
         if not isinstance(listed, list):
             listed = []
         tools = json.dumps([str(item) for item in listed])
+        schema = args.get("schema")
         if task:
-            return f"```delegate\n{task}\ntools: {tools}\n```"
+            extra = ""
+            if isinstance(schema, dict) and schema:
+                extra = "\nschema: " + json.dumps(schema, separators=(",", ":"))
+            return f"```delegate\n{task}\ntools: {tools}{extra}\n```"
     if name in {"routine", "create_routine", "edit_routine", "delete_routine"}:
         routine_action = str(args.get("action") or "").strip().lower()
         if name == "create_routine":

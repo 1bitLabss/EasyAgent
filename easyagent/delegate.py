@@ -11,6 +11,7 @@ from __future__ import annotations
 import asyncio
 import json
 import threading
+import time
 
 from easyagent import helpers
 from easyagent import turn as turn_mod
@@ -40,6 +41,10 @@ _LOCK = threading.Lock()
 # Children in flight, counted per chat (or per bot when the turn has no chat id).
 # A process-global counter let one chat's children starve every other chat.
 _INFLIGHT: dict[str, int] = {}
+# Who is working right now, keyed by child_id. The JobsPanel reads this through
+# GET /api/children, and the child-steer endpoint uses it to tell a running
+# child from one that already finished. Entries live from start to finish only.
+_LIVE: dict[str, dict] = {}
 # A fourth child used to be refused outright and its work lost. Now it waits
 # its turn up to this many seconds, then gives up with the same plain refusal.
 QUEUE_WAIT_SECONDS = 30.0
@@ -51,7 +56,44 @@ _SEMAPHORES: dict[tuple[int, str], "asyncio.Semaphore"] = {}
 def reset_for_tests() -> None:
     with _LOCK:
         _INFLIGHT.clear()
+        _LIVE.clear()
     _SEMAPHORES.clear()
+
+
+def register_live_child(child_id: str, name: str, task: str, bot_id: str, chat_id: str | None) -> None:
+    """Say this child is working now. Called at child start, next to the slot grab."""
+    with _LOCK:
+        _LIVE[str(child_id)] = {
+            "child_id": str(child_id),
+            "name": " ".join(str(name or "Child").split())[:40] or "Child",
+            "task_excerpt": " ".join(str(task or "").split())[:120],
+            "bot_id": str(bot_id or ""),
+            "chat_id": str(chat_id) if chat_id else None,
+            "started_at": time.time(),
+        }
+
+
+def finish_live_child(child_id: str) -> None:
+    """Take the child off the board. Called at finish, stop, and failure."""
+    with _LOCK:
+        _LIVE.pop(str(child_id), None)
+
+
+def child_chat_running(bot_id: str, chat_id: str) -> bool:
+    """True while a running child owns this chat. The steer endpoint asks this."""
+    with _LOCK:
+        return any(
+            entry["bot_id"] == str(bot_id) and entry["chat_id"] == str(chat_id)
+            for entry in _LIVE.values()
+        )
+
+
+def list_children(store=None) -> list[dict]:
+    """The children working right now, oldest first. store is unused today."""
+    with _LOCK:
+        rows = [dict(entry) for entry in _LIVE.values()]
+    rows.sort(key=lambda entry: float(entry.get("started_at") or 0.0))
+    return rows
 
 
 def inflight(scope: str | None = None) -> int:
@@ -241,8 +283,23 @@ async def run_delegate(store, bot_id: str | None, request) -> str:
     scope = _scope(bot_id)
     await _acquire(scope)
     try:
+        schema = None
+        schema_text = str(getattr(request, "schema_json", "") or "").strip()
+        if schema_text:
+            try:
+                parsed_schema = json.loads(schema_text)
+            except ValueError:
+                parsed_schema = None
+            if isinstance(parsed_schema, dict) and parsed_schema:
+                schema = parsed_schema
         spec = HelperSpec(
-            name="Child", task=task[:4000], tools=kinds, steps=4, seconds=60, listed=tuple(names)
+            name="Child",
+            task=task[:4000],
+            tools=kinds,
+            steps=4,
+            seconds=60,
+            listed=tuple(names),
+            schema=schema,
         )
         # The child context is built here so a test can see it is not the parent transcript.
         _ = isolated_messages(spec.task, kinds, names)

@@ -164,6 +164,69 @@ const CHILD_STATE_LABEL: Record<ChildRow["state"], string> = {
   stopped: "Stopped",
 };
 
+/** One line passed to a running child. It reads the note before its next step. */
+function SteerInput({ botId, childChatId }: { botId: string; childChatId: string }) {
+  const [text, setText] = useState("");
+  const [steered, setSteered] = useState(false);
+  const [failed, setFailed] = useState(false);
+  async function send() {
+    const value = text.trim();
+    if (!value) return;
+    try {
+      await api(`/api/bots/${botId}/chats/${childChatId}/child-steer`, {
+        method: "POST",
+        json: { text: value },
+      });
+      setText("");
+      setSteered(true);
+      setFailed(false);
+    } catch {
+      setFailed(true);
+    }
+  }
+  return (
+    <span className="inline-flex items-center gap-1">
+      <input
+        type="text"
+        className="rounded-full bg-white px-3 py-1 text-sm text-foreground dark:bg-white/10"
+        placeholder="Tell the child something"
+        data-testid="child-steer-input"
+        value={text}
+        onChange={(event) => {
+          setText(event.target.value);
+          setSteered(false);
+          setFailed(false);
+        }}
+        onKeyDown={(event) => {
+          if (event.key === "Enter" && !event.shiftKey) {
+            event.preventDefault();
+            void send();
+          }
+        }}
+      />
+      <button
+        type="button"
+        className="rounded-full bg-white px-3 py-1 text-sm text-foreground dark:bg-white/10"
+        data-testid="child-steer-send"
+        onClick={() => void send()}
+        disabled={!text.trim()}
+      >
+        Send
+      </button>
+      {steered ? (
+        <span className="text-xs text-muted" data-testid="child-steered">
+          Steered.
+        </span>
+      ) : null}
+      {failed ? (
+        <span className="text-xs text-muted" data-testid="child-steer-failed">
+          Did not get through.
+        </span>
+      ) : null}
+    </span>
+  );
+}
+
 /** Live rows for subagents running at once. One row per child, updated in place. */
 function ChildrenPanel({ botId, rows }: { botId: string | null; rows: ChildRow[] }) {
   return (
@@ -192,6 +255,9 @@ function ChildrenPanel({ botId, rows }: { botId: string | null; rows: ChildRow[]
                 </span>
               )}
             </Elapsed>
+            {child.state === "running" && child.child_chat_id && botId ? (
+              <SteerInput botId={botId} childChatId={child.child_chat_id} />
+            ) : null}
             {child.child_chat_id ? (
               <button
                 type="button"

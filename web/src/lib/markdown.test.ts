@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { settledBlocks, splitStreamingMarkdown } from "./markdown";
+import { settledBlocks, splitStreamingMarkdown, toSpeakableText } from "./markdown";
 
 describe("splitStreamingMarkdown", () => {
   it("keeps closed paragraphs and caps the open tail", () => {
@@ -22,5 +22,30 @@ describe("splitStreamingMarkdown", () => {
     const blocks = settledBlocks(text);
     expect(blocks.join("")).toBe(text);
     expect(blocks.some((block) => block.includes("line\n\nline"))).toBe(true);
+  });
+});
+
+describe("toSpeakableText", () => {
+  it("skips fenced code blocks entirely", () => {
+    expect(toSpeakableText("Look:\n\n```python\nprint(1)\n```\n\nDone.")).toBe("Look: Done.");
+  });
+
+  it("removes emphasis markers and keeps the words", () => {
+    expect(toSpeakableText("**bold** and *italic* and _under_ and ~~out~~")).toBe("bold and italic and under and out");
+  });
+
+  it("drops inline code markers, link syntax, and heading hashes", () => {
+    expect(toSpeakableText("## Title\n\nRun `npm test` from [the docs](https://example.com).")).toBe(
+      "Title Run npm test from the docs.",
+    );
+  });
+
+  it("collapses list markers and extra whitespace", () => {
+    expect(toSpeakableText("- one\n- two\n\n> quoted")).toBe("one two quoted");
+  });
+
+  it("handles empty and missing input", () => {
+    expect(toSpeakableText("")).toBe("");
+    expect(toSpeakableText(undefined as unknown as string)).toBe("");
   });
 });

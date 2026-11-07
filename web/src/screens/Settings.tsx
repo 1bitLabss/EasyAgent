@@ -9,6 +9,7 @@ import { Input, Textarea } from "@/components/ui/input";
 import { Switch } from "@/components/ui/switch";
 import { pokeFace } from "@/lib/mood";
 import { contextNote } from "@/lib/run";
+import { readAloudEnabled, setReadAloudEnabled, speechAvailable, stopSpeaking } from "@/lib/speak";
 import { localWhen } from "@/lib/time";
 import { windowChat } from "@/lib/window";
 import { PhoneAccess } from "@/screens/Phone";
@@ -77,6 +78,30 @@ function RoutineClockNote() {
 
 function Note({ children }: { children: ReactNode }) {
   return <p className="text-xs text-muted">{children}</p>;
+}
+
+/** Voice replies ride the browser's own speechSynthesis, so the choice lives
+ * on this device, not on the bot. Hidden where the webview has no voice. */
+function VoiceBlock() {
+  const [readAloud, setReadAloud] = useState(readAloudEnabled());
+  if (!speechAvailable()) return null;
+  return (
+    <section id="voice" className="space-y-3 rounded-lg border border-border bg-card p-4">
+      <h2 className="text-sm font-medium">Voice</h2>
+      <label className="flex items-center justify-between gap-3 text-sm" data-testid="read-aloud-row">
+        <span>Read replies aloud</span>
+        <Switch
+          checked={readAloud}
+          onCheckedChange={(on) => {
+            setReadAloudEnabled(on);
+            setReadAloud(on);
+            if (!on) stopSpeaking();
+          }}
+        />
+      </label>
+      <p className="text-xs text-muted">New replies in the chat you have open are read out loud with the voice your browser already has. Off by default.</p>
+    </section>
+  );
 }
 
 function Block({ id, title, children }: { id?: string; title: string; children: ReactNode }) {
@@ -552,6 +577,7 @@ export function SettingsScreen() {
         <PhoneAccess />
         <GlobalYolo />
         <CopyDiagnostics />
+        <VoiceBlock />
         <section>
           <h1 className="text-2xl font-semibold">Pick a bot first.</h1>
           <p className="mt-2 text-sm text-muted">The rest of Settings belongs to one bot. Chats are not changed here.</p>
@@ -590,6 +616,7 @@ export function SettingsScreen() {
         <PhoneAccess />
         <GlobalYolo />
         <CopyDiagnostics />
+        <VoiceBlock />
       </div>
       <header className="px-6 py-5">
         <p className="text-xs uppercase tracking-wide text-muted">Bot settings</p>

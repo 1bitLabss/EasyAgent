@@ -24,6 +24,27 @@ export function splitStreamingMarkdown(text: string, cap = STREAM_TAIL_CAP): { c
   return { closed, tail };
 }
 
+/**
+ * Plain words for the voice. Fenced code blocks are skipped entirely, inline
+ * markers are removed, and links keep their text so the voice never reads
+ * asterisks or code.
+ */
+export function toSpeakableText(markdown: string): string {
+  let text = (markdown || "").replace(/```[\s\S]*?```/g, " ");
+  text = text.replace(/`([^`]*)`/g, "$1");
+  text = text.replace(/!\[([^\]]*)\]\([^)]*\)/g, "$1");
+  text = text.replace(/\[([^\]]*)\]\([^)]*\)/g, "$1");
+  text = text.replace(/^\s{0,3}#{1,6}\s+/gm, "");
+  text = text.replace(/^\s*>+\s?/gm, "");
+  text = text.replace(/^\s*[-*+]\s+/gm, "");
+  text = text.replace(/^\s*\d+\.\s+/gm, "");
+  text = text.replace(/(\*\*|__)(.+?)\1/g, "$2");
+  text = text.replace(/(\*|_)(.+?)\1/g, "$2");
+  text = text.replace(/~~(.+?)~~/g, "$1");
+  text = text.replace(/[*_`]+/g, "");
+  return text.replace(/\s+/g, " ").trim();
+}
+
 /** Paragraphs that already ended. Each block stays put while the tail grows. */
 export function settledBlocks(text: string): string[] {
   if (!text) return [];

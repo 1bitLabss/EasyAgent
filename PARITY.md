@@ -10,12 +10,12 @@
 | Terminal + background processes | ✅ | ✅ (terminal; polling via tool) |
 | File tools (read/write/patch/search) | ✅ + docx/pdf extraction | ✅ (no office/pdf extraction 🟡) |
 | Web search / fetch / research | ✅ + x_search | ✅ research with citations |
-| Persistent Python kernel | ✅ execute_code (state survives) | 🟡 python tool is per-call, no persistent kernel |
+| Persistent Python kernel | ✅ execute_code (state survives) | ✅ per-chat kernel, state survives, Stop clears it (0.3.51) |
 | Browser automation | ✅ CDP + cloud + profiles + dialogs | ✅ Playwright per-bot 🟡 no dialog handling |
 | Browser secrets vault | ✅ browser_vault | 🟡 vault exists, browser never fills from it |
 | Todo / plan | ✅ todo_list | ✅ plan (checklist, compaction-immune) |
 | Clarify questions | ✅ batched multi-question | 🟡 question = single choice list |
-| Subagents / delegation | ✅ parallel + worktrees + schemas | ✅ ask_bot / delegate / helper 🟡 no parallel fan-out UI |
+| Subagents / delegation | ✅ parallel + worktrees + schemas | ✅ parallel fan-out, live panel, live steering, schema-validated output ⭐ · 🟡 no worktree isolation |
 | MCP | ✅ consume + export as server | ✅ consume (per-tool permissions ⭐) · ❌ export |
 
 ## Memory & knowledge
@@ -23,7 +23,7 @@
 |---|---|---|
 | Curated memory | ✅ MEMORY.md/USER.md | ✅ same + direction + topic files ⭐ |
 | Long-chat context | ✅ compression+checkpoints | ✅ rolling summary w/ citation-checked facts ⭐ |
-| Search past chats | ✅ FTS5 + **user-facing search** | 🟡 BM25+embeddings bot-side only; **no user search UI** |
+| Search past chats | ✅ FTS5 + user-facing search | ✅ user search screen + jump-to-message (0.3.50) |
 | Skills | ✅ + hub install + linter | ✅ + verified-candidate pipeline ⭐ |
 | Background learning | ✅ review+capture | ✅ night pass, proposals must survive replay ⭐ |
 | Profiles isolation | ✅ | 🟡 bots ≈ profiles; global direction shared |
@@ -31,7 +31,7 @@
 ## Media & voice
 | Capability | Hermes | EasyAgent |
 |---|---|---|
-| Model sees images | ✅ vision_analyze + region crop | ❌ **attachments are decorative** |
+| Model sees images | ✅ vision_analyze + region crop | ✅ attachments reach the model + per-connection vision switch (0.3.50) |
 | Image/video generation | ✅ fal/Kling/xAI | ❌ |
 | TTS | ✅ Edge free + 4 providers | ❌ |
 | STT / voice mode | ✅ whisper.cpp + wake word + voice channels | 🟡 browser Web Speech (Chrome-only) |
@@ -69,7 +69,7 @@
 
 ## The honest summary
 EasyAgent **already beats Hermes** on: containment, script gating, verified learning, honesty receipts, evals, rooms, remote computers, routines UX.
-Hermes leads on: **media (vision/TTS/generation), platform breadth, desktop GUI control, usage tracking, user-facing chat search, first-run experience.**
+Hermes leads on: **media (TTS/generation), platform breadth, desktop GUI control (computer_use), usage tracking, first-run experience, kanban board, MCP export.** (vision, chat search, persistent kernel, and subagent live UI closed in 0.3.50–0.3.53.)
 
 ## Build order — revised 2026-11-04 per Nathan's directive
 *Directive: real work shifts to EasyAgent, Hermes gets dropped. Coding, tool calling, scheduled jobs, and group chats must be smooth and polished first — daily-driver reliability beats consumer polish.*
@@ -77,7 +77,7 @@ Hermes leads on: **media (vision/TTS/generation), platform breadth, desktop GUI 
 0. ✅ **0.3.50 — "The bot can see"** (shipped `495d1a0`): attachments reach the model; per-connection vision switch.
 0. ✅ **Audit phase**: read-only audits of routines, tool-calling/coding, rooms, and subagent/delegation against daily-driver bar (findings drive the fix queue below).
 1. ✅ **Chat search**: `/api/chat-search` + sidebar screen with jump-to-message shipped in 0.3.50 (`91be09e`). Pillar fix waves (routines, rooms, tool-call parsing, subagent budgets) also shipped in 0.3.50.
-2. ⬜ **Work kit (next, in audit)**: persistent Python kernel + parallel delegation fan-out (subagents are a named pillar: parallel fan-out, live progress UI, failure surfacing).
+2. ✅ **Work kit + subagent flagship** (shipped 0.3.51–0.3.53): persistent kernel, parallel fan-out with live panel, queueing, child transcripts, schema-validated output, live steering, JobsPanel "Working now".
 3. ⬜ Usage line per reply (tokens/time).
 4. ⬜ **0.3.54 — "Talk to me"**: TTS via edge-tts (free) + audio reply cards.
 5. ⬜ **0.3.55 — "First minute"**: first-run wizard (auto-detect Ollama/llama.cpp → connection+bot → first reply <60s).

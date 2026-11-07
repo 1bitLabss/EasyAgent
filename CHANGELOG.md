@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.3.53
+- You can steer a child agent while it works. A running child's row has a one-line box: what you type reaches the child before its next step. If it already finished, the app says so instead of pretending.
+- A child can be required to answer in JSON. When the parent gives it a schema, the child gets one correction try, and if it still misses, you get its raw answer with a plain note that it did not match.
+- The Jobs panel has a "Working now" section: every child agent running across your bots, with its task and elapsed time, and a click opens its chat.
+
 ## 0.3.52
 - An answer to a message you sent mid-reply now streams smoothly. It used to lose its first words and paint in few-word flashes; the first token is now never dropped and the fallback view refreshes four times as often.
 - Fan-out children get their own chat. Every delegate or helper child now has a transcript you can open — its task, what it did, and what it found. It lives with its parent chat and goes away with it.

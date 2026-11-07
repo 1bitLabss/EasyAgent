@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.3.51
+- Python keeps its state between calls in the same chat. Variables and imports you made last call are still there this call. Stop, a timeout, or a reset clears them, and the bot says so instead of failing quietly. A python step says "Running Python", not "Connecting".
+- Child agents show up while they work: one row per child with its task, a Working/Done/Failed/Stopped chip, elapsed time, and a link to the child's chat when it has one.
+- A fourth child agent waits its turn (up to 30 seconds) instead of being refused.
+- One helper failing no longer paints the whole batch red: each child gets its own result row, and only the failed one is flagged.
+
 ## 0.3.50
 - The bot can see attachments. Text files ride to the model, and pictures need the connection's can-see-pictures switch.
 - Search your chats from the sidebar: live results across every bot, and a click jumps to the message and flashes it.

@@ -1,6 +1,6 @@
 [project]
 name = "easyagent"
-version = "0.3.50"
+version = "0.3.51"
 description = "AI agents, made easy."
 requires-python = ">=3.11"
 dependencies = [

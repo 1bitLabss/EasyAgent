@@ -1852,6 +1852,11 @@ def create_app(data_dir: str | Path | None = None) -> FastAPI:
         """Clear what the model sees. The transcript is not deleted."""
         return _public_chat(store, store.start_fresh(bot_id, chat_id))
 
+    @app.get("/api/usage/today")
+    def usage_today():
+        """Tokens stamped today across every chat. For the jobs panel rollup."""
+        return store.usage_today()
+
     @app.post("/api/bots/{bot_id}/chats/{chat_id}/compact")
     def compact_chat(bot_id: str, chat_id: str):
         """Fold older turns into the summary. No model call. The transcript stays."""
@@ -7485,6 +7490,26 @@ def _finish_reply(
         message.pop("live", None)
         message.pop("error", None)
         blank_reply = False
+    # Stamp the finished row with what the model server reported. Three small
+    # ints, nothing bulky. The prompt size also feeds the context meter.
+    usage = llm.turn_usage()
+    if usage is not None:
+        prompt_tokens = int(usage.get("prompt") or 0)
+        completion_tokens = int(usage.get("completion") or 0)
+        elapsed_ms = int((time.monotonic() - float(usage.get("started") or time.monotonic())) * 1000)
+        if elapsed_ms > 0:
+            message["elapsed_ms"] = elapsed_ms
+        if prompt_tokens > 0:
+            message["prompt_tokens"] = prompt_tokens
+            chat["usage_prompt_tokens"] = prompt_tokens
+        if completion_tokens > 0:
+            message["completion_tokens"] = completion_tokens
+        if prompt_tokens > 0 or completion_tokens > 0:
+            # Count each call once. The tally refills if a helper or a
+            # synthesis call runs after this save in the same turn.
+            usage["prompt"] = 0
+            usage["completion"] = 0
+            store.note_usage_today(prompt_tokens, completion_tokens)
     _record_turn_meter(chat, clear_overflow=True)
     stats = _persist_context(store, chat)
     chat["updated_at"] = now_iso()
@@ -7533,6 +7558,7 @@ def _sse_stopped(store: Store, bot_id: str, chat_id: str, detail: str) -> str:
 async def _reply_json(store: Store, bot_id: str, chat_id: str, *, continue_run: bool = False) -> dict:
     from easyagent.generation import GenerationLimit
 
+    llm.begin_turn_usage()
     chat = store.get_chat(bot_id, chat_id)
     await _propose_if_corrected(store, bot_id, chat)
     _write_live(store, bot_id, chat_id, step="Waiting on model", start=not continue_run, force=True)
@@ -7583,6 +7609,7 @@ async def _stream_reply(
     first_scale: float = 1,
 ):
     """Yield SSE for one reply. The caller holds the chat lock. The user turn is already stored."""
+    llm.begin_turn_usage()
     bot = store.get_bot(bot_id)
     chat = store.get_chat(bot_id, chat_id)
     await _propose_if_corrected(store, bot_id, chat)

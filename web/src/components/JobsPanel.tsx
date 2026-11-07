@@ -1,7 +1,7 @@
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useEffect, useState } from "react";
 import { api } from "@/api";
-import { formatElapsed } from "@/lib/run";
+import { formatElapsed, formatTokenCount } from "@/lib/run";
 import { cn } from "@/lib/utils";
 import { useApp } from "@/store";
 import { Elapsed } from "./Elapsed";
@@ -48,6 +48,22 @@ export type LiveChildRow = {
   started_at: number;
 };
 
+/** Tokens stamped on finished replies today, summed on the server. */
+export type UsageToday = {
+  date: string;
+  prompt_tokens: number;
+  completion_tokens: number;
+};
+
+/** "1.2k in / 340 out" from the rollup. Empty when nothing is known yet. */
+export function usageToday(data?: UsageToday | null): string {
+  if (!data) return "";
+  const prompt = Number(data.prompt_tokens) || 0;
+  const completion = Number(data.completion_tokens) || 0;
+  if (prompt <= 0 && completion <= 0) return "";
+  return `${formatTokenCount(prompt)} in / ${formatTokenCount(completion)} out`;
+}
+
 function when(value?: string | null): string {
   if (!value) return "—";
   const date = new Date(value);
@@ -70,6 +86,11 @@ export function JobsPanel() {
     queryKey: ["children"],
     queryFn: () => api<LiveChildRow[]>("/api/children"),
     refetchInterval: 4000,
+  });
+  const usage = useQuery({
+    queryKey: ["usage-today"],
+    queryFn: () => api<UsageToday>("/api/usage/today"),
+    refetchInterval: 30000,
   });
   const rows = jobs.data || [];
   const working = children.data || [];
@@ -190,6 +211,7 @@ export function JobsPanel() {
       </ul>
       <footer className="space-y-2 border-t border-border px-3 py-3 text-xs text-muted">
         <p>Runs only while EasyAgent is open.</p>
+        {usageToday(usage.data) ? <p data-testid="usage-today">Today: {usageToday(usage.data)}</p> : null}
         <button
           type="button"
           className="underline"

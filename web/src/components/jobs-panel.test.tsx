@@ -9,6 +9,7 @@ import { useApp } from "@/store";
 vi.mock("@/api", () => ({
   api: vi.fn(async (path: string) => {
     if (path === "/api/routines") return [];
+    if (path === "/api/usage/today") return { date: "2026-11-07", prompt_tokens: 1234, completion_tokens: 340 };
     if (path.startsWith("/api/rooms/")) {
       return {
         id: "room-1",
@@ -44,6 +45,12 @@ describe("jobs and rooms", () => {
     useApp.setState({ jobsOpen: true, highlightJob: "" });
     render(wrap(<JobsPanel />));
     expect((await screen.findByTestId("jobs-empty")).textContent).toMatch(/only while EasyAgent is open/i);
+  });
+
+  it("rolls today's tokens into a small line in the footer", async () => {
+    useApp.setState({ jobsOpen: true, highlightJob: "" });
+    render(wrap(<JobsPanel />));
+    expect((await screen.findByTestId("usage-today")).textContent).toBe("Today: 1.2k in / 340 out");
   });
 
   it("opens a room as a full window with member chips and a speaker", async () => {

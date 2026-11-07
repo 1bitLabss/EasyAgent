@@ -81,6 +81,9 @@ export type ChatMessage = {
   content: string;
   thinking?: string;
   thought_seconds?: number;
+  elapsed_ms?: number;
+  prompt_tokens?: number;
+  completion_tokens?: number;
   error?: boolean;
   choices?: string[];
   reaction?: string;

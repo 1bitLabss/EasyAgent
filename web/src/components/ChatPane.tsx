@@ -15,7 +15,7 @@ import { chipText, chipTitle } from "@/lib/chips";
 import { yoloClock, yoloRemaining } from "@/lib/yolo";
 import { activityLabel, askedLine } from "@/lib/activity";
 import { deriveUserHistory } from "@/lib/composer-history";
-import { describeRun, faceStateFor, formatElapsed, runPresence, runTone, shownStep, workingLine } from "@/lib/run";
+import { describeRun, faceStateFor, formatElapsed, formatTokenCount, runPresence, runTone, shownStep, workingLine } from "@/lib/run";
 import { arrangeBusy, hideWhileSending, messageHasBubble, placeLiveReply, reactionWho, rowKey, shownThinking } from "@/lib/transcript";
 import type { FrozenReply } from "@/stream";
 import { cn } from "@/lib/utils";
@@ -25,6 +25,20 @@ import { RETRY_REASON, attachLive, canResume, chatStillPolling, flightFor, pause
 import type { Bot, Chat, ChatMessage, ChatSummary, ChildRow } from "@/types";
 
 const REACTIONS = ["👍", "👎", "❤️", "👀"];
+
+/** The quiet footer on a finished reply: time, then tokens when the server told us. */
+export function usageNote(message: ChatMessage): string {
+  const parts: string[] = [];
+  const elapsed = Number(message.elapsed_ms) || 0;
+  if (elapsed > 0) parts.push(formatElapsed(elapsed / 1000));
+  const prompt = Number(message.prompt_tokens) || 0;
+  const completion = Number(message.completion_tokens) || 0;
+  if (prompt > 0 || completion > 0) {
+    parts.push(`${formatTokenCount(prompt)} in / ${formatTokenCount(completion)} out`);
+  }
+  return parts.join(" · ");
+}
+
 const PAUSE_LINE = new Set([
   "Paused, you sent a message",
   "Paused, say continue to resume",
@@ -394,6 +408,9 @@ const MessageRow = memo(function MessageRow({
           </div>
         ) : null}
         {message.skills_saved?.length ? <p className="mt-2 text-xs opacity-70">Saved skill {message.skills_saved.join(", ")}</p> : null}
+        {!mine && !message.live && !failed && usageNote(message) ? (
+          <p className="mt-2 text-xs opacity-70" data-testid="usage-line">{usageNote(message)}</p>
+        ) : null}
         {botId && chatId ? <AttachmentView message={message} botId={botId} chatId={chatId} /> : null}
         {choices.length ? (
           <div className="mt-3 flex flex-wrap gap-2">

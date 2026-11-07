@@ -59,6 +59,15 @@ export function formatElapsed(seconds: number): string {
   return `${minutes}m ${rest}s`;
 }
 
+/** Token counts stay short: 340, 1.2k, 12k. */
+export function formatTokenCount(tokens: number): string {
+  const whole = Math.max(0, Math.floor(tokens || 0));
+  if (whole < 1000) return `${whole}`;
+  const k = whole / 1000;
+  const rounded = k >= 100 ? Math.round(k) : Math.round(k * 10) / 10;
+  return `${rounded}k`;
+}
+
 export function workingLine(
   run: { step_index?: number; step_count?: number; started_at?: string | null; current_step?: string; last_activity?: string; queued?: number; stuck?: boolean } | null | undefined,
   now: number,

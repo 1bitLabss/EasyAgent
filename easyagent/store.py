@@ -1324,6 +1324,49 @@ class Store:
         self.save_room(room)
         return self.get_room(room_id)
 
+    def usage_today_path(self) -> Path:
+        return self.root / "usage_today.json"
+
+    def note_usage_today(self, prompt: int, completion: int) -> None:
+        """Add one reply's token counts to today's rollup file."""
+        today = datetime.now().date().isoformat()
+        data: dict = {}
+        try:
+            loaded = json.loads(self.usage_today_path().read_text(encoding="utf-8"))
+            if isinstance(loaded, dict):
+                data = loaded
+        except (OSError, ValueError):
+            data = {}
+        if data.get("date") != today:
+            data = {"date": today}
+        try:
+            prompt = max(0, int(prompt))
+            completion = max(0, int(completion))
+        except (TypeError, ValueError):
+            return
+        data["prompt"] = int(data.get("prompt") or 0) + prompt
+        data["completion"] = int(data.get("completion") or 0) + completion
+        try:
+            atomic_write_json(self.usage_today_path(), data)
+        except OSError:
+            pass
+
+    def usage_today(self) -> dict:
+        """Tokens stamped today across every chat. Zeros on a new day."""
+        today = datetime.now().date().isoformat()
+        try:
+            data = json.loads(self.usage_today_path().read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            data = {}
+        if not isinstance(data, dict) or data.get("date") != today:
+            return {"date": today, "prompt_tokens": 0, "completion_tokens": 0}
+        try:
+            prompt = int(data.get("prompt") or 0)
+            completion = int(data.get("completion") or 0)
+        except (TypeError, ValueError):
+            prompt = completion = 0
+        return {"date": today, "prompt_tokens": max(0, prompt), "completion_tokens": max(0, completion)}
+
     def save_chat(self, chat: dict) -> dict:
         """Write the full chat document. Callers must pass every stored message."""
         path = self._chat_path(chat["bot_id"], chat["id"])

@@ -78,6 +78,40 @@ def reset_purpose(token) -> None:
     _PURPOSE.reset(token)
 
 
+# One token tally per reply turn. The tally is a shared dict: stream tasks copy
+# the context when they start, so mutating the dict in place reaches the caller
+# that saves the assistant row. A plain value set inside a task would not.
+_TURN_USAGE: ContextVar[dict | None] = ContextVar("easyagent_turn_usage", default=None)
+
+
+def begin_turn_usage() -> dict:
+    """Start a fresh token tally for one reply turn. Returns the live tally."""
+    tally = {"prompt": 0, "completion": 0, "started": time.monotonic()}
+    _TURN_USAGE.set(tally)
+    return tally
+
+
+def note_turn_usage(prompt: int, completion: int) -> None:
+    """Add one chat call's counts. The prompt keeps the latest real size."""
+    tally = _TURN_USAGE.get()
+    if tally is None:
+        return
+    try:
+        prompt = int(prompt)
+        completion = int(completion)
+    except (TypeError, ValueError):
+        return
+    if prompt > 0:
+        tally["prompt"] = prompt
+    if completion > 0:
+        tally["completion"] = int(tally.get("completion") or 0) + completion
+
+
+def turn_usage() -> dict | None:
+    """The live tally for this turn, or None when no turn is open."""
+    return _TURN_USAGE.get()
+
+
 def _as_int(value) -> int:
     try:
         return int(value)
@@ -123,6 +157,8 @@ def _log_model_call(data: dict | None, started: float, messages) -> None:
     prompt, cached, generated = _usage_counts(data)
     elapsed = int((time.perf_counter() - started) * 1000)
     purpose = _PURPOSE.get() or "model"
+    if purpose == "chat":
+        note_turn_usage(prompt, generated)
     prefix = _prompt_prefix_hash(messages)
     print(
         f"model call: purpose={purpose} prompt_tokens={prompt} cached_tokens={cached} "
@@ -308,6 +344,25 @@ def reset_parallel_tool_calls() -> None:
     _PARALLEL_TOOLS.clear()
 
 
+# Some OpenAI-compatible servers answer 400 for stream_options. The first
+# stream sends it (usage in the final chunk is worth one probe); a rejection
+# is remembered per server root and the field stays off for that server.
+_STREAM_OPTIONS_REJECTED: dict[str, bool] = {}
+
+
+def stream_options_supported(base_url: str) -> bool:
+    """True until a server answers 4xx with stream_options on the request."""
+    return not _STREAM_OPTIONS_REJECTED.get(_server_root(base_url), False)
+
+
+def remember_stream_options_rejected(base_url: str) -> None:
+    _STREAM_OPTIONS_REJECTED[_server_root(base_url)] = True
+
+
+def reset_stream_options_cache() -> None:
+    _STREAM_OPTIONS_REJECTED.clear()
+
+
 def nudge_single_tool(messages: list[dict]) -> list[dict]:
     """Ask for one valid tool call. The stored transcript is not changed."""
     note = TOOL_PARSE_NUDGE
@@ -352,6 +407,10 @@ class _ToolParseAgain(Exception):
     def __init__(self, drop_flag: bool = False, excerpt: str = "") -> None:
         self.drop_flag = drop_flag
         self.excerpt = excerpt
+
+
+class _StreamOptionsAgain(Exception):
+    """The server rejected stream_options. Send the stream again without it."""
 
 
 def _tool_http_action(status: int, body: str, *, sent_parallel_flag: bool) -> str | None:
@@ -1024,6 +1083,7 @@ def _completion_payload(
     parallel_tool_calls: bool | None = None,
     max_tokens: int | None = None,
     temperature: float | None = None,
+    include_usage: bool = False,
 ) -> dict:
     """A schema or a grammar never rides along with the tool list. llama.cpp rejects that pair."""
     payload: dict = {"messages": messages}
@@ -1035,6 +1095,9 @@ def _completion_payload(
             payload["temperature"] = float(temperature)
     if stream:
         payload["stream"] = True
+        if include_usage:
+            # llama.cpp and friends only put usage in the final SSE chunk when asked.
+            payload["stream_options"] = {"include_usage": True}
     if model:
         payload["model"] = model
     if response_schema:
@@ -1933,7 +1996,13 @@ def _finish_pieces(splitter: _ThinkSplitter, *, saw_field: bool) -> list[str]:
     return pieces
 
 
-async def _iter_completion_body(response: httpx.Response, *, started: float | None = None, messages: list | None = None) -> AsyncIterator[str]:
+async def _iter_completion_body(
+    response: httpx.Response,
+    *,
+    started: float | None = None,
+    messages: list | None = None,
+    expect_usage: bool = False,
+) -> AsyncIterator[str]:
     _native_calls.set(None)
     clock = started if started is not None else time.perf_counter()
     usage_body: dict | None = None
@@ -1988,6 +2057,7 @@ async def _iter_completion_body(response: httpx.Response, *, started: float | No
     raw_kept = 0
     finish_reason = ""
     saw_answer = False
+    usage_wait = 0
     async for line in response.aiter_lines():
         if not line or line.startswith(":"):
             continue
@@ -2032,8 +2102,13 @@ async def _iter_completion_body(response: httpx.Response, *, started: float | No
                         saw_answer = True
                     yield piece
         # finish_reason ends the completion. Waiting on [DONE] or a close that
-        # never arrives is what left a finished reply marked Writing.
+        # never arrives is what left a finished reply marked Writing. With
+        # stream_options the usage chunk rides just after finish_reason, so a
+        # short bounded wait for it is worth it. Without the ask, break at once.
         if finish_reason in {"stop", "length", "tool_calls", "content_filter", "function_call"}:
+            if expect_usage and usage_body is None and usage_wait < 16:
+                usage_wait += 1
+                continue
             break
     for piece in _finish_pieces(splitter, saw_field=saw_field):
         if calls:
@@ -2073,6 +2148,7 @@ async def _stream_once(
     working = [dict(item) for item in messages if isinstance(item, dict)]
     single = False
     flag_off = not parallel_tool_calls_supported(base_url)
+    want_usage = True
     left = TOOL_PARSE_RETRIES
     attempt = 0
     last_excerpt = ""
@@ -2091,6 +2167,13 @@ async def _stream_once(
             return
         except StopAsyncIteration:
             return
+        except _StreamOptionsAgain:
+            # This server does not take stream_options. Ask once, then stop asking.
+            if not want_usage:
+                raise ProviderError("The server rejected the stream request.")
+            want_usage = False
+            remember_stream_options_rejected(base_url)
+            attempt += 1
         except _ToolParseAgain as exc:
             last_excerpt = exc.excerpt or last_excerpt
             if exc.drop_flag:
@@ -2323,6 +2406,7 @@ async def _stream_attempt(
     started = time.perf_counter()
     url = base_url.rstrip("/") + "/chat/completions"
     sent_flag = parallel_tool_calls is False
+    want_usage = stream_options_supported(base_url)
     limits = current_limits()
     payload = _completion_payload(
         messages,
@@ -2332,6 +2416,7 @@ async def _stream_attempt(
         parallel_tool_calls=parallel_tool_calls,
         max_tokens=limits.max_tokens,
         temperature=_tool_temperature(True, None, None, attempt),
+        include_usage=want_usage,
     )
     watch = GenerationWatch(limits)
     headers = _auth_headers(base_url, api_key)
@@ -2362,6 +2447,10 @@ async def _stream_attempt(
         try:
             if response.status_code >= 400:
                 full = (await response.aread()).decode("utf-8", "replace")
+                if want_usage and response.status_code in (400, 422):
+                    # The server may not know stream_options. One retry without
+                    # it, remembered per server root, before any real error.
+                    raise _StreamOptionsAgain()
                 _fail_http(
                     response.status_code,
                     full,
@@ -2369,7 +2458,9 @@ async def _stream_attempt(
                     attempt=attempt,
                     base_url=base_url,
                 )
-            body = _iter_completion_body(response, started=started, messages=messages).__aiter__()
+            body = _iter_completion_body(
+                response, started=started, messages=messages, expect_usage=want_usage
+            ).__aiter__()
             wait = watch.limits.first_token_seconds
             while True:
                 if turn_mod.cancelled():

@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.3.54
+- Replies show what they cost. A quiet line under each finished answer gives its time and token counts (time alone when a server doesn't report usage), the context meter now reads real prompt sizes, and the Jobs panel totals today.
+- Voice replies. A Speak control on any finished answer reads it aloud in the browser's own voice — markdown is stripped, only one voice speaks at a time, and switching chats or sending a new message stops it. A "Read replies aloud" setting speaks new answers as they land.
+- Your phone is a real client. Pairing now means something: a paired phone works, revoking it locks it out at once, and strangers on the Wi-Fi hit a token gate with guessing rate-limited. "Connect your phone" is in the sidebar next to the pairing QR, the jobs panel goes full-width on small screens, and upgrades never leave a stale offline shell behind.
+
 ## 0.3.53
 - You can steer a child agent while it works. A running child's row has a one-line box: what you type reaches the child before its next step. If it already finished, the app says so instead of pretending.
 - A child can be required to answer in JSON. When the parent gives it a schema, the child gets one correction try, and if it still misses, you get its raw answer with a plain note that it did not match.

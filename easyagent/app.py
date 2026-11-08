@@ -2310,24 +2310,27 @@ def create_app(data_dir: str | Path | None = None) -> FastAPI:
     @app.get("/api/rooms/{room_id}/live")
     async def room_live(room_id: str):
         store.get_room(room_id)
-        run = _ROOM_RUNS.get(room_id)
 
         async def gen():
-            if run is None or run.get("task") is None or run["task"].done():
-                yield _sse({"type": "done", "room": _public_room(store, store.get_room(room_id))})
-                return
+            # A live window stays subscribed between turns: a message sent in
+            # another window lands here within a second, no reload needed.
             watched: asyncio.Queue = asyncio.Queue(maxsize=256)
-            run["listeners"].append(watched)
+            _ROOM_LISTENERS.setdefault(room_id, []).append(watched)
             try:
-                yield _sse({"type": "sync", "room": _public_room(store, store.get_room(room_id)), "statuses": run.get("statuses") or {}})
+                run = _ROOM_RUNS.get(room_id)
+                statuses = dict(run.get("statuses") or {}) if run else {}
+                yield _sse({"type": "sync", "room": _public_room(store, store.get_room(room_id)), "statuses": statuses})
                 while True:
                     item = await watched.get()
                     if item is None:
-                        break
+                        continue
                     yield item
             finally:
-                if watched in run["listeners"]:
-                    run["listeners"].remove(watched)
+                watchers = _ROOM_LISTENERS.get(room_id)
+                if watchers is not None and watched in watchers:
+                    watchers.remove(watched)
+                if watchers is not None and not watchers:
+                    _ROOM_LISTENERS.pop(room_id, None)
 
         return _serve_sse(gen())
 
@@ -2401,9 +2404,13 @@ def create_app(data_dir: str | Path | None = None) -> FastAPI:
             return _serve_sse(_stream_room_turn(store, room_id, user_message, targets))
         # Every bot answers this same transcript. A same-turn reply is not
         # fed to the next bot, so one failure cannot change what the others see.
+        _publish_room_event(room_id, _sse({"type": "user", "message": user_message}))
         snapshot = store.get_room(room_id)
         for bot_id in targets:
-            await _save_room_bot_reply(store, room_id, snapshot, bot_id)
+            reply = await _save_room_bot_reply(store, room_id, snapshot, bot_id)
+            if reply is not None:
+                _publish_room_event(room_id, _sse({"type": "message", "message": reply}))
+        _publish_room_event(room_id, _sse({"type": "done", "room": _public_room(store, store.get_room(room_id))}))
         return _public_room(store, store.get_room(room_id))
 
     @app.post("/api/rooms/{room_id}/messages/{message_id}/reaction")
@@ -4132,6 +4139,14 @@ def _persist_room(room: dict) -> dict:
 
 
 _ROOM_RUNS: dict[str, dict] = {}
+_ROOM_LISTENERS: dict[str, list[asyncio.Queue]] = {}
+
+
+def _publish_room_event(room_id: str, item: str) -> None:
+    """Push one SSE frame to every window watching this room, sender or not."""
+    for queue in list(_ROOM_LISTENERS.get(room_id) or []):
+        with suppress(Exception):
+            offer(queue, item)
 
 
 def _room_pending(room: dict) -> list[dict]:
@@ -4210,6 +4225,7 @@ async def _stream_room_turn(store: Store, room_id: str, user_message: dict, targ
         for queue in list(listeners):
             with suppress(Exception):
                 offer(queue, item, final=item is None)
+        _publish_room_event(room_id, item)
 
     def bot_name(bot_id: str) -> str:
         try:
@@ -4309,7 +4325,9 @@ async def _stream_room_turn(store: Store, room_id: str, user_message: dict, targ
             state = "thinking" if bot_id == targets[0] else "queued"
             label = f"{name} is thinking…" if state == "thinking" else f"{name} queued"
             run["statuses"][bot_id] = {"state": state, "label": label, "name": name}
-            yield _room_status(bot_id, name, state, label)
+            note = _room_status(bot_id, name, state, label)
+            await publish(note)
+            yield note
 
         async def chain() -> None:
             started: list[asyncio.Task] = []

@@ -70,6 +70,72 @@ describe("RoomPane live reconnect", () => {
   });
 });
 
+describe("RoomPane working indicator", () => {
+  it("draws an animated row for every queued or thinking bot", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => streamOf([
+      {
+        type: "sync",
+        room: ROOM,
+        statuses: {
+          a: { name: "Alpha", state: "thinking", label: "Alpha is thinking…" },
+          b: { name: "Bravo", state: "queued", label: "Bravo queued" },
+        },
+      },
+    ])));
+    useApp.setState({ roomId: "room-1", screen: "room" });
+    render(wrap(<RoomPane />));
+    const rows = await screen.findAllByTestId("room-bot-status");
+    expect(rows).toHaveLength(2);
+    const states = rows.map((row) => row.getAttribute("data-state"));
+    expect(states).toContain("thinking");
+    expect(states).toContain("queued");
+    expect(rows[0].textContent).toContain("Alpha");
+    expect(rows[1].textContent).toContain("Bravo");
+    // The motion lives in CSS (.run-step shimmer + .run-dots ellipsis); the
+    // rows must carry both hooks or the pane is back to static text.
+    expect(screen.getAllByTestId("room-working-dots")).toHaveLength(2);
+    for (const row of rows) expect(row.querySelector(".run-step")).not.toBeNull();
+  });
+
+  it("animates the waiting-approval state too", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => streamOf([
+      { type: "sync", room: ROOM, statuses: { a: { name: "Alpha", state: "waiting_approval", label: "Alpha waiting for approval" } } },
+    ])));
+    useApp.setState({ roomId: "room-1", screen: "room" });
+    render(wrap(<RoomPane />));
+    const row = await screen.findByTestId("room-bot-status");
+    expect(row.getAttribute("data-state")).toBe("waiting_approval");
+    expect(screen.getByTestId("room-working-dots")).toBeTruthy();
+  });
+
+  it("replaces the working row with the bot's answer when it arrives", async () => {
+    const answered = {
+      ...ROOM,
+      messages: [...ROOM.messages, { id: "new-1", role: "assistant", speaker: "a", speaker_name: "Alpha", content: "Here is the answer." }],
+    };
+    vi.stubGlobal("fetch", vi.fn(async () => streamOf([
+      { type: "sync", room: ROOM, statuses: { a: { name: "Alpha", state: "thinking", label: "Alpha is thinking…" } } },
+      { type: "message", message: { id: "new-1", role: "assistant", speaker: "a", speaker_name: "Alpha", content: "Here is the answer." } },
+      { type: "done", room: answered },
+    ])));
+    useApp.setState({ roomId: "room-1", screen: "room" });
+    render(wrap(<RoomPane />));
+    await screen.findByText("Here is the answer.");
+    expect(screen.queryByTestId("room-bot-status")).toBeNull();
+  });
+
+  it("shows no working row for a finished bot", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => streamOf([
+      { type: "sync", room: ROOM, statuses: { a: { name: "Alpha", state: "done", label: "Alpha replied" } } },
+    ])));
+    useApp.setState({ roomId: "room-1", screen: "room" });
+    render(wrap(<RoomPane />));
+    const row = await screen.findByTestId("room-bot-status");
+    expect(row.getAttribute("data-state")).toBe("done");
+    expect(screen.queryByTestId("room-working-dots")).toBeNull();
+  });
+});
+
 describe("RoomPane read marker", () => {
   it("marks the room read while it is on screen", async () => {
     vi.stubGlobal("fetch", vi.fn(async () => streamOf([{ type: "done", room: ROOM }])));

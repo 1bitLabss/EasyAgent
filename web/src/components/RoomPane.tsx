@@ -56,6 +56,25 @@ export function RoomPane() {
     if (placed) setPending("");
   }
 
+  function appendMessage(message: ChatMessage) {
+    if (!roomId || !message) return;
+    queryClient.setQueryData(["room", roomId], (current: RoomView | undefined) => {
+      if (!current) return current;
+      const messages = current.messages || [];
+      if (message.id && messages.some((item) => item.id === message.id)) return current;
+      return { ...current, messages: [...messages, message] };
+    });
+  }
+
+  function applyStatus(event: { bot_id?: string; name?: string; state?: string; label?: string }) {
+    if (!event.bot_id) return;
+    setStatuses((current) => {
+      const next = current.filter((item) => item.bot_id !== event.bot_id);
+      next.push({ bot_id: event.bot_id || "", name: event.name || "", state: event.state || "", label: event.label || "" });
+      return next;
+    });
+  }
+
   function rememberApproval(botId: string, name: string) {
     if (!botId) return;
     setApprovals((current) => (current.some((item) => item.bot_id === botId) ? current : [...current, { bot_id: botId, name }]));
@@ -65,48 +84,56 @@ export function RoomPane() {
   useEffect(() => {
     if (!roomId) return;
     const control = new AbortController();
+    let timer = 0;
     void (async () => {
-      try {
-        const response = await fetch(`/api/rooms/${roomId}/live`, { headers: { Accept: "text/event-stream" }, signal: control.signal });
-        if (!response.ok || !response.body) return;
-        const reader = response.body.getReader();
-        const decoder = new TextDecoder();
-        let buffer = "";
-        while (true) {
-          const { value, done } = await reader.read();
-          if (done) break;
-          buffer += decoder.decode(value, { stream: true });
-          let split = buffer.indexOf("\n\n");
-          while (split >= 0) {
-            const raw = buffer.slice(0, split);
-            buffer = buffer.slice(split + 2);
-            const payload = raw.split("\n").filter((line) => line.startsWith("data:")).map((line) => line.slice(5).trim()).join("\n");
-            if (payload) {
-              const event = JSON.parse(payload) as { type?: string; room?: RoomView; bot_id?: string; name?: string; state?: string; label?: string; message?: ChatMessage; statuses?: Record<string, { name?: string; state?: string; label?: string }> };
-              if (event.type === "user" && event.message) rememberUser(event.message);
-              if (event.type === "approval" && event.bot_id) rememberApproval(event.bot_id, event.name || "");
-              if (event.type === "sync" && event.statuses) {
-                // A mid-turn reload: the server replays who is working right now.
-                setStatuses(Object.entries(event.statuses).map(([bot_id, item]) => ({ bot_id, name: item?.name || "", state: item?.state || "", label: item?.label || "" })));
+      // The live socket is the room's wire: it stays open between turns and
+      // reconnects on its own, so another window's message lands within a second.
+      while (!control.signal.aborted) {
+        try {
+          const response = await fetch(`/api/rooms/${roomId}/live`, { headers: { Accept: "text/event-stream" }, signal: control.signal });
+          if (!response.ok || !response.body) throw new Error("live closed");
+          const reader = response.body.getReader();
+          const decoder = new TextDecoder();
+          let buffer = "";
+          while (true) {
+            const { value, done } = await reader.read();
+            if (done) break;
+            buffer += decoder.decode(value, { stream: true });
+            let split = buffer.indexOf("\n\n");
+            while (split >= 0) {
+              const raw = buffer.slice(0, split);
+              buffer = buffer.slice(split + 2);
+              const payload = raw.split("\n").filter((line) => line.startsWith("data:")).map((line) => line.slice(5).trim()).join("\n");
+              if (payload) {
+                const event = JSON.parse(payload) as { type?: string; room?: RoomView; bot_id?: string; name?: string; state?: string; label?: string; message?: ChatMessage; statuses?: Record<string, { name?: string; state?: string; label?: string }> };
+                if (event.type === "user" && event.message) rememberUser(event.message);
+                if (event.type === "approval" && event.bot_id) rememberApproval(event.bot_id, event.name || "");
+                if (event.type === "sync" && event.statuses) {
+                  // A mid-turn reload: the server replays who is working right now.
+                  setStatuses(Object.entries(event.statuses).map(([bot_id, item]) => ({ bot_id, name: item?.name || "", state: item?.state || "", label: item?.label || "" })));
+                }
+                if (event.type === "bot_status" && event.bot_id) applyStatus(event);
+                if (event.type === "message" && event.message) {
+                  appendMessage(event.message);
+                  setStatuses((current) => current.filter((item) => item.bot_id !== event.message?.speaker));
+                }
+                if (event.room) queryClient.setQueryData(["room", roomId], event.room);
+                if (event.type === "done") { setPending(""); setStatuses([]); }
               }
-              if (event.type === "bot_status" && event.bot_id) {
-                setStatuses((current) => {
-                  const next = current.filter((item) => item.bot_id !== event.bot_id);
-                  next.push({ bot_id: event.bot_id || "", name: event.name || "", state: event.state || "", label: event.label || "" });
-                  return next;
-                });
-              }
-              if (event.room) queryClient.setQueryData(["room", roomId], event.room);
-              if (event.type === "done") { setPending(""); setStatuses([]); }
+              split = buffer.indexOf("\n\n");
             }
-            split = buffer.indexOf("\n\n");
           }
+        } catch {
+          /* the reconnect below attaches again */
         }
-      } catch {
-        /* a reload attaches again */
+        if (control.signal.aborted) break;
+        await new Promise<void>((resolve) => {
+          timer = window.setTimeout(resolve, 800);
+          control.signal.addEventListener("abort", () => { window.clearTimeout(timer); resolve(); }, { once: true });
+        });
       }
     })();
-    return () => control.abort();
+    return () => { control.abort(); window.clearTimeout(timer); };
   }, [roomId, queryClient]);
 
   async function send() {
@@ -146,18 +173,9 @@ export function RoomPane() {
           if (event.type === "user" && event.message) rememberUser(event.message);
           else if (event.type === "user") setPending("");
           if (event.type === "approval" && event.bot_id) rememberApproval(event.bot_id, event.name || "");
-          if (event.type === "bot_status" && event.bot_id) {
-            setStatuses((current) => {
-              const next = current.filter((item) => item.bot_id !== event.bot_id);
-              next.push({ bot_id: event.bot_id || "", name: event.name || "", state: event.state || "", label: event.label || "" });
-              return next;
-            });
-          }
+          if (event.type === "bot_status" && event.bot_id) applyStatus(event);
           if (event.type === "message" && event.message) {
-            queryClient.setQueryData(["room", roomId], (current: RoomView | undefined) => {
-              if (!current) return current;
-              return { ...current, messages: [...(current.messages || []), event.message as ChatMessage] };
-            });
+            appendMessage(event.message);
             setStatuses((current) => current.filter((item) => item.bot_id !== event.message?.speaker));
           }
           if (event.room) queryClient.setQueryData(["room", roomId], event.room);
@@ -223,9 +241,20 @@ export function RoomPane() {
           </article>
         ))}
         {pending ? <article className="ml-auto max-w-lg text-right"><p className="text-xs text-muted">You</p><p className="text-sm" data-testid="room-optimistic">{pending}</p></article> : null}
-        {statuses.length ? (
-          <p className="text-sm text-muted" data-testid="room-bot-status">{statuses.map((item) => item.label).join(" · ")}</p>
-        ) : null}
+        {statuses.map((item) => {
+          const animated = item.state === "queued" || item.state === "thinking" || item.state === "waiting_approval";
+          return (
+            <div key={item.bot_id} className="sys-line" role="status" data-testid="room-bot-status" data-state={item.state}>
+              <p>
+                <span className="h-1.5 w-1.5 shrink-0 rounded-full bg-current" aria-hidden="true" />
+                <span className="run-step">{animated ? item.label.replace(/…+$/, "") : item.label}</span>
+                {animated ? (
+                  <span className="run-dots" data-testid="room-working-dots" aria-hidden="true" />
+                ) : null}
+              </p>
+            </div>
+          );
+        })}
         {(data.pending_approvals || []).map((card) => (
           <div key={card.id} data-testid="room-approval">
             <p className="text-xs text-muted">{card.why}</p>

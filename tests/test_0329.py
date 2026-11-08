@@ -443,8 +443,24 @@ def test_finish_reason_ends_the_read_without_done(monkeypatch):
             pieces.append(piece)
         return pieces
 
-    assert asyncio.run(read()) == ["Section 1 already written."]
-    assert hung["n"] == 0
+    # The reader may take one grace read for the usage chunk that rides after
+    # finish_reason, then gives up: a server that stalls after finishing costs
+    # the short grace, never the 30-second hang. And it is remembered — the
+    # next call does not wait again.
+    import time as _time
+
+    llm.reset_stream_options_cache()
+    try:
+        started = _time.monotonic()
+        assert asyncio.run(read()) == ["Section 1 already written."]
+        assert _time.monotonic() - started < 5
+        assert hung["n"] == 1
+        started = _time.monotonic()
+        assert asyncio.run(read()) == ["Section 1 already written."]
+        assert _time.monotonic() - started < 1
+        assert hung["n"] == 1
+    finally:
+        llm.reset_stream_options_cache()
 
 
 def _stream_client(lines_fn):

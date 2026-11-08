@@ -363,6 +363,12 @@ def reset_stream_options_cache() -> None:
     _STREAM_OPTIONS_REJECTED.clear()
 
 
+# How long a finished stream may stall us for the usage chunk that rides just
+# after finish_reason. Servers answer it in milliseconds; a server that stays
+# silent is remembered and never asked again.
+_USAGE_GRACE_SECONDS = 1.0
+
+
 def nudge_single_tool(messages: list[dict]) -> list[dict]:
     """Ask for one valid tool call. The stored transcript is not changed."""
     note = TOOL_PARSE_NUDGE
@@ -2002,6 +2008,7 @@ async def _iter_completion_body(
     started: float | None = None,
     messages: list | None = None,
     expect_usage: bool = False,
+    base_url: str | None = None,
 ) -> AsyncIterator[str]:
     _native_calls.set(None)
     clock = started if started is not None else time.perf_counter()
@@ -2058,7 +2065,29 @@ async def _iter_completion_body(
     finish_reason = ""
     saw_answer = False
     usage_wait = 0
-    async for line in response.aiter_lines():
+    usage_deadline = 0.0
+    lines = response.aiter_lines().__aiter__()
+    while True:
+        # Waiting on [DONE] or a close that never arrives is what left a
+        # finished reply marked Writing, so during the usage grace each line
+        # is awaited with a deadline instead of hanging on the stream.
+        if usage_deadline:
+            try:
+                async with asyncio.timeout(max(0.01, usage_deadline - time.monotonic())):
+                    line = await lines.__anext__()
+            except TimeoutError:
+                # The usage chunk never came. This server takes the ask and
+                # stays silent; do not pay the grace again.
+                if base_url:
+                    remember_stream_options_rejected(base_url)
+                break
+            except StopAsyncIteration:
+                break
+        else:
+            try:
+                line = await lines.__anext__()
+            except StopAsyncIteration:
+                break
         if not line or line.startswith(":"):
             continue
         if not line.startswith("data:"):
@@ -2101,14 +2130,17 @@ async def _iter_completion_body(
                     if piece:
                         saw_answer = True
                     yield piece
-        # finish_reason ends the completion. Waiting on [DONE] or a close that
-        # never arrives is what left a finished reply marked Writing. With
-        # stream_options the usage chunk rides just after finish_reason, so a
-        # short bounded wait for it is worth it. Without the ask, break at once.
+        # finish_reason ends the completion. With stream_options the usage
+        # chunk rides just after it, so one short grace — line-capped and
+        # time-capped — is worth it. Without the ask, break at once.
         if finish_reason in {"stop", "length", "tool_calls", "content_filter", "function_call"}:
             if expect_usage and usage_body is None and usage_wait < 16:
+                if not usage_deadline:
+                    usage_deadline = time.monotonic() + _USAGE_GRACE_SECONDS
                 usage_wait += 1
                 continue
+            if expect_usage and usage_body is None and base_url:
+                remember_stream_options_rejected(base_url)
             break
     for piece in _finish_pieces(splitter, saw_field=saw_field):
         if calls:
@@ -2459,7 +2491,11 @@ async def _stream_attempt(
                     base_url=base_url,
                 )
             body = _iter_completion_body(
-                response, started=started, messages=messages, expect_usage=want_usage
+                response,
+                started=started,
+                messages=messages,
+                expect_usage=want_usage,
+                base_url=base_url,
             ).__aiter__()
             wait = watch.limits.first_token_seconds
             while True:

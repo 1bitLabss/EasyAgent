@@ -149,6 +149,20 @@ async def pause_retry() -> None:
     turn_mod.raise_if_cancelled()
 
 
+def lease_seconds() -> float:
+    """How long one call may hold the line. A finished turn releases sooner.
+
+    ``EASYAGENT_LANE_LEASE_SECONDS`` overrides 900, the local hard cap.
+    """
+    raw = os.environ.get("EASYAGENT_LANE_LEASE_SECONDS", "").strip()
+    if not raw:
+        return 900.0
+    try:
+        return max(5.0, float(raw))
+    except ValueError:
+        return 900.0
+
+
 def reset_lanes() -> None:
     """Drop every line. Tests start from an empty queue."""
     with _lanes_guard:
@@ -167,6 +181,13 @@ class _Seat:
         self.label = ""
         self.lane: _Lane | None = None
         self._inside = None
+        self.held_at = 0.0
+        self.task: asyncio.Task | None = None
+        self.slot = turn_mod.current_slot()
+        try:
+            self.task = asyncio.current_task()
+        except RuntimeError:
+            self.task = None
 
     async def acquire(self) -> None:
         self._inside = _inside.set(True)
@@ -185,6 +206,8 @@ class _Seat:
             await self.release()
             raise
         if self.holding:
+            if not self.held_at:
+                self.held_at = time.monotonic()
             _tell_lane()
 
     def abandon(self) -> None:
@@ -252,6 +275,7 @@ def _grant(lane: _Lane) -> None:
         seat = lane.queue.pop(0)
         seat.waiting = False
         seat.holding = True
+        seat.held_at = time.monotonic()
         lane.holders.append(seat)
         seat.ready.set()
 
@@ -312,12 +336,79 @@ def queued_label(connection: str, holders: list[str]) -> str:
     return f"Queued: waiting for {who} (busy with {busy})"
 
 
+def _chat_running(seat: _Seat) -> bool | None:
+    """True when this seat's chat is still in a run. None when that cannot be read."""
+    slot = seat.slot
+    if slot is None or not getattr(slot, "chat_id", "") or not getattr(slot, "bot_id", ""):
+        return None
+    store = getattr(slot, "store", None)
+    if store is None:
+        return None
+    try:
+        chat = store.get_chat(slot.bot_id, slot.chat_id)
+    except Exception:
+        return None
+    run = chat.get("run") if isinstance(chat.get("run"), dict) else {}
+    return run.get("status") == "running"
+
+
+def _stale(seat: _Seat, now: float) -> bool:
+    """A finished task, a chat that already went idle, or a lease that ran out."""
+    if not seat.holding:
+        return False
+    if seat.task is not None and seat.task.done():
+        return True
+    age = now - (seat.held_at or seat.queued_at)
+    if age >= lease_seconds():
+        return True
+    running = _chat_running(seat)
+    if running is False and age >= 1.0:
+        return True
+    return False
+
+
+def sweep() -> int:
+    """Free seats a finished turn left behind. A queued job can start."""
+    now = time.monotonic()
+    with _lanes_guard:
+        lanes = list(_lanes.values())
+    stale: list[_Seat] = []
+    for lane in lanes:
+        with lane.lock:
+            stale.extend(seat for seat in list(lane.holders) if _stale(seat, now))
+    for seat in stale:
+        seat.abandon()
+    return len(stale)
+
+
+def release_bot(bot_name: str) -> int:
+    """Drop every seat this bot still holds or is waiting on.
+
+    A turn that saved its reply must not leave the line busy with its name.
+    """
+    name = (bot_name or "").strip()
+    if not name:
+        return 0
+    with _lanes_guard:
+        lanes = list(_lanes.values())
+    found: list[_Seat] = []
+    for lane in lanes:
+        with lane.lock:
+            found.extend(seat for seat in list(lane.holders) if seat.bot_name == name)
+            found.extend(seat for seat in list(lane.queue) if seat.bot_name == name)
+    for seat in found:
+        seat.abandon()
+    return len(found)
+
+
 async def reserve(*, step_aside: bool = False, background: bool = False):
     """Take a slot, or return a seat that is waiting at the back of the line.
 
     A background call passes step_aside so it leaves the line when a chat is
     already using the connection, instead of holding the only slot.
+    A seat left behind by a finished turn is dropped first.
     """
+    sweep()
     info = _conn.get()
     if not info or _inside.get() or not info.get("id"):
         return _Open()
@@ -332,6 +423,7 @@ async def reserve(*, step_aside: bool = False, background: bool = False):
             raise BusyLane()
         if len(lane.holders) < lane.limit and not lane.queue:
             seat.holding = True
+            seat.held_at = time.monotonic()
             lane.holders.append(seat)
             seat.ready.set()
         else:

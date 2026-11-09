@@ -2437,6 +2437,35 @@ def _ask_command(rule: str, why: str, command: str) -> Verdict:
     return _verdict(ASK, rule, why, detail, _fp("cmd", detail))
 
 
+_ENV_PREFIX = re.compile(
+    r"(?i)(?:^|[;&|\n]\s*)(?:env\s+)?[A-Za-z_][A-Za-z0-9_]*="
+)
+
+
+def _keep_full_command(verdict: Verdict, original: str) -> Verdict:
+    """The card shows the command that was asked, including an env prefix.
+
+    Judging may look at the program after a literal assignment is set aside.
+    The person still has to see ``FOO=1 python a.py``, not only the program.
+    Only the display changes: tier, rule, why and fingerprint stay as judged,
+    so an approval still matches what was checked.
+    """
+    raw = (original or "").strip()
+    if not raw or not _ENV_PREFIX.search(raw):
+        return verdict
+    detail = verdict.detail or ""
+    head = detail.split("\n\n", 1)[0]
+    if raw in head:
+        return verdict
+    # Keep any note the judge appended after the first block; only the head
+    # showing the command is rewritten. (The 0.3.47 marker this preserved
+    # no longer exists in main, so the tail is kept generically.)
+    detail = raw + detail[len(head) :]
+    if detail == verdict.detail:
+        return verdict
+    return _verdict(verdict.tier, verdict.rule, verdict.why, detail, verdict.fingerprint)
+
+
 def judge_command(
     command: str,
     *,
@@ -2471,10 +2500,10 @@ def judge_command(
         denied=denied,
     )
     if mode != "strict":
-        return closed
+        return _keep_full_command(closed, command)
     from easyagent.strictshell import apply
 
-    return apply(
+    judged = apply(
         command,
         closed,
         cwd=cwd,
@@ -2485,6 +2514,7 @@ def judge_command(
         remote=remote,
         depth=depth,
     )
+    return _keep_full_command(judged, command)
 
 
 def _fail_closed(

@@ -8950,6 +8950,7 @@ async def run_turn(
             and request is None
             and not query
             and _is_announcement(text or "")
+            and not status_only_narration(_norm_line(strip_tool_markup(text or "")))
             and not _is_choice(ask)
         ):
             announced = True
@@ -8975,7 +8976,7 @@ async def run_turn(
                         yield event
                     return
                 if nudged:
-                    resume, events = _after_stuck("It announced more work and did not call a tool.")
+                    resume, events = _after_stuck("It said it would do more and did not.")
                     for event in events:
                         yield event
                     if resume:

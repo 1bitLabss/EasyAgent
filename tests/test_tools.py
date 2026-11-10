@@ -645,7 +645,7 @@ def test_a_second_announcement_with_no_tool_says_what_is_undone(tmp_path, monkey
     assert "Stuck." in answer
     assert "Still undone:" in answer
     assert "What is still left to do?" in answer
-    assert "announced more work" in answer
+    assert "said it would do more" in answer
     assert "Let me check" not in answer
     assert "8 steps" not in answer
 

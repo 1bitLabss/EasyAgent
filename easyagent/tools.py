@@ -4263,7 +4263,26 @@ _ANNOUNCE_LEAD = re.compile(
     r"(?i)\b(let me|let's|i'll|i will|i am going to|i'm going to|going to)\b"
 )
 _ANNOUNCE_WORK = re.compile(
-    r"(?i)\b(check|look|see|list|find|read|run|search|get|measure|size|sizes)\b"
+    r"(?i)\b(check|look|see|list|find|read|run|search|get|measure|size|sizes"
+    r"|pull|do|write|save|fetch|grab|add|update|fix|create|build)\b"
+)
+# "Writing it into the vault now." promises work without any lead phrase.
+_ANNOUNCE_DOING = re.compile(
+    r"(?i)\b(writing|doing|pulling|fetching|grabbing|saving|creating|building"
+    r"|checking|reading|looking|getting|adding|updating|fixing|running)\b"
+)
+_ANNOUNCE_DOING_LEAD = re.compile(
+    r"(?i)^(?:now\s+)?(?:writing|doing|pulling|fetching|grabbing|saving|creating|building"
+    r"|checking|reading|looking|getting|adding|updating|fixing|running)\b"
+)
+_ANNOUNCE_NOW = re.compile(r"(?i)\b(now|next)\b")
+_ANNOUNCE_READY = re.compile(
+    r"(?i)(?:\bi\s+have\s+enough\b|\bi(?:'m| am|\u2019m)\s+ready\b)"
+)
+# "Writing tests is a good habit." is a general truth, not a step this turn owes.
+_ANNOUNCE_GENERALITY = re.compile(
+    r"(?i)^\s*(?:writing|doing|pulling|fetching|grabbing|saving|creating|building"
+    r"|checking|reading|looking|getting|adding|updating|fixing|running)\b[^.!?]*\b(?:is|are|was|were)\b"
 )
 _SIZE_STATED = re.compile(r"(?i)\b\d[\d,]*\s*(bytes|byte|kb|mb|gb)\b")
 _WIN_PATH = re.compile(r"[A-Za-z]:\\(?:[^\\/:*?\"<>|\s]+\\)*[^\\/:*?\"<>|\s]*")
@@ -4303,6 +4322,25 @@ def _is_harness_narration(text: str) -> bool:
     ))
 
 
+def _announcement_sentence(sentence: str) -> bool:
+    """One sentence that promises the work instead of reporting a result."""
+    cleaned = " ".join((sentence or "").split())
+    if not cleaned or cleaned.endswith("?"):
+        return False
+    if _ANNOUNCE_LEAD.search(cleaned) and _ANNOUNCE_WORK.search(cleaned):
+        return True
+    if _ANNOUNCE_GENERALITY.search(cleaned):
+        return False
+    # "I am ready to help." is a greeting. "I have enough to build it." owes a step.
+    if _ANNOUNCE_READY.search(cleaned) and (
+        _ANNOUNCE_WORK.search(cleaned) or _ANNOUNCE_DOING.search(cleaned)
+    ):
+        return True
+    if _ANNOUNCE_DOING_LEAD.match(cleaned):
+        return True
+    return bool(_ANNOUNCE_DOING.search(cleaned) and _ANNOUNCE_NOW.search(cleaned))
+
+
 def _is_announcement(text: str) -> bool:
     """A promise to do the work, with no tool call and no finished result."""
     cleaned = strip_tool_markup(search_mod.strip_search_fences(text or "")).strip()
@@ -4317,7 +4355,8 @@ def _is_announcement(text: str) -> bool:
         return False
     if _asks_the_person(cleaned):
         return False
-    if not _ANNOUNCE_LEAD.search(cleaned) or not _ANNOUNCE_WORK.search(cleaned):
+    sentences = [part.strip() for part in re.split(r"(?<=[.!?])\s+", cleaned) if part.strip()]
+    if not any(_announcement_sentence(part) for part in sentences):
         return False
     # "I'll help you look things up" is a greeting, not a step this turn still owes.
     if re.search(r"(?i)\b(?:i'll|i will|i am going to|i'm going to)\s+help\b", cleaned):
@@ -4345,7 +4384,7 @@ def _has_real_answer(text: str) -> bool:
     sentences = [part.strip() for part in re.split(r"(?<=[.!?])\s+", cleaned) if part.strip()]
     kept = []
     for sentence in sentences:
-        if _ANNOUNCE_LEAD.search(sentence) and _ANNOUNCE_WORK.search(sentence):
+        if _announcement_sentence(sentence):
             continue
         kept.append(sentence)
     return len(" ".join(kept).split()) >= 8

@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.3.55
+- A reply that only promises work no longer ends the turn. If the bot says "Writing it into the vault now" or "Doing it now" without calling a tool, it is pushed to actually do it in the same turn. If it stalls twice in a row, it now closes honestly: "Stuck. Still undone: …" instead of dressing the promise up as a result.
+- Group chat keeps every window in sync. A live window hears every message and reply the moment it lands, no reload, and queued or thinking bots carry a moving shimmer and dots until their answer starts.
+- Scheduled jobs start at once. A finished chat lets go of the model line, so a routine no longer waits on a chat that already answered.
+- Approval cards show the command exactly as asked, including environment prefixes like `FOO=1`. Only the display changes — the safety check is the same command it always judged.
+
 ## 0.3.54
 - Replies show what they cost. A quiet line under each finished answer gives its time and token counts (time alone when a server doesn't report usage), the context meter now reads real prompt sizes, and the Jobs panel totals today.
 - Voice replies. A Speak control on any finished answer reads it aloud in the browser's own voice — markdown is stripped, only one voice speaks at a time, and switching chats or sending a new message stops it. A "Read replies aloud" setting speaks new answers as they land.

@@ -249,6 +249,12 @@ class _Open:
         _tell_lane()
         return
 
+    def abandon(self) -> None:
+        """Nothing is held to free. Callers release the permit from a finally
+        block without checking its type, so every permit kind must answer to
+        this name — a missing method here killed whole turns on cleanup."""
+        return
+
     async def release(self) -> None:
         return
 

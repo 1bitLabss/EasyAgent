@@ -7543,6 +7543,10 @@ async def _pull_model(
                 try:
                     if not stream:
                         token = llm.attach_reasoning_sink(bucket.append)
+                        # The sync call is the chat's answer too. Without the
+                        # binding the call logs as purpose=model and the turn
+                        # tally stays empty, so the saved row loses its counts.
+                        purpose = llm.bind_purpose("chat")
                         try:
                             text = await llm.complete(
                                 base_url=base_url,
@@ -7552,6 +7556,7 @@ async def _pull_model(
                                 timeout=limit,
                             )
                         finally:
+                            llm.reset_purpose(purpose)
                             llm.detach_reasoning_sink(token)
                         turn_mod.raise_if_cancelled()
                         if bucket:

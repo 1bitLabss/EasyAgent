@@ -2076,9 +2076,11 @@ async def _iter_completion_body(
                 async with asyncio.timeout(max(0.01, usage_deadline - time.monotonic())):
                     line = await lines.__anext__()
             except TimeoutError:
-                # The usage chunk never came. This server takes the ask and
-                # stays silent; do not pay the grace again.
-                if base_url:
+                # Only the grace's own expiry means the server finished and
+                # stayed silent about usage. A timeout handed into this read
+                # from outside (a stalled turn being cut) interrupts the
+                # stream; that is not evidence, so the server is not silenced.
+                if base_url and time.monotonic() >= usage_deadline:
                     remember_stream_options_rejected(base_url)
                 break
             except StopAsyncIteration:
@@ -2139,8 +2141,9 @@ async def _iter_completion_body(
                     usage_deadline = time.monotonic() + _USAGE_GRACE_SECONDS
                 usage_wait += 1
                 continue
-            if expect_usage and usage_body is None and base_url:
-                remember_stream_options_rejected(base_url)
+            # Lines kept arriving after finish_reason: the stream was still
+            # running when the line cap cut the grace off. An interrupted
+            # stream is not a server silent about usage — do not silence it.
             break
     for piece in _finish_pieces(splitter, saw_field=saw_field):
         if calls:

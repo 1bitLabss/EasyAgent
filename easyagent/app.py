@@ -2926,12 +2926,58 @@ _TEXT_ATTACHMENT_SUFFIXES = (
     ".rb", ".php", ".html", ".css", ".sql", ".log", ".env", ".gitignore", ".dockerfile",
 )
 ATTACHMENT_TEXT_CHARS = 16_000
+_PDF_MEDIA = "application/pdf"
+_DOCX_MEDIA = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+
+
+def _clip_attachment_text(text: str | None) -> str | None:
+    """Trim and cap extracted text the same way the plain-text path does."""
+    text = (text or "").strip()
+    if not text:
+        return None
+    if len(text) > ATTACHMENT_TEXT_CHARS:
+        text = text[:ATTACHMENT_TEXT_CHARS] + "\n… the file continues past what is shown."
+    return text
+
+
+def _extract_pdf_text(data: bytes) -> str | None:
+    # Imported lazily so the app still boots without the library; a missing or
+    # broken reader just means the upload keeps the "not shown here" fallback.
+    try:
+        import io
+
+        from pypdf import PdfReader
+
+        reader = PdfReader(io.BytesIO(data))
+        if reader.is_encrypted:
+            return None
+        text = "\n".join(page.extract_text() or "" for page in reader.pages)
+    except Exception:
+        return None
+    return text or None
+
+
+def _extract_docx_text(data: bytes) -> str | None:
+    try:
+        import io
+
+        import docx
+
+        document = docx.Document(io.BytesIO(data))
+        text = "\n".join(paragraph.text for paragraph in document.paragraphs)
+    except Exception:
+        return None
+    return text or None
 
 
 def _attachment_text(name: str, media_type: str, data: bytes) -> str | None:
     """The text a text-like file carries to the model. Binary files return None."""
     lowered = (media_type or "").lower()
     name_lower = (name or "").lower()
+    if lowered == _PDF_MEDIA or name_lower.endswith(".pdf"):
+        return _clip_attachment_text(_extract_pdf_text(data))
+    if lowered == _DOCX_MEDIA or name_lower.endswith(".docx"):
+        return _clip_attachment_text(_extract_docx_text(data))
     looks_text = lowered.startswith(_TEXT_ATTACHMENT_MEDIA) or name_lower.endswith(_TEXT_ATTACHMENT_SUFFIXES)
     if not looks_text and b"\x00" not in (data[:2048] or b""):
         # No declared type and no NUL in the head: treat small text-looking files as text.

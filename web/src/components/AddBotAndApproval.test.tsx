@@ -13,7 +13,10 @@ vi.mock("@/api", async () => {
   return {
     queryClient: client,
     api: vi.fn(async (path: string, options?: { method?: string; json?: unknown }) => {
-      if (path === "/api/endpoints" && !options?.method) return [];
+      if (path === "/api/endpoints") return [];
+      if (path === "/api/local-servers") {
+        return { servers: [{ kind: "ollama", base_url: "http://127.0.0.1:11434/v1", label: "Ollama", models: ["llama3:latest"] }] };
+      }
       if (path === "/api/bots" && options?.method === "POST") return { id: "b1", name: "Ada" };
       if (path === "/api/bots/b1/ongoing") return { id: "c1" };
       if (path.endsWith("/approvals") && !options?.method) return approvals;
@@ -59,6 +62,35 @@ describe("Add a bot", () => {
     const post = mocked.mock.calls.find(([path, options]) => path === "/api/bots" && options?.method === "POST");
     expect(post?.[1]?.json).toMatchObject({ name: "Ada", endpoint_id: null });
     expect(mocked.mock.calls.some(([path, options]) => path === "/api/endpoints" && options?.method === "POST")).toBe(false);
+  });
+
+  it("hides the connection fields unless a new connection is picked", async () => {
+    const { findByTestId, queryByPlaceholderText, findByPlaceholderText } = render(
+      <QueryClientProvider client={queryClient}>
+        <AddBotForm onClose={() => undefined} />
+      </QueryClientProvider>,
+    );
+    const select = (await findByTestId("add-bot-connection")) as HTMLSelectElement;
+    expect(select.value).toBe("");
+    expect(queryByPlaceholderText("Home server")).toBeNull();
+    expect(queryByPlaceholderText("http://localhost:8080/v1")).toBeNull();
+    fireEvent.change(select, { target: { value: "new" } });
+    await findByPlaceholderText("Home server");
+  });
+
+  it("Detect fills a local server into the new connection fields", async () => {
+    const { getByTestId, findByDisplayValue } = render(
+      <QueryClientProvider client={queryClient}>
+        <AddBotForm onClose={() => undefined} />
+      </QueryClientProvider>,
+    );
+    fireEvent.click(getByTestId("detect-local"));
+    await findByDisplayValue("Ollama");
+    const select = getByTestId("add-bot-connection") as HTMLSelectElement;
+    expect(select.value).toBe("new");
+    const form = getByTestId("add-bot-connection").closest("form");
+    expect((form?.querySelector("[name='conn_url']") as HTMLInputElement).value).toBe("http://127.0.0.1:11434/v1");
+    expect((form?.querySelector("[name='conn_model']") as HTMLInputElement).value).toBe("llama3:latest");
   });
 });
 

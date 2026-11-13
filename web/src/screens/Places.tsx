@@ -1,5 +1,5 @@
 import { useQuery } from "@tanstack/react-query";
-import { useEffect, useState, type ReactNode } from "react";
+import { useEffect, useRef, useState, type ReactNode } from "react";
 import { api, queryClient, saveToken } from "@/api";
 import { CopyDiagnostics } from "@/components/Diagnostics";
 import { Button } from "@/components/ui/button";
@@ -20,6 +20,8 @@ function Page({ kicker, title, lede, children }: { kicker: string; title: string
   );
 }
 
+type ProbeResult = { ok: boolean; detail?: string; models?: string[] };
+
 export function ConnectionsScreen() {
   const askConfirm = useApp((state) => state.askConfirm);
   const endpoints = useQuery({ queryKey: ["endpoints"], queryFn: () => api<Endpoint[]>("/api/endpoints") });
@@ -27,35 +29,88 @@ export function ConnectionsScreen() {
   const [error, setError] = useState("");
   const [testing, setTesting] = useState("");
   const [testNote, setTestNote] = useState<{ id: string; ok: boolean; detail: string } | null>(null);
+  const [advanced, setAdvanced] = useState(false);
+  const [model, setModel] = useState("");
+  const [probing, setProbing] = useState(false);
+  const [probeNote, setProbeNote] = useState("");
+  const [probeOk, setProbeOk] = useState(false);
+  const [probeModels, setProbeModels] = useState<string[]>([]);
+  const [probedUrl, setProbedUrl] = useState("");
+  const formRef = useRef<HTMLFormElement>(null);
+
+  function openForm(endpoint: Endpoint | null) {
+    setEditing(endpoint);
+    setError("");
+    setAdvanced(false);
+    setModel(endpoint?.model || "");
+    setProbing(false);
+    setProbeNote("");
+    setProbeOk(false);
+    setProbeModels([]);
+    setProbedUrl("");
+  }
+
+  async function runProbe(baseUrl: string, apiKey: string) {
+    setProbing(true);
+    try {
+      const result = await api<ProbeResult>("/api/endpoints/probe", { method: "POST", json: { base_url: baseUrl, api_key: apiKey || null } });
+      const found = result.models || [];
+      if (result.ok && found.length) setProbeNote(`Found ${found.length} ${found.length === 1 ? "model" : "models"}.`);
+      else if (result.ok) setProbeNote("The server answered.");
+      else setProbeNote("Nothing answered there.");
+      setProbeOk(Boolean(result.ok));
+      setProbeModels(result.ok ? found : []);
+    } catch {
+      setProbeNote("Nothing answered there.");
+      setProbeOk(false);
+      setProbeModels([]);
+    } finally {
+      setProbedUrl(baseUrl);
+      setProbing(false);
+    }
+  }
+
+  function testForm() {
+    const form = formRef.current;
+    if (!form) return;
+    const data = new FormData(form);
+    const baseUrl = String(data.get("base_url") || "").trim();
+    if (!baseUrl) return;
+    void runProbe(baseUrl, String(data.get("api_key") || ""));
+  }
+
   return (
     <Page kicker="Connections" title="Where a bot sends messages" lede="A connection is a server that can chat. It is not a conversation. Chats stay on this computer.">
       <div className="flex items-center justify-between">
         <h2 className="font-medium">Saved connections</h2>
-        <Button variant="ghost" size="sm" onClick={() => { setEditing(null); setError(""); }}>Add</Button>
+        <Button variant="ghost" size="sm" onClick={() => openForm(null)}>Add</Button>
       </div>
       {editing !== undefined ? (
-        <form className="space-y-2 rounded-lg border border-border bg-card p-4" onSubmit={(event) => {
+        <form key={editing?.id || "new"} ref={formRef} className="space-y-2 rounded-lg border border-border bg-card p-4" onSubmit={(event) => {
           event.preventDefault();
           const data = new FormData(event.currentTarget);
-          const body = {
-            name: String(data.get("name") || ""),
-            base_url: String(data.get("base_url") || ""),
-            api_key: String(data.get("api_key") || ""),
-            model: String(data.get("model") || ""),
-            clear_api_key: data.get("clear_api_key") === "on",
-            max_parallel: Number(data.get("max_parallel") || 1),
-            max_tokens: Number(data.get("max_tokens") || 4096),
-            stall_seconds: Number(data.get("stall_seconds") || 45),
-            first_token_seconds: Number(data.get("first_token_seconds") || 120),
-            vision: data.get("vision") === "on",
-          };
-          const request = editing
-            ? api(`/api/endpoints/${editing.id}`, { method: "PATCH", json: body })
-            : api("/api/endpoints", { method: "POST", json: body });
-          void request.then(() => {
+          const baseUrl = String(data.get("base_url") || "");
+          void (async () => {
+            if (!editing && probedUrl !== baseUrl) {
+              await runProbe(baseUrl, String(data.get("api_key") || ""));
+            }
+            const body = {
+              name: String(data.get("name") || ""),
+              base_url: baseUrl,
+              api_key: String(data.get("api_key") || ""),
+              model,
+              clear_api_key: data.get("clear_api_key") === "on",
+              max_parallel: Number(data.get("max_parallel") || 1),
+              max_tokens: Number(data.get("max_tokens") || 4096),
+              stall_seconds: Number(data.get("stall_seconds") || 45),
+              first_token_seconds: Number(data.get("first_token_seconds") || 600),
+              vision: data.get("vision") === "on",
+            };
+            if (editing) await api(`/api/endpoints/${editing.id}`, { method: "PATCH", json: body });
+            else await api("/api/endpoints", { method: "POST", json: body });
             setEditing(undefined);
-            return queryClient.invalidateQueries({ queryKey: ["endpoints"] });
-          }).catch((reason: Error) => setError(reason.message));
+            await queryClient.invalidateQueries({ queryKey: ["endpoints"] });
+          })().catch((reason: Error) => setError(reason.message));
         }}>
           <label className="block text-sm">Name <Input name="name" required maxLength={80} defaultValue={editing?.name || ""} className="mt-1" /></label>
           <label className="block text-sm">Address <Input name="base_url" required type="url" defaultValue={editing?.base_url || ""} placeholder="http://localhost:8080/v1" className="mt-1" /></label>
@@ -64,28 +119,45 @@ export function ConnectionsScreen() {
           </label>
           {editing?.has_api_key ? <label className="flex items-center gap-2 text-sm"><input name="clear_api_key" type="checkbox" /> Clear the saved key</label> : null}
           <label className="block text-sm">Model name <span className="text-muted">optional</span>
-            <Input name="model" maxLength={120} defaultValue={editing?.model || ""} className="mt-1" />
+            {probeOk && probeModels.length ? (
+              <select data-testid="probe-model" name="model" value={model} onChange={(event) => setModel(event.target.value)} className="mt-1 h-9 w-full rounded-md border border-border bg-card px-2 text-sm">
+                <option value="">No model picked</option>
+                {[...new Set([model, ...probeModels].filter(Boolean))].map((id) => <option key={id} value={id}>{id}</option>)}
+              </select>
+            ) : (
+              <Input name="model" maxLength={120} value={model} onChange={(event) => setModel(event.target.value)} className="mt-1" />
+            )}
           </label>
           <label className="flex items-center gap-2 text-sm">
             <input name="vision" type="checkbox" defaultChecked={Boolean(editing?.vision)} />
             This model can see pictures <span className="text-muted">attached images are shown to it</span>
           </label>
-          <label className="block text-sm">Requests at a time <span className="text-muted">1–32. Local servers usually handle 1. Raise it if yours runs several.</span>
-            <Input name="max_parallel" type="number" min={1} max={32} required defaultValue={editing?.max_parallel || 1} className="mt-1" />
-          </label>
-          <label className="block text-sm">Reply length <span className="text-muted">tokens, default 4096</span>
-            <Input name="max_tokens" type="number" min={256} max={32768} required defaultValue={editing?.max_tokens || 4096} className="mt-1" />
-          </label>
-          <label className="block text-sm">Max wait for first word <span className="text-muted">seconds. Local models default to 300.</span>
-            <Input name="first_token_seconds" type="number" min={5} max={600} required defaultValue={editing?.first_token_seconds || 600} className="mt-1" />
-          </label>
-          <label className="block text-sm">Silence between tokens <span className="text-muted">seconds, default 45</span>
-            <Input name="stall_seconds" type="number" min={5} max={600} required defaultValue={editing?.stall_seconds || 45} className="mt-1" />
-          </label>
-          <p className="text-xs text-muted">EasyAgent sends each message to this address. Leave the key blank to keep the one already saved. At once is how many replies may use this connection together. Extra chats wait in line. Reply length stops a model that keeps generating. The first token can take longer than the gap between later tokens.</p>
+          <button type="button" data-testid="advanced-toggle" aria-expanded={advanced} className="text-sm text-muted underline" onClick={() => setAdvanced((value) => !value)}>
+            {advanced ? "Hide advanced" : "Advanced"}
+          </button>
+          {advanced ? (
+            <div className="space-y-2 rounded-md border border-border p-3">
+              <label className="block text-sm">Requests at a time <span className="text-muted">1–32. Local servers usually handle 1. Raise it if yours runs several.</span>
+                <Input name="max_parallel" type="number" min={1} max={32} required defaultValue={editing?.max_parallel || 1} className="mt-1" />
+              </label>
+              <label className="block text-sm">Reply length <span className="text-muted">tokens, default 4096</span>
+                <Input name="max_tokens" type="number" min={256} max={32768} required defaultValue={editing?.max_tokens || 4096} className="mt-1" />
+              </label>
+              <label className="block text-sm">Max wait for first word <span className="text-muted">seconds. Local models default to 600.</span>
+                <Input name="first_token_seconds" type="number" min={5} max={600} required defaultValue={editing?.first_token_seconds || 600} className="mt-1" />
+              </label>
+              <label className="block text-sm">Silence between tokens <span className="text-muted">seconds, default 45</span>
+                <Input name="stall_seconds" type="number" min={5} max={600} required defaultValue={editing?.stall_seconds || 45} className="mt-1" />
+              </label>
+              <p className="text-xs text-muted">At once is how many replies may use this connection together. Extra chats wait in line. Reply length stops a model that keeps generating. The first token can take longer than the gap between later tokens.</p>
+            </div>
+          ) : null}
+          <p className="text-xs text-muted">EasyAgent sends each message to this address. Leave the key blank to keep the one already saved.</p>
+          {probeNote ? <p data-testid="probe-note" className={probeOk ? "text-sm" : "text-sm text-danger"} role="status">{probeNote}</p> : null}
           {error ? <p className="text-sm text-danger" role="alert">{error}</p> : null}
           <div className="flex gap-2">
-            <Button type="submit">Save</Button>
+            <Button type="submit">{probing ? "Checking…" : "Save"}</Button>
+            <Button type="button" variant="ghost" disabled={probing} data-testid="form-test" onClick={testForm}>Test</Button>
             <Button type="button" variant="ghost" onClick={() => setEditing(undefined)}>Cancel</Button>
           </div>
         </form>
@@ -94,7 +166,7 @@ export function ConnectionsScreen() {
         <ul className="space-y-2">
           {(endpoints.data || []).map((endpoint) => (
             <li key={endpoint.id} className="flex items-center justify-between gap-2 rounded-md border border-border px-3 py-2">
-              <button type="button" data-testid="endpoint-row" className="min-w-0 text-left" onClick={() => setEditing(endpoint)}>
+              <button type="button" data-testid="endpoint-row" className="min-w-0 text-left" onClick={() => openForm(endpoint)}>
                 <strong className="block">{endpoint.name}</strong>
                 <span className="block truncate text-xs text-muted">{endpoint.base_url} · {endpoint.max_parallel} at a time</span>
               </button>
@@ -107,7 +179,7 @@ export function ConnectionsScreen() {
                     .catch((reason: Error) => setTestNote({ id: endpoint.id, ok: false, detail: reason.message }))
                     .finally(() => setTesting(""));
                 }}>{testing === endpoint.id ? "Testing" : "Test"}</Button>
-                <Button variant="ghost" size="sm" onClick={() => { setEditing(endpoint); setError(""); }}>Edit</Button>
+                <Button variant="ghost" size="sm" onClick={() => openForm(endpoint)}>Edit</Button>
                 <Button variant="ghost" size="sm" onClick={() => askConfirm({
                 title: `Remove ${endpoint.name}?`,
                 copy: "This deletes only this connection. Bots and chats stay until you point a bot somewhere else.",

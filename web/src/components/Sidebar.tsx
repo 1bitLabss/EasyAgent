@@ -100,10 +100,39 @@ function BotTile({ bot }: { bot: Bot }) {
   );
 }
 
+type LocalServer = { kind?: string; base_url: string; label: string; models?: string[] };
+
 export function AddBotForm({ onClose }: { onClose: () => void }) {
   const endpoints = useQuery({ queryKey: ["endpoints"], queryFn: () => api<Endpoint[]>("/api/endpoints") });
   const openBot = useApp((state) => state.openBot);
   const [error, setError] = useState("");
+  const [conn, setConn] = useState<string | null>(null);
+  const [connName, setConnName] = useState("");
+  const [connUrl, setConnUrl] = useState("");
+  const [connModel, setConnModel] = useState("");
+  const [detecting, setDetecting] = useState(false);
+  const [detectNote, setDetectNote] = useState("");
+  const picked = conn ?? (endpoints.data?.[0]?.id || "");
+  const isNew = picked === "new";
+
+  function detect() {
+    setDetecting(true);
+    setDetectNote("");
+    void api<{ servers: LocalServer[] }>("/api/local-servers")
+      .then((result) => {
+        const server = (result.servers || [])[0];
+        if (!server) {
+          setDetectNote("Nothing answered on this computer.");
+          return;
+        }
+        setConn("new");
+        setConnName(server.label || server.base_url);
+        setConnUrl(server.base_url);
+        setConnModel((server.models || [])[0] || "");
+      })
+      .catch(() => setDetectNote("Nothing answered on this computer."))
+      .finally(() => setDetecting(false));
+  }
 
   async function createBot(form: FormData) {
     setError("");
@@ -154,32 +183,40 @@ export function AddBotForm({ onClose }: { onClose: () => void }) {
         <Input name="name" required maxLength={80} placeholder="Ada" className="mt-1" />
       </label>
       <label className="block text-sm">Connection
-        <select
-          key={endpoints.data?.[0]?.id || "none"}
-          name="endpoint_id"
-          data-testid="add-bot-connection"
-          className="mt-1 h-9 w-full rounded-md border border-border bg-card px-2 text-sm"
-          defaultValue={endpoints.data?.[0]?.id || ""}
-        >
-          <option value="">No connection yet</option>
-          {(endpoints.data || []).map((endpoint) => (
-            <option key={endpoint.id} value={endpoint.id}>{endpoint.name}</option>
-          ))}
-          <option value="new">New connection</option>
-        </select>
+        <div className="mt-1 flex items-center gap-2">
+          <select
+            name="endpoint_id"
+            data-testid="add-bot-connection"
+            value={picked}
+            onChange={(event) => setConn(event.target.value)}
+            className="h-9 w-full rounded-md border border-border bg-card px-2 text-sm"
+          >
+            <option value="">No connection yet</option>
+            {(endpoints.data || []).map((endpoint) => (
+              <option key={endpoint.id} value={endpoint.id}>{endpoint.name}</option>
+            ))}
+            <option value="new">New connection</option>
+          </select>
+          <Button type="button" size="sm" variant="ghost" data-testid="detect-local" disabled={detecting} onClick={detect}>{detecting ? "Detecting…" : "Detect"}</Button>
+        </div>
       </label>
-      <label className="block text-sm">Connection name
-        <Input name="conn_name" maxLength={80} placeholder="Home server" className="mt-1" />
-      </label>
-      <label className="block text-sm">Address
-        <Input name="conn_url" placeholder="http://localhost:8080/v1" className="mt-1" />
-      </label>
-      <label className="block text-sm">Key <span className="text-muted">optional</span>
-        <Input name="conn_key" type="password" autoComplete="off" className="mt-1" />
-      </label>
-      <label className="block text-sm">Model name <span className="text-muted">optional</span>
-        <Input name="conn_model" maxLength={120} className="mt-1" />
-      </label>
+      {detectNote ? <p data-testid="detect-note" className="text-xs text-muted" role="status">{detectNote}</p> : null}
+      {isNew ? (
+        <>
+          <label className="block text-sm">Connection name
+            <Input name="conn_name" maxLength={80} placeholder="Home server" value={connName} onChange={(event) => setConnName(event.target.value)} className="mt-1" />
+          </label>
+          <label className="block text-sm">Address
+            <Input name="conn_url" placeholder="http://localhost:8080/v1" value={connUrl} onChange={(event) => setConnUrl(event.target.value)} className="mt-1" />
+          </label>
+          <label className="block text-sm">Key <span className="text-muted">optional</span>
+            <Input name="conn_key" type="password" autoComplete="off" className="mt-1" />
+          </label>
+          <label className="block text-sm">Model name <span className="text-muted">optional</span>
+            <Input name="conn_model" maxLength={120} value={connModel} onChange={(event) => setConnModel(event.target.value)} className="mt-1" />
+          </label>
+        </>
+      ) : null}
       <label className="block text-sm">Model name for this bot <span className="text-muted">optional</span>
         <Input name="model" maxLength={120} placeholder="only if it should differ" className="mt-1" />
       </label>

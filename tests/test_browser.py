@@ -375,3 +375,90 @@ def test_the_browser_wrapper_hides_the_data_dir(tmp_path):
     assert "DATA DENIED" in result.stdout
     assert "WORK ok" in result.stdout
     assert "hidden-secret" not in result.stdout
+
+
+def test_a_page_dialog_is_recorded_not_lost(tmp_path):
+    """A confirm() on click must not hang the hub, and the next read must mention it."""
+    server = _serve()
+    port = server.server_address[1]
+    store, bot = _bot(tmp_path)
+    base = f"http://127.0.0.1:{port}"
+
+    async def go(action: str, **fields):
+        request = ToolRequest(kind="browser", action=action, path=fields.get("path", ""), command=fields.get("command", ""), body=fields.get("body", ""))
+        return await execute(store, request, bot["id"])
+
+    async def once():
+        await go("open", path=f"{base}/dialog.html")
+        page = await go("read")
+        ask = _number(page, "Ask")
+        await go("click", command=str(ask))
+        after = await go("read")
+        assert "Dialog: confirm" in after
+        assert "Delete item?" in after
+        assert "auto-dismissed" in after
+        assert "canceled" in after
+
+    try:
+        asyncio.run(once())
+    finally:
+        server.shutdown()
+
+
+def test_upload_fence_gives_the_page_a_workspace_file(tmp_path):
+    """The upload fence hands a workspace file to a pending chooser; outside paths are refused."""
+    server = _serve()
+    port = server.server_address[1]
+    store, bot = _bot(tmp_path)
+    base = f"http://127.0.0.1:{port}"
+
+    async def go(action: str, **fields):
+        request = ToolRequest(kind="browser", action=action, path=fields.get("path", ""), command=fields.get("command", ""), body=fields.get("body", ""))
+        return await execute(store, request, bot["id"])
+
+    async def once():
+        workspace = tmp_path / "bots" / bot["id"] / "workspace"
+        workspace.mkdir(parents=True, exist_ok=True)
+        (workspace / "notes.txt").write_text("hello", encoding="utf-8")
+        outside = tmp_path / "outside.txt"
+        outside.write_text("outside", encoding="utf-8")
+
+        await go("open", path=f"{base}/upload.html")
+        with pytest.raises(ToolError):
+            await go("upload", command="notes.txt")
+        page = await go("read")
+        spot = _number(page, "Choose a file")
+        await go("click", command=str(spot))
+        with pytest.raises(ToolError):
+            await go("upload", command="../outside.txt")
+        with pytest.raises(ToolError):
+            await go("upload", command=str(outside))
+        gave = await go("upload", command="notes.txt")
+        assert "file" in gave.lower()
+        after = await go("read")
+        assert "notes.txt" in after
+
+    try:
+        asyncio.run(once())
+    finally:
+        server.shutdown()
+
+
+def test_upload_fence_parses_and_stays_in_the_workspace(tmp_path):
+    picked = parse_tool("```browser\nupload\nnotes.txt\n```")
+    assert picked is not None and picked.kind == "browser" and picked.action == "upload" and picked.command == "notes.txt"
+    assert parse_tool("```browser\nupload\nthe file\n```") is None
+    from easyagent.browser import _workspace_upload, download_dir
+
+    store, bot = _bot(tmp_path)
+    root = download_dir(store, bot["id"])
+    root.mkdir(parents=True, exist_ok=True)
+    (root / "notes.txt").write_text("hello", encoding="utf-8")
+    assert _workspace_upload(store, bot["id"], "notes.txt").name == "notes.txt"
+    refused = []
+    for bad in ("../outside.txt", "/etc/passwd", r"C:\Windows\notepad.exe", "missing.txt", ""):
+        try:
+            _workspace_upload(store, bot["id"], bad)
+        except ToolError:
+            refused.append(bad)
+    assert refused == ["../outside.txt", "/etc/passwd", r"C:\Windows\notepad.exe", "missing.txt", ""]

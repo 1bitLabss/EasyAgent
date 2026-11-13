@@ -1,0 +1,16 @@
+<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><title>Upload</title></head>
+<body>
+  <h1>Upload</h1>
+  <label for="f">Choose a file</label>
+  <input type="file" id="f">
+  <p id="name">none</p>
+  <script>
+    document.getElementById('f').addEventListener('change', () => {
+      const files = document.getElementById('f').files;
+      document.getElementById('name').textContent = files.length ? files[0].name : 'none';
+    });
+  </script>
+</body>
+</html>

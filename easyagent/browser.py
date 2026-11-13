@@ -462,6 +462,9 @@ def _pack(request, *, url: str, element: str = "", values: str = "", secret: boo
     )
 
 
+_STOP = object()
+
+
 class _Hub:
     def __init__(self) -> None:
         self._queue: queue.Queue = queue.Queue()
@@ -500,10 +503,28 @@ class _Hub:
             sessions: dict[str, dict] = {}
             while True:
                 fn, done = self._queue.get()
+                if fn is _STOP:
+                    done.put((True, True))
+                    return
                 try:
                     done.put((True, fn(playwright, sessions)))
                 except Exception as exc:
                     done.put((False, exc))
+
+    def stop_and_restart(self) -> None:
+        """End the Playwright driver so the next caller starts it with its own temp folder."""
+        if self._started:
+            stop: queue.Queue = queue.Queue(1)
+            self._queue.put((_STOP, stop))
+            try:
+                stop.get(timeout=20)
+                self._thread.join(timeout=20)
+            except Exception:
+                pass
+        with self._start_lock:
+            self._queue = queue.Queue()
+            self._thread = threading.Thread(target=self._loop, name="easyagent-browser", daemon=True)
+            self._started = False
 
 
 _HUB = _Hub()
@@ -759,6 +780,74 @@ def _write_landlock_wrapper(store: Store, bot_id: str, real: str, profile: Path,
     return str(script)
 
 
+def _note_dialog(session: dict, kind: str, message: str, action: str = "") -> None:
+    """Keep the last few native dialogs or file requests so the model can see them."""
+    session.setdefault("dialogs", []).append(
+        {"type": kind, "message": " ".join((message or "").split())[:200], "action": action}
+    )
+    del session["dialogs"][:-3]
+
+
+def _wire_page(page, session: dict) -> None:
+    """Record native dialogs and file choosers. Nothing here may block the hub thread."""
+    if getattr(page, "_ea_wired", False):
+        return
+    try:
+        page._ea_wired = True
+    except Exception:
+        pass
+
+    def on_dialog(dialog) -> None:
+        try:
+            if dialog.type in {"alert", "beforeunload"}:
+                dialog.accept()
+                action = "auto-accepted"
+            else:
+                dialog.dismiss()
+                action = "auto-dismissed"
+            _note_dialog(session, dialog.type, dialog.message, action)
+        except Exception:
+            pass
+
+    def on_chooser(chooser) -> None:
+        try:
+            old = session.get("chooser")
+            if old is not None:
+                try:
+                    old.cancel()
+                except Exception:
+                    pass
+            session["chooser"] = chooser
+            _note_dialog(session, "filechooser", "The page asked for a file.")
+        except Exception:
+            pass
+
+    page.on("dialog", on_dialog)
+    page.on("filechooser", on_chooser)
+
+
+def _workspace_upload(store: Store, bot_id: str, raw: str) -> Path:
+    """An upload file is a plain relative path inside this bot's workspace. Checked before Playwright sees it."""
+    from easyagent.tools import ToolError
+
+    text = (raw or "").strip().strip('"')
+    if not text:
+        raise ToolError("Upload needs a file from this bot's workspace.")
+    candidate = Path(text)
+    if candidate.is_absolute() or candidate.drive or text[:1] in {"/", "\\"}:
+        raise ToolError("Upload needs a plain path inside this bot's workspace, not an absolute path.")
+    root = download_dir(store, bot_id).resolve()
+    try:
+        resolved = (root / candidate).resolve()
+    except OSError as exc:
+        raise ToolError("That file name could not be read.") from exc
+    if root not in resolved.parents and resolved != root:
+        raise ToolError("That file is outside this bot's workspace. It was not given to the page.")
+    if not resolved.is_file():
+        raise ToolError("There is no such file in this bot's workspace.")
+    return resolved
+
+
 def _session(playwright, sessions: dict, store: Store, bot_id: str) -> dict:
     from easyagent.tools import ToolError
 
@@ -785,7 +874,16 @@ def _session(playwright, sessions: dict, store: Store, bot_id: str) -> dict:
             ) from exc
         raise ToolError("The browser could not start. " + message[:240]) from exc
     page = context.pages[0] if context.pages else context.new_page()
-    sessions[bot_id] = {"context": context, "page": page, "headless": headless, "store": store}
+    sessions[bot_id] = {
+        "context": context,
+        "page": page,
+        "headless": headless,
+        "store": store,
+        "dialogs": [],
+        "chooser": None,
+    }
+    _wire_page(page, sessions[bot_id])
+    context.on("page", lambda fresh: _wire_page(fresh, sessions[bot_id]))
     _mark_open(bot_id, True)
     return sessions[bot_id]
 
@@ -807,6 +905,7 @@ def _page(session: dict):
     if page is None or page.is_closed():
         page = context.pages[0] if context.pages else context.new_page()
         session["page"] = page
+        _wire_page(page, session)
     return page
 
 
@@ -830,13 +929,19 @@ def _pick(elements: list[dict], command: str) -> dict:
     raise ToolError(f"There is no element {number} on this page. Read the page again.")
 
 
-def _snapshot_text(page, elements: list[dict]) -> str:
+def _snapshot_text(page, elements: list[dict], session: dict | None = None) -> str:
     title = ""
     try:
         title = page.title() or ""
     except Exception:
         title = ""
     lines = [f"Page: {title}" if title else "Page", f"URL: {page.url}"]
+    for item in (session or {}).get("dialogs") or []:
+        kind = str(item.get("type") or "dialog")
+        if kind == "filechooser":
+            lines.append("Dialog: the page asked for a file. Click the file's spot, then use an upload fence.")
+        else:
+            lines.append(f"Dialog: {kind} \"{item.get('message') or ''}\" ({item.get('action') or 'seen'})")
     for element in elements:
         lines.append(_describe(element))
     try:
@@ -984,6 +1089,7 @@ def perform(store: Store, request, bot_id: str | None) -> tuple[str, str]:
             url = (request.path or "").strip()
             if names_data_dir(store, url) and not _yolo_passes(store, bot_id):
                 raise ToolError("That reaches EasyAgent's saved data. It was not opened.")
+            session["dialogs"] = []
             page.goto(url, wait_until="domcontentloaded", timeout=20000)
         elif action == "back":
             page.go_back(wait_until="domcontentloaded", timeout=15000)
@@ -1024,6 +1130,15 @@ def perform(store: Store, request, bot_id: str | None) -> tuple[str, str]:
                 return "\n".join(rows) or "(no tabs)", ""
         elif action == "read":
             pass
+        elif action == "upload":
+            file = _workspace_upload(store, bot_id, request.command or "")
+            page.wait_for_timeout(100)  # let a file chooser event land before deciding
+            chooser = session.get("chooser")
+            if chooser is None:
+                raise ToolError("The page is not asking for a file. Click the file's spot first, then use an upload fence.")
+            session["chooser"] = None
+            chooser.set_files(str(file))
+            _note_dialog(session, "upload", f"Gave the page {file.name}.", "done")
         elif action in {"click", "type", "select", "download"}:
             elements = _elements(page)
             element = _pick(elements, request.command)
@@ -1046,7 +1161,7 @@ def perform(store: Store, request, bot_id: str | None) -> tuple[str, str]:
                 locator.click(timeout=10000)
                 page.wait_for_timeout(200)
         else:
-            raise ToolError("A browser action is open, read, click, type, select, scroll, back, wait, tabs, or download.")
+            raise ToolError("A browser action is open, read, click, type, select, upload, scroll, back, wait, tabs, or download.")
         page = _page(session)
         host = (urlparse(page.url or "").hostname or "").lower()
         if host:
@@ -1067,11 +1182,11 @@ def perform(store: Store, request, bot_id: str | None) -> tuple[str, str]:
         notice = _containment_notice(store, bot_id)
         prefix = (notice + "\n") if notice else ""
         if action == "read":
-            return prefix + _snapshot_text(page, _elements(page)), shot
+            return prefix + _snapshot_text(page, _elements(page), session), shot
         if action == "open":
             return prefix + f"Opened {title or 'a page'} — {page.url}", shot
         if action == "tabs":
-            return prefix + _snapshot_text(page, _elements(page)), shot
+            return prefix + _snapshot_text(page, _elements(page), session), shot
         line = {
             "back": "Went back.",
             "scroll": "Scrolled the page.",
@@ -1079,6 +1194,7 @@ def perform(store: Store, request, bot_id: str | None) -> tuple[str, str]:
             "click": "Clicked the element.",
             "type": "Typed into the element.",
             "select": "Chose that option.",
+            "upload": "Gave the page the file.",
         }.get(action, "Used the browser.")
         return prefix + line, shot
 
@@ -1131,6 +1247,10 @@ def reset_for_tests() -> None:
     else:
         with _OPEN_LOCK:
             _OPEN.clear()
+    _HUB.stop_and_restart()
+    global _READY
+    with _READY_LOCK:
+        _READY = False
 
 
 def remove_profile(store: Store, bot_id: str) -> None:

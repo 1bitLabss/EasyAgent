@@ -620,7 +620,7 @@ NATIVE_TOOLS = [
     _tool(
         "browser",
         "Use this bot's own browser. It is not the person's browser. "
-        "action is open, read, click, type, select, scroll, back, wait, tabs, or download. "
+        "action is open, read, click, type, select, scroll, back, wait, tabs, download, or upload. "
         "Read the page for numbered elements before you click or type. "
         "Do not type a password, a card number, or a 2FA code.",
         {"action": _STRING, "url": _STRING, "element": _STRING, "text": _STRING},

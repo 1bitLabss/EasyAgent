@@ -84,7 +84,7 @@ _ROUTINE_FENCE = re.compile(r"```routine[ \t]*\r?\n(.*?)```", re.DOTALL | re.IGN
 _BROWSER_FENCE = re.compile(r"```browser[ \t]*\r?\n(.*?)```", re.DOTALL | re.IGNORECASE)
 _MCP_FENCE = re.compile(r"```mcp[ \t]*\r?\n(.*?)```", re.DOTALL | re.IGNORECASE)
 _BRIDGE_FENCE = re.compile(r"```bridge[ \t]*\r?\n(.*?)```", re.DOTALL | re.IGNORECASE)
-_BROWSER_ACTIONS = {"open", "read", "click", "type", "select", "scroll", "back", "wait", "tabs", "download"}
+_BROWSER_ACTIONS = {"open", "read", "click", "type", "select", "scroll", "back", "wait", "tabs", "download", "upload"}
 _HISTORY_FENCE = re.compile(r"```history[ \t]*\r?\n(.*?)```", re.DOTALL | re.IGNORECASE)
 _DELEGATE_FENCE = re.compile(r"```delegate[ \t]*\r?\n(.*?)```", re.DOTALL | re.IGNORECASE)
 _SKILL_FENCE = re.compile(r"```skill[ \t]*\r?\n(.*?)```", re.DOTALL | re.IGNORECASE)
@@ -2013,6 +2013,7 @@ def status_label(request: ToolRequest) -> str:
             "wait": "Waiting",
             "tabs": "Checking tabs",
             "download": "Downloading",
+            "upload": "Giving the page a file",
         }.get(request.action, "Using the browser")
     if request.kind in {"search", "fetch", "research"}:
         return "Searching"
@@ -3332,7 +3333,7 @@ def _execute(store: Store, request: ToolRequest, bot_id: str | None = None) -> s
 def _browser_request(raw: dict) -> ToolRequest:
     action = str(raw.get("action") or "open").strip().lower()
     if action not in _BROWSER_ACTIONS:
-        raise ToolError("A browser action is open, read, click, type, select, scroll, back, wait, tabs, or download.")
+        raise ToolError("A browser action is open, read, click, type, select, upload, scroll, back, wait, tabs, or download.")
     url = str(raw.get("url") or "").strip()
     element = str(raw.get("element") or raw.get("target") or "").strip()
     text = str(raw.get("text") or raw.get("value") or raw.get("option") or "").strip()
@@ -3355,6 +3356,11 @@ def _browser_request(raw: dict) -> ToolRequest:
     if action == "tabs":
         extra = str(raw.get("tab") or element or "").strip()
         return ToolRequest(kind="browser", action="tabs", command=extra, path=url)
+    if action == "upload":
+        file = str(raw.get("file") or raw.get("path") or text).strip()
+        if not file or file.lower() in {"the file", "file"}:
+            raise ToolError("Upload needs a file from this bot's workspace.")
+        return ToolRequest(kind="browser", action="upload", command=file)
     return ToolRequest(kind="browser", action=action, command=text or element, path=url)
 
 
@@ -3366,10 +3372,10 @@ def _browser_from_body(body: str) -> ToolRequest | None:
         return None
     action = lines[0].strip().lower()
     if action not in _BROWSER_ACTIONS:
-        raise ToolError("A browser action is open, read, click, type, select, scroll, back, wait, tabs, or download.")
+        raise ToolError("A browser action is open, read, click, type, select, upload, scroll, back, wait, tabs, or download.")
     rest = [line for line in lines[1:]]
     joined = " ".join(line.strip().lower() for line in rest if line.strip())
-    if joined in {"the url", "the element", "the text", "the element the text", "url", "element"}:
+    if joined in {"the url", "the element", "the text", "the element the text", "the file", "url", "element", "file"}:
         return None
     if action == "open":
         url = " ".join(line.strip() for line in rest if line.strip())
@@ -3401,6 +3407,11 @@ def _browser_from_body(body: str) -> ToolRequest | None:
     if action == "wait":
         amount = rest[0].strip() if rest else "1"
         return ToolRequest(kind="browser", action="wait", command=amount)
+    if action == "upload":
+        file = " ".join(line.strip() for line in rest if line.strip())
+        if not file:
+            raise ToolError("Upload needs a file from this bot's workspace.")
+        return ToolRequest(kind="browser", action="upload", command=file)
     extra = " ".join(line.strip() for line in rest if line.strip())
     return ToolRequest(kind="browser", action="tabs", command=extra)
 

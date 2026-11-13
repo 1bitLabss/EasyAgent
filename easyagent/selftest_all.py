@@ -861,6 +861,10 @@ def _fingerprint(root: Path) -> dict[str, str]:
         rel = path.relative_to(root).as_posix()
         if _under_selftest(rel, skip) or rel.endswith(_SIDECAR_SUFFIXES) or rel == "deliveries.sqlite":
             continue
+        # The gate's own requests stamp the daily usage counter while it runs.
+        # It is a counter, not user data; the copy check must not see it move.
+        if rel == "usage_today.json":
+            continue
         digest = hashlib.sha256()
         with path.open("rb") as handle:
             for chunk in iter(lambda: handle.read(1 << 20), b""):

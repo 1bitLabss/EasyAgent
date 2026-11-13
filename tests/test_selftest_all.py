@@ -312,3 +312,20 @@ def test_a_firewall_warning_stays_a_pass(monkeypatch):
     status, detail = check_containment(True)
     assert status == "PASS"
     assert "a third-party firewall is blocking sandboxed bots from the network; EasyAgent's own web search still works" in detail
+
+
+def test_copy_check_ignores_the_gate_own_usage_stamp(tmp_path):
+    """The gate stamps usage_today.json with its own requests; the copy
+    invariance check must not treat that counter as user data changing."""
+    from easyagent.selftest_all import _check_copy, _fingerprint
+
+    (tmp_path / "note.json").write_text('{"a": 1}', encoding="utf-8")
+    (tmp_path / "usage_today.json").write_text('{"tokens": 10}', encoding="utf-8")
+    before = _fingerprint(tmp_path)
+    assert "usage_today.json" not in before
+    (tmp_path / "usage_today.json").write_text('{"tokens": 9999}', encoding="utf-8")
+    status, message = _check_copy(tmp_path, before)
+    assert status == "PASS", message
+    (tmp_path / "note.json").write_text('{"a": 2}', encoding="utf-8")
+    status, message = _check_copy(tmp_path, before)
+    assert status == "FAIL" and "note.json" in message

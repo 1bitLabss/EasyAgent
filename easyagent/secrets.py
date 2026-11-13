@@ -262,6 +262,10 @@ def get_web_credential(host: str, name: str, store=None) -> str:
     return get_secret(web_credential_key(host, name), store)
 
 
+def remove_web_credential(host: str, name: str, store=None) -> None:
+    delete_secret(web_credential_key(host, name), store)
+
+
 def list_web_credentials(store) -> list[dict]:
     """Saved web credentials as ``{host, name}`` rows. Values are never returned.
 

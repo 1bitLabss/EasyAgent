@@ -968,6 +968,28 @@ def _pick(elements: list[dict], command: str) -> dict:
     raise ToolError(f"There is no element {number} on this page. Read the page again.")
 
 
+def _signin_hint(store: Store, page_url: str, elements: list[dict]) -> str:
+    """One line naming the saved sign-ins for this host. Names only, never values.
+
+    A login form with saved names steers the model to ``vault:<name>`` instead of
+    the takeover wall. One list call, no value reads; nothing on failure.
+    """
+    if not any((element.get("type") or "") == "password" for element in elements):
+        return ""
+    host = (urlparse(page_url or "").hostname or "").lower()
+    if not host:
+        return ""
+    try:
+        from easyagent.secrets import list_web_credentials
+
+        names = [row["name"] for row in list_web_credentials(store) if row.get("host") == host]
+    except Exception:
+        return ""
+    if not names:
+        return ""
+    return "Saved sign-ins for this host: " + ", ".join(names) + "."
+
+
 def _snapshot_text(page, elements: list[dict], session: dict | None = None) -> str:
     title = ""
     try:
@@ -1238,7 +1260,10 @@ def perform(store: Store, request, bot_id: str | None) -> tuple[str, str]:
         notice = _containment_notice(store, bot_id)
         prefix = (notice + "\n") if notice else ""
         if action == "read":
-            return prefix + _snapshot_text(page, _elements(page), session), shot
+            elements = _elements(page)
+            text = prefix + _snapshot_text(page, elements, session)
+            hint = _signin_hint(store, page.url or "", elements)
+            return (text + "\n" + hint if hint else text), shot
         if action == "open":
             return prefix + f"Opened {title or 'a page'} — {page.url}", shot
         if action == "tabs":

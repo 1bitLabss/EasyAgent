@@ -154,7 +154,7 @@ def run_gate(
         started = server.start()
         if not started:
             report["checks"].append(_row("health", "FAIL", server.error or "the server did not start", 0))
-            for name in ("chat", "whoami", "files", "search", "ui", "polls", "routines"):
+            for name in ("chat", "whoami", "files", "search", "ui", "polls", "routines", "web-credentials"):
                 report["checks"].append(_row(name, "FAIL", "the server did not start", 0))
         else:
             client = httpx.Client(base_url=f"http://127.0.0.1:{port}", timeout=httpx.Timeout(_CHAT_TIMEOUT, connect=5.0))
@@ -212,6 +212,9 @@ def run_gate(
             report["checks"].append(_timed("ui", ui_check))
             report["checks"].append(_timed("polls", poll_check))
             report["checks"].append(_timed("routines", need_bot(lambda: _check_routines(client, bot_id))))
+            report["checks"].append(
+                _timed("web-credentials", need_bot(lambda: _check_web_credentials(client, bot_id)))
+            )
     except Exception as exc:
         report["checks"].append(_row("gate", "FAIL", str(exc), 0))
     finally:
@@ -674,6 +677,47 @@ def judge_routine_preview(schedule: dict) -> tuple[str, str]:
     return "PASS", text
 
 
+def _check_web_credentials(client: httpx.Client, bot_id: str) -> tuple[str, str]:
+    """Round-trip a throwaway web credential. The value never appears in a body."""
+    secret = "gate-" + os.urandom(8).hex()
+    base = f"/api/bots/{bot_id}/browser/credentials"
+    payload = {"host": "selftest.example", "name": "gate", "value": secret}
+    posted = client.post(base, json=payload)
+    if posted.status_code >= 500:
+        return "SKIP", "the secret store is not available on this machine"
+    problems: list[str] = []
+    if posted.status_code != 200:
+        problems.append(f"POST {posted.status_code}")
+    listed = client.get(base)
+    if listed.status_code != 200:
+        problems.append(f"GET {listed.status_code}")
+    rows = (listed.json() or {}).get("credentials") or []
+    if {"host": "selftest.example", "name": "gate"} not in rows:
+        problems.append("the saved credential was not listed")
+    for name, response in (("POST", posted), ("GET", listed)):
+        if secret in response.text:
+            problems.append(f"the {name} body carried the value")
+    for bad in ({"value": ""}, {"host": "SelfTest.Example"}, {"name": ""}):
+        refused = client.post(base, json={**payload, **bad})
+        if refused.status_code != 400:
+            problems.append(f"accepted a bad POST ({next(iter(bad))})")
+        elif secret in refused.text:
+            problems.append("a rejected POST echoed the value")
+    deleted = client.delete(base, params={"host": "selftest.example", "name": "gate"})
+    if deleted.status_code != 200:
+        problems.append(f"DELETE {deleted.status_code}")
+    after = client.get(base)
+    rows = (after.json() or {}).get("credentials") or []
+    if {"host": "selftest.example", "name": "gate"} in rows:
+        problems.append("the credential survived the delete")
+    for name, response in (("DELETE", deleted), ("GET", after)):
+        if secret in response.text:
+            problems.append(f"the {name} body carried the value")
+    if problems:
+        return "FAIL", "; ".join(problems)
+    return "PASS", "round-trip clean, the value never appeared in a body"
+
+
 def _check_secrets() -> tuple[str, str]:
     """Migrate a throwaway store. The plaintext key must not remain in that data dir."""
     from easyagent.secrets import endpoint_account, get_secret, migrate_store
@@ -877,7 +921,7 @@ def _delete_selftest_bots(store) -> None:
 def _capture_bytes(root: Path) -> dict[str, bytes | None]:
     """Files the page rewrites outside a bot directory. Restored after the probe."""
     saved: dict[str, bytes | None] = {}
-    for name in ("unread.json",):
+    for name in ("unread.json", "secrets.db"):
         path = root / name
         if path.is_file() and not path.is_symlink():
             saved[name] = path.read_bytes()

@@ -571,6 +571,51 @@ def handle_discord_event(store: Store, row: dict, event: dict) -> tuple[str, str
     return "accepted", user_id, channel_id
 
 
+def handle_slack_event(store: Store, row: dict, payload: dict) -> tuple[str, str, str]:
+    """Return (action, user_id, channel). action is ignored, accepted, callback, or skip.
+
+    Slack wraps real events in an event_callback envelope and button taps in an
+    interactive envelope. The button carries the same ea:<card>:approve payload
+    the Telegram and Discord cards use, so the callback path is shared.
+    """
+    name = str(payload.get("type") or "")
+    if name == "interactive":
+        user = payload.get("user")
+        if not isinstance(user, dict):
+            user = {}
+        user_id = str(user.get("id") or "")
+        channel = payload.get("channel")
+        channel_id = str(channel.get("id") or "") if isinstance(channel, dict) else ""
+        actions = payload.get("actions")
+        if not isinstance(actions, list):
+            actions = []
+        for action in actions:
+            if not isinstance(action, dict):
+                continue
+            action_id = str(action.get("action_id") or "")
+            if not action_id.startswith("ea:"):
+                continue
+            apply_callback(store, row, user_id, str(action.get("value") or action_id))
+            return "callback", user_id, channel_id
+        return "skip", user_id, channel_id
+    if name != "event_callback":
+        return "skip", "", ""
+    event = payload.get("event")
+    if not isinstance(event, dict):
+        event = {}
+    if str(event.get("type") or "") != "message":
+        return "skip", "", ""
+    user_id = str(event.get("user") or "")
+    channel_id = str(event.get("channel") or "")
+    text = str(event.get("text") or "")
+    # Bots, edits, joins and empty pings are not the person talking to us.
+    if event.get("bot_id") or event.get("subtype") or not text.strip():
+        return "skip", user_id, channel_id
+    if not take_inbound(store, row, user_id, text, channel_id):
+        return "ignored", user_id, channel_id
+    return "accepted", user_id, channel_id
+
+
 async def _lane_holding(store: Store, bot_id: str) -> bool:
     from easyagent.gate import lane_busy
 
@@ -706,6 +751,8 @@ async def run_bridges(store: Store, stop: asyncio.Event, reply) -> None:
                     await _poll_telegram(store, row, token, reply)
                 elif row.get("kind") == "discord":
                     _ensure_discord(store, row, token, reply)
+                elif row.get("kind") == "slack":
+                    _ensure_slack(store, row, token, reply)
             except Exception:
                 continue
         try:
@@ -771,3 +818,60 @@ async def _discord_session(store: Store, row: dict, token: str, reply) -> None:
             if text and channel_id:
                 await discord_send(token, channel_id, scrub(text, store))
                 log_event(store, "discord", user_id, "sent")
+
+
+_SLACK: dict[str, asyncio.Task] = {}
+
+
+def _ensure_slack(store: Store, row: dict, token: str, reply) -> None:
+    current = _SLACK.get(row["id"])
+    if current is not None and not current.done():
+        return
+    _SLACK[row["id"]] = asyncio.create_task(_slack_socket_session(store, dict(row), token, reply))
+
+
+async def _slack_socket_session(store: Store, row: dict, token: str, reply) -> None:
+    """One Socket Mode connection. A failure waits for the next loop to try again.
+
+    Slack hands out a short-lived wss URL over the HTTP API; the token rides
+    only in the Authorization header, never in the URL. Every envelope must be
+    acknowledged by envelope_id or Slack redelivers it.
+    """
+    import websockets
+
+    info = await post_json(
+        "https://slack.com/api/apps.connections.open",
+        {},
+        {"Authorization": f"Bearer {token}"},
+    )
+    url = str(info.get("url") or "")
+    if info.get("ok") is False or not url.startswith("wss://"):
+        return
+    async with websockets.connect(url, open_timeout=10) as socket:
+        # Say which protocol this socket speaks before any event arrives.
+        await socket.send(json.dumps({"type": "events_api", "accept_response_payload": {}}))
+        while True:
+            envelope = json.loads(await socket.recv())
+            if not isinstance(envelope, dict):
+                continue
+            envelope_id = str(envelope.get("envelope_id") or "")
+            if envelope_id:
+                await socket.send(json.dumps({"envelope_id": envelope_id}))
+            raw_payload = envelope.get("payload")
+            payload = raw_payload if isinstance(raw_payload, dict) else {}
+            if (
+                str(payload.get("type") or "") == "event_callback"
+                and isinstance(payload.get("event"), dict)
+                and str(payload["event"].get("type") or "") == "message"
+            ):
+                while await _lane_holding(store, row.get("bot_id") or ""):
+                    await asyncio.sleep(0.2)
+            action, user_id, channel_id = handle_slack_event(store, row, payload)
+            if action != "accepted":
+                continue
+            if await _lane_holding(store, row.get("bot_id") or ""):
+                continue
+            text = await reply(store, row.get("bot_id") or "")
+            if text and channel_id:
+                await slack_send(token, channel_id, scrub(text, store))
+                log_event(store, "slack", user_id, "sent")

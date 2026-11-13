@@ -519,6 +519,17 @@ class WebCredentialIn(BaseModel):
     value: str = ""
 
 
+class TtsIn(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+    text: str = ""
+    voice: str = ""
+
+
+class TtsVoiceIn(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+    voice: str = ""
+
+
 class ConnectorIn(BaseModel):
     model_config = ConfigDict(extra="ignore")
     name: str = ""
@@ -1541,6 +1552,43 @@ def create_app(data_dir: str | Path | None = None) -> FastAPI:
             raise HTTPException(400, "Name the host and the name of the sign-in to remove.")
         remove_web_credential(host, name, store)
         return {"ok": True}
+
+    @app.get("/api/bots/{bot_id}/tts/voices")
+    def get_tts_voices(bot_id: str):
+        from easyagent.tts import DEFAULT_VOICE, VOICES, get_voice
+
+        bot = store.get_bot(bot_id)
+        return {
+            "voices": VOICES,
+            "default": DEFAULT_VOICE,
+            "voice": get_voice(bot),
+        }
+
+    @app.post("/api/bots/{bot_id}/tts/voice")
+    def post_tts_voice(bot_id: str, body: TtsVoiceIn):
+        from easyagent.tts import get_voice, save_voice
+
+        voice = (body.voice or "").strip()
+        try:
+            bot = save_voice(store, bot_id, voice)
+        except ValueError:
+            raise HTTPException(400, "That voice is not on the list.")
+        return {"voice": get_voice(bot)}
+
+    @app.post("/api/bots/{bot_id}/tts")
+    def post_tts(bot_id: str, body: TtsIn):
+        from easyagent.tools import ToolError
+        from easyagent.tts import get_voice, is_known_voice, synthesize
+
+        bot = store.get_bot(bot_id)
+        voice = (body.voice or "").strip() or get_voice(bot)
+        if not is_known_voice(voice):
+            raise HTTPException(400, "That voice is not on the list.")
+        try:
+            audio = synthesize(body.text, voice)
+        except ToolError as exc:
+            raise HTTPException(400, str(exc))
+        return Response(content=audio, media_type="audio/mpeg")
 
     @app.get("/api/bots/{bot_id}/audit")
     def get_audit(bot_id: str):

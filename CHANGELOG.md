@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.3.56
+- Bots get past login pages. A page that pops a confirm or alert no longer stalls the browser — the dialog is answered with a safe default and named in the next read. When a page asks for a file, an upload fence hands it a file from the bot's workspace; anything outside stays out.
+- Saved sign-ins. A credential saved for a site can be typed as `vault:<name>` — the secret is opened only at the moment of typing, only when the page you are on is the site the credential belongs to, and it never appears in the chat or the approval card, which shows just the name and the host. Sign-ins can be listed, saved, and removed from settings, and a login page now names the saved sign-ins it has for that site.
+- Real voices. Speak and Read-aloud now use free neural voices synthesized on your machine's server (eight to pick from, one saved per bot), with the old browser voice kept as automatic fallback. A bot with a server voice can speak even in windows that ship no browser voice at all.
+- A fresh install opens on a short first run: it looks for Ollama, llama.cpp, or LM Studio already running, asks for an address only when nothing answers, picks a model from what the server actually lists, and creates the endpoint and the assistant in one step. The Connections form hides its power fields behind Advanced and can test an address before saving.
+- Attached PDFs and Word documents are read for real: text is extracted at upload, capped like plain text, and a corrupt or encrypted file keeps the quiet fallback instead of failing the upload.
+- Fixes: a dropped approval no longer loses the whole reply; scheduled jobs report their usage lines; an interrupted stream no longer marks a server as usage-silent forever.
+
 ## 0.3.55
 - A reply that only promises work no longer ends the turn. If the bot says "Writing it into the vault now" or "Doing it now" without calling a tool, it is pushed to actually do it in the same turn. If it stalls twice in a row, it now closes honestly: "Stuck. Still undone: …" instead of dressing the promise up as a result.
 - Group chat keeps every window in sync. A live window hears every message and reply the moment it lands, no reload, and queued or thinking bots carry a moving shimmer and dots until their answer starts.

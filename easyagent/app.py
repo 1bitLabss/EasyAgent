@@ -554,6 +554,12 @@ class StarterIn(BaseModel):
     path: str = ""
 
 
+class ProbeIn(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+    base_url: str = ""
+    api_key: str | None = None
+
+
 class SearchSetupIn(BaseModel):
     model_config = ConfigDict(extra="ignore")
     provider: str = "duckduckgo"
@@ -1125,6 +1131,38 @@ def create_app(data_dir: str | Path | None = None) -> FastAPI:
         if response.status_code == 200:
             return {"ok": True, "detail": "The server answered."}
         return {"ok": False, "detail": f"The server answered with {response.status_code}."}
+
+    @app.post("/api/endpoints/probe")
+    async def probe_endpoint_address(body: ProbeIn):
+        """Ask an address that is not saved yet if it is a model server."""
+        from easyagent.detect import probe_address
+
+        return await probe_address(body.base_url, body.api_key)
+
+    @app.get("/api/local-servers")
+    async def get_local_servers():
+        """Model servers answering on this computer. An empty list is a fine answer."""
+        from easyagent.detect import detect_local_servers
+
+        return {"servers": await detect_local_servers()}
+
+    @app.get("/api/setup")
+    def get_setup():
+        from easyagent.setup import load_setup
+
+        return load_setup(store)
+
+    @app.put("/api/setup")
+    async def put_setup(request: Request):
+        from easyagent.setup import save_setup
+
+        try:
+            body = await request.json()
+        except Exception:
+            raise HTTPException(400, "The setup request must be a JSON object.") from None
+        if not isinstance(body, dict) or not isinstance(body.get("onboarded"), bool):
+            raise HTTPException(400, "The setup request needs a true or false for onboarded.")
+        return save_setup(store, onboarded=body["onboarded"])
 
     @app.get("/api/bots")
     def list_bots():

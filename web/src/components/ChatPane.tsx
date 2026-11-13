@@ -421,7 +421,7 @@ const MessageRow = memo(function MessageRow({
             type="button"
             className="mt-1 block text-xs opacity-70"
             data-testid="speak-button"
-            onClick={() => (speaking ? stopSpeaking() : speakText(toSpeakableText(message.content || ""), speakKey))}
+            onClick={() => (speaking ? stopSpeaking() : speakText(toSpeakableText(message.content || ""), speakKey, botId || ""))}
           >
             {speaking ? "Stop" : "Speak"}
           </button>
@@ -778,7 +778,7 @@ export function ChatPane() {
       const id = item.id || item.client_id || "";
       if (spokenRef.current.ids.has(id)) continue;
       spokenRef.current.ids.add(id);
-      if (readAloudEnabled() && speechAvailable()) speakText(toSpeakableText(item.content || ""), id);
+      if (readAloudEnabled() && speechAvailable()) speakText(toSpeakableText(item.content || ""), id, botId || "");
     }
   }, [chat.data, botId, chatId]);
 

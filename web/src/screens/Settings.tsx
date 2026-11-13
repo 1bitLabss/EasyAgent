@@ -87,7 +87,7 @@ function VoiceBlock() {
   if (!speechAvailable()) return null;
   return (
     <section id="voice" className="space-y-3 rounded-lg border border-border bg-card p-4">
-      <h2 className="text-sm font-medium">Voice</h2>
+      <h2 className="text-sm font-medium">Read replies aloud</h2>
       <label className="flex items-center justify-between gap-3 text-sm" data-testid="read-aloud-row">
         <span>Read replies aloud</span>
         <Switch
@@ -99,7 +99,7 @@ function VoiceBlock() {
           }}
         />
       </label>
-      <p className="text-xs text-muted">New replies in the chat you have open are read out loud with the voice your browser already has. Off by default.</p>
+      <p className="text-xs text-muted">New replies in the chat you have open are read out loud. The bot's own voice is used when the server can make the audio; otherwise your browser's voice is used. Off by default.</p>
     </section>
   );
 }
@@ -425,6 +425,67 @@ function HonestyBlock({ botId, onError }: { botId: string; onError: (text: strin
           }}
         />
       </label>
+    </Block>
+  );
+}
+
+type TtsVoices = { voices: { id: string; label: string }[]; default: string; voice: string };
+
+/** The voice is the bot's, the audio comes from the server. A bot with no
+ * server voice falls back to the browser's own speech on the chat side. */
+function BotVoiceBlock({ botId, onError }: { botId: string; onError: (text: string) => void }) {
+  const voices = useQuery({
+    queryKey: ["tts-voices", botId],
+    queryFn: () => api<TtsVoices>(`/api/bots/${botId}/tts/voices`),
+  });
+  const [saved, setSaved] = useState("");
+
+  async function save(voice: string) {
+    setSaved("");
+    try {
+      await api(`/api/bots/${botId}/tts/voice`, { method: "POST", json: { voice } });
+      await queryClient.invalidateQueries({ queryKey: ["tts-voices", botId] });
+      setSaved("Voice saved.");
+    } catch (reason) {
+      onError(reason instanceof Error ? reason.message : "The voice was not saved.");
+    }
+  }
+
+  if (voices.isError) {
+    return (
+      <Block id="voice-bot" title="Voice">
+        <Note>This server has no voice list for the bot. Replies use the voice your browser already has.</Note>
+      </Block>
+    );
+  }
+  if (!voices.data) {
+    return (
+      <Block id="voice-bot" title="Voice">
+        <Note>Loading voices.</Note>
+      </Block>
+    );
+  }
+
+  const data = voices.data;
+  return (
+    <Block id="voice-bot" title="Voice">
+      <Note>Replies read aloud use this voice. The audio is made on this computer, so it needs the internet. A voice you pick here stays with this bot.</Note>
+      <label className="block text-sm">Voice
+        <select
+          className="mt-1 h-9 w-full rounded-md border border-border bg-card px-2"
+          data-testid="tts-voice"
+          value={data.voice}
+          onChange={(event) => void save(event.target.value).catch((reason: Error) => onError(reason.message))}
+        >
+          {data.voices.map((item) => (
+            <option key={item.id} value={item.id}>
+              {item.label}
+              {item.id === data.default ? " (default)" : ""}
+            </option>
+          ))}
+        </select>
+      </label>
+      {saved ? <p className="text-sm" role="status">{saved}</p> : null}
     </Block>
   );
 }
@@ -786,6 +847,8 @@ export function SettingsScreen() {
         <SafetyBlock botId={bot.id} botName={bot.name} mode={bot.safety_mode || "strict"} unlocks={bot.safety_unlocks || []} always={bot.safety_exec_always || []} onError={setError} />
 
         <HonestyBlock botId={bot.id} onError={setError} />
+
+        <BotVoiceBlock botId={bot.id} onError={setError} />
 
         <ContainmentBlock botId={bot.id} botName={bot.name} onError={setError} />
 

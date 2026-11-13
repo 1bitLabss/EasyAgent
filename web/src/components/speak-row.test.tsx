@@ -256,10 +256,45 @@ describe("the quiet speak control", () => {
     expect(cancelSpy).toHaveBeenCalled();
   });
 
-  it("stays hidden when the webview has no speechSynthesis", () => {
+  it("stays hidden when the webview has no speechSynthesis and the server has no voice", () => {
     removeVoice();
     paint([ask, answer("a1", "Twelve boats.")]);
     expect(screen.queryByTestId("speak-button")).toBeNull();
+  });
+
+  it("shows Speak without speechSynthesis when the bot has a server voice", async () => {
+    removeVoice();
+    installServerVoice(200);
+    paint([ask, answer("a1", "Twelve boats.")]);
+    await waitFor(() => expect(screen.getByTestId("speak-button")).toBeTruthy());
+    fireEvent.click(screen.getByTestId("speak-button"));
+    await waitFor(() => expect(playSpy).toHaveBeenCalledTimes(1));
+    expect(speakSpy).not.toHaveBeenCalled();
+    // The voices probe ran once; the mp3 came from the server, never speechSynthesis.
+    expect(fetchSpy).toHaveBeenCalledWith(
+      "/api/bots/bot-1/tts/voices",
+      expect.anything(),
+    );
+    expect(
+      fetchSpy.mock.calls.filter((call) => String(call[0]).includes("/tts/voices")),
+    ).toHaveLength(1);
+    act(() => audioEnded?.());
+    expect(screen.getByTestId("speak-button").textContent).toBe("Speak");
+  });
+
+  it("Stop on the server-only path cancels the audio without touching speechSynthesis", async () => {
+    removeVoice();
+    installServerVoice(200);
+    paint([ask, answer("a1", "Twelve boats.")]);
+    await waitFor(() => expect(screen.getByTestId("speak-button")).toBeTruthy());
+    fireEvent.click(screen.getByTestId("speak-button"));
+    await waitFor(() => expect(playSpy).toHaveBeenCalledTimes(1));
+    const button = screen.getByTestId("speak-button");
+    expect(button.textContent).toBe("Stop");
+    fireEvent.click(button);
+    expect(pauseSpy).toHaveBeenCalledTimes(1);
+    expect(cancelSpy).not.toHaveBeenCalled();
+    expect(button.textContent).toBe("Speak");
   });
 
   it("never shows on a row that is still streaming", () => {
@@ -309,6 +344,27 @@ describe("read replies aloud", () => {
       );
     });
     await act(async () => undefined);
+    expect(speakSpy).not.toHaveBeenCalled();
+  });
+
+  it("reads aloud through the server voice when the browser has none", async () => {
+    removeVoice();
+    installServerVoice(200);
+    localStorage.setItem("easyagent.readAloud", "on");
+    paint([ask, answer("a1", "Twelve boats.")]);
+    // The Speak row appearing proves the voices probe proved the server can speak.
+    await waitFor(() => expect(screen.getByTestId("speak-button")).toBeTruthy());
+    act(() => {
+      queryClient.setQueryData(
+        ["chat", "bot-1", "chat-1"],
+        chat([ask, answer("a1", "Twelve boats."), answer("a2", "Nine ships.")]),
+      );
+    });
+    await waitFor(() => expect(playSpy).toHaveBeenCalledTimes(1));
+    expect(fetchSpy).toHaveBeenCalledWith(
+      "/api/bots/bot-1/tts",
+      expect.objectContaining({ method: "POST", body: JSON.stringify({ text: "Nine ships." }) }),
+    );
     expect(speakSpy).not.toHaveBeenCalled();
   });
 });

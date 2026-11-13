@@ -9,7 +9,7 @@ import { Input, Textarea } from "@/components/ui/input";
 import { Switch } from "@/components/ui/switch";
 import { pokeFace } from "@/lib/mood";
 import { contextNote } from "@/lib/run";
-import { readAloudEnabled, setReadAloudEnabled, speechAvailable, stopSpeaking } from "@/lib/speak";
+import { readAloudEnabled, setReadAloudEnabled, stopSpeaking, useVoiceAvailable } from "@/lib/speak";
 import { localWhen } from "@/lib/time";
 import { windowChat } from "@/lib/window";
 import { PhoneAccess } from "@/screens/Phone";
@@ -80,11 +80,13 @@ function Note({ children }: { children: ReactNode }) {
   return <p className="text-xs text-muted">{children}</p>;
 }
 
-/** Voice replies ride the browser's own speechSynthesis, so the choice lives
- * on this device, not on the bot. Hidden where the webview has no voice. */
+/** Voice replies ride the browser's speechSynthesis or the bot's server voice,
+ * so the choice lives on this device, not on the bot. Hidden where neither exists. */
 function VoiceBlock() {
+  const botId = useApp((state) => state.botId);
   const [readAloud, setReadAloud] = useState(readAloudEnabled());
-  if (!speechAvailable()) return null;
+  const voiceReady = useVoiceAvailable(botId);
+  if (!voiceReady) return null;
   return (
     <section id="voice" className="space-y-3 rounded-lg border border-border bg-card p-4">
       <h2 className="text-sm font-medium">Read replies aloud</h2>

@@ -6,6 +6,8 @@
  * moment (chat switch, Stop, a new message) calls stopSpeaking().
  */
 
+import { useEffect, useSyncExternalStore } from "react";
+
 const READ_ALOUD_KEY = "easyagent.readAloud";
 const TOKEN_KEY = "easyagent.token";
 
@@ -14,6 +16,14 @@ const listeners = new Set<(key: string) => void>();
 
 /** Bots whose /tts answered 404: stop asking, use the browser voice. */
 const serverVoiceMissing = new Set<string>();
+
+/** Bots whose server voice is proven (voices probe or a good /tts POST). */
+const serverVoiceKnown = new Set<string>();
+
+/** Bots we already probed this session: at most one voices request each. */
+const voiceProbed = new Set<string>();
+
+const capabilityListeners = new Set<() => void>();
 
 let currentAudio: HTMLAudioElement | null = null;
 let currentUrl = "";
@@ -36,6 +46,67 @@ export function speechAvailable(): boolean {
     !!window.speechSynthesis &&
     typeof window.SpeechSynthesisUtterance === "function"
   );
+}
+
+/** Voice exists if the browser can speak or this bot's server voice is proven. */
+export function canUseVoice(botId = ""): boolean {
+  return speechAvailable() || (!!botId && serverVoiceKnown.has(botId));
+}
+
+function authHeaders(): Record<string, string> {
+  const headers: Record<string, string> = { "Content-Type": "application/json" };
+  let token = "";
+  try {
+    token = localStorage.getItem(TOKEN_KEY) || sessionStorage.getItem(TOKEN_KEY) || "";
+  } catch {
+    /* a private window can refuse storage */
+  }
+  if (token) headers["X-EasyAgent-Token"] = token;
+  return headers;
+}
+
+function notifyCapability(): void {
+  for (const fn of capabilityListeners) fn();
+}
+
+/**
+ * Ask once per session whether this bot has a server voice, so a webview
+ * without speechSynthesis still learns it can speak. A good /tts POST counts
+ * as proof too (see speakWithServer); a 404 joins serverVoiceMissing for good.
+ */
+export function probeServerVoice(botId: string): void {
+  if (!botId || speechAvailable()) return;
+  if (voiceProbed.has(botId) || serverVoiceKnown.has(botId) || serverVoiceMissing.has(botId)) return;
+  voiceProbed.add(botId);
+  void fetch(`/api/bots/${botId}/tts/voices`, { headers: authHeaders() })
+    .then((response) => {
+      if (response.ok) {
+        serverVoiceKnown.add(botId);
+        notifyCapability();
+      } else if (response.status === 404) {
+        serverVoiceMissing.add(botId);
+      }
+    })
+    .catch(() => {
+      /* offline or unreachable: stay quiet, the probe already spent its one shot */
+    });
+}
+
+/** Reactive "can this bot speak" for components: browser voice or proven server
+ * voice. Probes the server when the browser has no voice of its own. */
+export function useVoiceAvailable(botId: string | null | undefined): boolean {
+  const available = useSyncExternalStore(
+    (onChange) => {
+      capabilityListeners.add(onChange);
+      return () => capabilityListeners.delete(onChange);
+    },
+    () => canUseVoice(botId || ""),
+    () => speechAvailable(),
+  );
+  useEffect(() => {
+    probeServerVoice(botId || "");
+  }, [botId]);
+  return available;
 }
 
 function stopAudio() {
@@ -74,23 +145,17 @@ function speakWithBrowser(text: string, key: string): void {
 /** Ask the server for an mp3 of text. True means the server path handled it. */
 async function speakWithServer(botId: string, text: string, key: string): Promise<boolean> {
   try {
-    const headers: Record<string, string> = { "Content-Type": "application/json" };
-    let token = "";
-    try {
-      token = localStorage.getItem(TOKEN_KEY) || sessionStorage.getItem(TOKEN_KEY) || "";
-    } catch {
-      /* a private window can refuse storage */
-    }
-    if (token) headers["X-EasyAgent-Token"] = token;
     const response = await fetch(`/api/bots/${botId}/tts`, {
       method: "POST",
-      headers,
+      headers: authHeaders(),
       body: JSON.stringify({ text }),
     });
     if (!response.ok) {
       if (response.status === 404) serverVoiceMissing.add(botId);
       return false;
     }
+    serverVoiceKnown.add(botId); // a good /tts is proof enough; skip the probe
+    voiceProbed.add(botId);
     const blob = await response.blob();
     if (speakingKey !== key) return true; // stopped while the server was synthesizing
     const url = URL.createObjectURL(blob);
@@ -159,9 +224,11 @@ export function stopSpeaking(): void {
   if (speechAvailable()) window.speechSynthesis.cancel();
 }
 
-/** Tests start each case without memory of a server that lacked /tts. */
+/** Tests start each case without memory of a server that lacked or had /tts. */
 export function resetSpeakForTests(): void {
   serverVoiceMissing.clear();
+  serverVoiceKnown.clear();
+  voiceProbed.clear();
 }
 
 /** "Read replies aloud" lives in localStorage, same as the theme choice. */

@@ -17,7 +17,7 @@ import { activityLabel, askedLine } from "@/lib/activity";
 import { deriveUserHistory } from "@/lib/composer-history";
 import { describeRun, faceStateFor, formatElapsed, formatTokenCount, runPresence, runTone, shownStep, workingLine } from "@/lib/run";
 import { toSpeakableText } from "@/lib/markdown";
-import { onSpeakingChange, readAloudEnabled, speakText, speakingKeyOf, speechAvailable, stopSpeaking } from "@/lib/speak";
+import { onSpeakingChange, readAloudEnabled, speakText, speakingKeyOf, stopSpeaking, useVoiceAvailable } from "@/lib/speak";
 import { arrangeBusy, hideWhileSending, messageHasBubble, placeLiveReply, reactionWho, rowKey, shownThinking } from "@/lib/transcript";
 import type { FrozenReply } from "@/stream";
 import { cn } from "@/lib/utils";
@@ -316,6 +316,7 @@ const MessageRow = memo(function MessageRow({
   const speakKey = message.id || message.client_id || "";
   const [speaking, setSpeaking] = useState(() => speakingKeyOf() === speakKey);
   useEffect(() => onSpeakingChange((key) => setSpeaking(key === speakKey)), [speakKey]);
+  const voiceReady = useVoiceAvailable(botId);
   // An empty live placeholder can wait. A reply that already has words stays put
   // while the next message is sent, or the row above it jumps.
   if (hideWhileSending(message, sending) && !freeze && !messageHasBubble(message)) return null;
@@ -416,7 +417,7 @@ const MessageRow = memo(function MessageRow({
         {!mine && !message.live && !failed && usageNote(message) ? (
           <p className="mt-2 text-xs opacity-70" data-testid="usage-line">{usageNote(message)}</p>
         ) : null}
-        {!mine && !message.live && !failed && !streaming && speechAvailable() && toSpeakableText(message.content || "").trim() ? (
+        {!mine && !message.live && !failed && !streaming && voiceReady && toSpeakableText(message.content || "").trim() ? (
           <button
             type="button"
             className="mt-1 block text-xs opacity-70"
@@ -763,6 +764,7 @@ export function ChatPane() {
 
   // "Read replies aloud" speaks each new finished reply in this chat only.
   // History is marked seen on arrival so old answers never start talking.
+  const voiceReady = useVoiceAvailable(botId);
   const spokenRef = useRef<{ chat: string; ids: Set<string> } | null>(null);
   useEffect(() => {
     if (!chat.data) return;
@@ -778,9 +780,9 @@ export function ChatPane() {
       const id = item.id || item.client_id || "";
       if (spokenRef.current.ids.has(id)) continue;
       spokenRef.current.ids.add(id);
-      if (readAloudEnabled() && speechAvailable()) speakText(toSpeakableText(item.content || ""), id, botId || "");
+      if (readAloudEnabled() && voiceReady) speakText(toSpeakableText(item.content || ""), id, botId || "");
     }
-  }, [chat.data, botId, chatId]);
+  }, [chat.data, botId, chatId, voiceReady]);
 
   useEffect(() => {
     if (!botId || !chat.data?.id) return;

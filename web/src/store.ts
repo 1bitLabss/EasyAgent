@@ -36,9 +36,11 @@ type AppState = {
   focus: string;
   jumpTo: string;
   adding: boolean;
+  nudge: string;
   confirm: ConfirmRequest | null;
   setScreen: (screen: Screen) => void;
   setAdding: (adding: boolean) => void;
+  setNudge: (nudge: string) => void;
   goHome: () => void;
   selectBot: (botId: string) => void;
   openBot: (botId: string, chatId: string | null) => void;
@@ -102,9 +104,11 @@ export const useApp = create<AppState>((set) => ({
   focus: "",
   jumpTo: "",
   adding: false,
+  nudge: "",
   confirm: null,
   setScreen: (screen) => set({ screen, railOpen: false, adding: false }),
   setAdding: (adding) => set(adding ? { adding: true, screen: "chat" } : { adding: false }),
+  setNudge: (nudge) => set({ nudge }),
   goHome: () => set({ screen: "chat", railOpen: false, adding: false }),
   selectBot: (botId) => {
     rememberBot(botId);

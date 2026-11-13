@@ -10,6 +10,7 @@ import { Face } from "@/components/Face";
 import { Markdown } from "@/components/Markdown";
 import { ThinkingBox } from "@/components/ThinkingBox";
 import { WindowControls } from "@/components/WindowControls";
+import { Button } from "@/components/ui/button";
 import { moodForReaction, pokeFace } from "@/lib/mood";
 import { chipText, chipTitle } from "@/lib/chips";
 import { yoloClock, yoloRemaining } from "@/lib/yolo";
@@ -635,6 +636,9 @@ export function ChatPane() {
   const setJumpTo = useApp((state) => state.setJumpTo);
   const selectChat = useApp((state) => state.selectChat);
   const setScreen = useApp((state) => state.setScreen);
+  const setAdding = useApp((state) => state.setAdding);
+  const nudge = useApp((state) => state.nudge);
+  const setNudge = useApp((state) => state.setNudge);
   const bots = useQuery({ queryKey: ["bots"], queryFn: () => api<Bot[]>("/api/bots") });
   const ongoing = useQuery({
     queryKey: ["ongoing", botId],
@@ -936,6 +940,9 @@ export function ChatPane() {
           <img src="/static/mascot.svg" alt="" width={168} height={168} />
           <h1 className="mt-4 text-3xl font-semibold tracking-tight">Add a bot.</h1>
           <p className="pixel mt-3 text-2xl">AI agents, made easy.</p>
+          <Button type="button" data-testid="empty-add-bot" className="mt-6" onClick={() => setAdding(true)}>
+            Add a bot
+          </Button>
         </div>
       </section>
     );
@@ -1020,6 +1027,7 @@ export function ChatPane() {
   async function submit(text: string, file: File | null = null) {
     if (!botId || !chatId) return;
     if (!text && !file) return;
+    if (nudge) setNudge("");
     stopSpeaking();
     setError("");
     void scrollToBottom("instant");
@@ -1222,6 +1230,7 @@ export function ChatPane() {
         <div className="px-4">
           {botId && bot ? <ApprovalCard botId={botId} botName={bot.name} active={running} /> : null}
         </div>
+        {nudge ? <p data-testid="setup-nudge" className="px-4 pb-1 text-xs text-muted">{nudge}</p> : null}
       <Composer
         ref={composerRef}
         focusKey={`${botId || ""}:${chatId || ""}`}

@@ -23,6 +23,7 @@ import {
 } from "@/screens/Places";
 import { SettingsScreen } from "@/screens/Settings";
 import { SearchScreen } from "@/screens/Search";
+import { SetupGate } from "@/screens/Setup";
 import { savedBotId, useApp } from "@/store";
 import type { Bot } from "@/types";
 
@@ -108,6 +109,7 @@ export function App() {
       <Switcher />
       <ConfirmDialog />
       <TokenGate />
+      <SetupGate />
     </div>
   );
 }

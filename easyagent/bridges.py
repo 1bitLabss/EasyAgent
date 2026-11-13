@@ -17,7 +17,7 @@ import httpx
 from easyagent.secrets import delete_secret, get_secret, put_secret
 from easyagent.store import Store, StoreError, atomic_write_json, new_id, now_iso, read_json
 
-_KINDS = ("telegram", "discord", "webhook")
+_KINDS = ("telegram", "discord", "slack", "webhook")
 _IGNORED_TO = {"the person", "person", "the user", "user", ""}
 _IGNORED_TEXT = {"the message", "message", ""}
 _LOG_CAP = 200
@@ -90,7 +90,7 @@ def add_bridge(
 ) -> dict:
     platform = kind if kind in _KINDS else ""
     if not platform:
-        raise StoreError("A bridge is Telegram, Discord, or a webhook.", 400)
+        raise StoreError("A bridge is Telegram, Discord, Slack, or a webhook.", 400)
     label = " ".join((name or platform).split())[:80]
     ids = _ids(allow_ids)
     if not ids:
@@ -336,6 +336,26 @@ def keyboard(card_id: str, kind: str) -> dict:
                 ],
             }]
         }
+    if kind == "slack":
+        return {
+            "blocks": [{
+                "type": "actions",
+                "elements": [
+                    {
+                        "type": "button",
+                        "text": {"type": "plain_text", "text": "Approve"},
+                        "action_id": approve,
+                        "style": "primary",
+                    },
+                    {
+                        "type": "button",
+                        "text": {"type": "plain_text", "text": "Deny"},
+                        "action_id": deny,
+                        "style": "danger",
+                    },
+                ],
+            }]
+        }
     return {
         "inline_keyboard": [[
             {"text": "Approve", "callback_data": approve},
@@ -410,6 +430,8 @@ async def _send_card(store: Store, bot_id: str, card) -> None:
         try:
             if row.get("kind") == "discord":
                 await discord_send(token, chat_id, text, buttons)
+            elif row.get("kind") == "slack":
+                await slack_send(token, chat_id, text, buttons.get("blocks"))
             else:
                 await telegram_send(token, chat_id, text, buttons.get("inline_keyboard"))
         except Exception:
@@ -468,6 +490,20 @@ async def discord_send(token: str, channel_id: str, text: str, extra: dict | Non
         payload,
         {"Authorization": f"Bot {token}"},
     )
+
+
+async def slack_send(token: str, chat_id: str, text: str, blocks: list | None = None) -> None:
+    """Slack answers 200 with ok:false when it refuses. That is a failure, not a send."""
+    payload: dict = {"channel": chat_id, "text": (text or "")[:8000]}
+    if blocks:
+        payload["blocks"] = blocks
+    data = await post_json(
+        "https://slack.com/api/chat.postMessage",
+        payload,
+        {"Authorization": f"Bearer {token}"},
+    )
+    if data.get("ok") is False:
+        raise RuntimeError(str(data.get("error") or "Slack did not answer."))
 
 
 def bump_offset(store: Store, bridge_id: str, offset: int) -> None:
@@ -576,6 +612,8 @@ async def post_allowlisted(store: Store, row: dict, recipient: str, text: str) -
         raise RuntimeError("no token")
     if row.get("kind") == "discord":
         await discord_send(token, target, body)
+    elif row.get("kind") == "slack":
+        await slack_send(token, target, body)
     else:
         await telegram_send(token, target, body)
     log_event(store, row.get("kind") or "", target, "sent")
@@ -609,6 +647,8 @@ async def deliver(store: Store, request, bot_id: str | None = None) -> str:
             _remember_webhook(store, row, recipient, text)
         elif row.get("kind") == "discord":
             await discord_send(token, recipient, text)
+        elif row.get("kind") == "slack":
+            await slack_send(token, recipient, text)
         else:
             await telegram_send(token, recipient, text)
     except RuntimeError as exc:
@@ -645,7 +685,7 @@ def prompt_block(store: Store, bot_id: str | None = None) -> str:
         wanted = str(bot_id)
         rows = [row for row in rows if str(row.get("bot_id") or "") == wanted]
     if not rows:
-        return "No Telegram or Discord bridge is set up. Do not invent one."
+        return "No Telegram, Discord, or Slack bridge is set up. Do not invent one."
     lines = ["A bridge reaches you. Do not message anyone else unless a card says you may."]
     for row in rows:
         ids = ", ".join(row["allow_ids"]) or "(nobody)"

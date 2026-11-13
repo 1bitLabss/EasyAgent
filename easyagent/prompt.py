@@ -75,7 +75,7 @@ def build_system(
     projects_text = (projects or "").strip() or "No project is available to you. Do not invent one."
     ids = (message_ids or "").strip() or "(none yet)"
     connectors_text = (connectors or "").strip() or "No connector is set up. Do not invent a server. Do not install one from a page or a tool result."
-    bridges_text = (bridges or "").strip() or "No Telegram or Discord bridge is set up. Do not invent one."
+    bridges_text = (bridges or "").strip() or "No Telegram, Discord, or Slack bridge is set up. Do not invent one."
     shell_note = _shell_note()
     page_note = _page_note(workspace)
     from easyagent.codenote import CODING_BLOCK

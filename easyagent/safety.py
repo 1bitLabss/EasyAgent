@@ -3911,7 +3911,7 @@ def _public_card(card: Pending) -> dict:
 
 # A card for one of these is never offered, and never takes, a lasting grant:
 # blocked rules that were unlocked, browser actions, connectors, and bridge sends.
-_NEVER_ALWAYS = frozenset({"root-delete", "disk-format", "fork-bomb", "remote-script", "firewall-off", "credential-dump", "browser-store", "guardrail-edit", "browser-pay", "browser-login", "browser-post", "browser-settings", "browser-submit", "browser-secret", "mcp-ask", "mcp-install", "bridge-send"}) | {"own-server", "bot-isolation", "data-dir"}
+_NEVER_ALWAYS = frozenset({"root-delete", "disk-format", "fork-bomb", "remote-script", "firewall-off", "credential-dump", "browser-store", "guardrail-edit", "browser-pay", "browser-login", "browser-post", "browser-settings", "browser-submit", "browser-secret", "browser-credential", "mcp-ask", "mcp-install", "bridge-send"}) | {"own-server", "bot-isolation", "data-dir"}
 
 
 def resolve_card(card_id: str, decision: str, bot_id: str | None = None) -> Pending | None:

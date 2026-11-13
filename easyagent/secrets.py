@@ -243,6 +243,54 @@ def delete_secret(account: str, store=None) -> None:
             conn.close()
 
 
+WEB_CRED_PREFIX = "web|"
+
+
+def web_credential_key(host: str, name: str) -> str:
+    """Account key for a saved web credential: ``web|<host>|<name>``. The host is the
+    exact hostname, lowercased. The name is what the model types after ``vault:``."""
+    return f"{WEB_CRED_PREFIX}{(host or '').strip().lower()}|{(name or '').strip()}"
+
+
+def put_web_credential(host: str, name: str, value: str, store=None) -> None:
+    if not (name or "").strip():
+        raise RuntimeError("The credential needs a name.")
+    put_secret(web_credential_key(host, name), value, store)
+
+
+def get_web_credential(host: str, name: str, store=None) -> str:
+    return get_secret(web_credential_key(host, name), store)
+
+
+def list_web_credentials(store) -> list[dict]:
+    """Saved web credentials as ``{host, name}`` rows. Values are never returned.
+
+    Scrubbing needs no key parsing: ``secret_values`` below opens every account, so a
+    ``web|<host>|<name>`` value is already in what ``secret_strings`` scrubs with.
+    """
+    root = _root(store)
+    path = root / "secrets.db"
+    if not path.is_file():
+        return []
+    with _LOCK:
+        conn = _connect(root)
+        try:
+            rows = conn.execute(
+                "SELECT account FROM secrets WHERE account LIKE 'web|%' ORDER BY account"
+            ).fetchall()
+        finally:
+            conn.close()
+    found: list[dict] = []
+    for row in rows:
+        parts = str(row[0]).split("|", 2)
+        if len(parts) != 3 or not parts[1] or not parts[2]:
+            continue
+        item = {"host": parts[1], "name": parts[2]}
+        if item not in found:
+            found.append(item)
+    return found
+
+
 def secret_values(store) -> list[str]:
     """Every saved value. Callers scrub with these. They are not logged."""
     root = _root(store)

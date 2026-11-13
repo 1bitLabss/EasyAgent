@@ -303,6 +303,19 @@ def looks_like_secret_value(value: str, element: dict | None = None) -> bool:
     return False
 
 
+_VAULT_REF = re.compile(r"^vault:(\S+)$")
+
+
+def vault_ref(text: str) -> str:
+    """The credential name when text is exactly ``vault:<name>``, else empty.
+
+    The model names a saved web credential; the harness injects the secret at
+    execution, so the value never passes through the model or the transcript.
+    """
+    match = _VAULT_REF.match((text or "").strip())
+    return match.group(1).strip() if match else ""
+
+
 def _click_rule(element: str, url: str) -> str | None:
     blob = f"{element} {url}"
     if _PAY.search(blob):
@@ -366,6 +379,17 @@ def judge_browser(request, *, allow: list[str] | None = None, deny: list[str] | 
             _detail(url, element, ""),
             fingerprint,
         )
+    cred = vault_ref(getattr(request, "body", "") or "") if action == "type" else ""
+    if cred or (meta_rule == "browser-credential" and action == "type"):
+        name = cred or "that credential"
+        where = host or "this page"
+        return _verdict(
+            ASK,
+            "browser-credential",
+            f'EasyAgent wants to type the saved credential "{name}" into {where}. It waits for you.',
+            _detail(url, element, ""),
+            fingerprint,
+        )
     rule = meta_rule if meta_rule.startswith("browser-") else None
     if action in {"click", "select"} and not rule:
         rule = _click_rule(element, url)
@@ -395,6 +419,21 @@ def card_proposal(request, rule: str) -> dict | None:
             "url": url,
             "element": element,
             "hint": "EasyAgent will not type a password, a card number, or a 2FA code. Type it in this bot's browser window, then click Done.",
+        }
+    if rule == "browser-credential":
+        # The card names the credential and the host. The secret is never in it.
+        name = vault_ref(getattr(request, "body", "") or "")
+        try:
+            cred_host = (urlparse(url).hostname or "").lower()
+        except ValueError:
+            cred_host = ""
+        return {
+            "kind": "credential",
+            "name": name,
+            "host": cred_host,
+            "url": url,
+            "element": element,
+            "hint": f'EasyAgent will type the saved credential "{name}" into {cred_host or "this page"}. The secret stays out of the chat.',
         }
     return {
         "kind": "browser",
@@ -1025,10 +1064,13 @@ def prepare(store: Store, request, bot_id: str | None):
         if action in {"click", "type", "select", "download"}:
             element = _pick(elements, request.command)
         described = _describe(element) if element else ""
-        secret = action == "type" and looks_like_secret_value(request.body or "", element)
+        cred = vault_ref(request.body or "") if action == "type" else ""
+        secret = action == "type" and not cred and looks_like_secret_value(request.body or "", element)
         rule = _click_rule(described, page.url or "") if action in {"click", "select"} else None
-        if action in {"type", "select"} and not secret and re.search(r"(?i)/account|/settings", page.url or ""):
+        if action in {"type", "select"} and not secret and not cred and re.search(r"(?i)/account|/settings", page.url or ""):
             rule = "browser-settings"
+        if cred:
+            rule = "browser-credential"
         if action == "click" and element.get("href"):
             href = urljoin(page.url or "", element.get("href") or "")
             parsed = urlparse(href)
@@ -1151,9 +1193,23 @@ def perform(store: Store, request, bot_id: str | None) -> tuple[str, str]:
                 _write_live(store, bot_id, url=page.url or "", title=page.title() or "", headless=headless, active=True)
                 return text, ""
             if action == "type":
-                if looks_like_secret_value(request.body or "", element) and not _yolo_passes(store, bot_id):
+                cred = vault_ref(request.body or "")
+                if cred:
+                    # The secret is opened here, at execution, against the live page's
+                    # host only. It never enters the request, the card, or the transcript.
+                    from easyagent.secrets import get_web_credential
+
+                    cred_host = (urlparse(page.url or "").hostname or "").lower()
+                    value = get_web_credential(cred_host, cred, store)
+                    if not value:
+                        raise ToolError(
+                            f'No saved credential named "{cred}" for {cred_host or "this page"}. Nothing was typed.'
+                        )
+                    locator.fill(value, timeout=10000)
+                elif looks_like_secret_value(request.body or "", element) and not _yolo_passes(store, bot_id):
                     raise ToolError("EasyAgent will not type a password, a card number, or a 2FA code.")
-                locator.fill(request.body or "", timeout=10000)
+                else:
+                    locator.fill(request.body or "", timeout=10000)
             elif action == "select":
                 option = (request.body or "").strip()
                 locator.select_option(label=option)

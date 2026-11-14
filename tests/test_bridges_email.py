@@ -349,7 +349,7 @@ def test_schedule_rejects_an_unknown_delivery_kind(tmp_path):
     assert refused.status_code == 400, refused.text
     assert (
         refused.json()["detail"]
-        == "A routine can post to Telegram, Discord, Slack, or Email, or stay in this chat."
+        == "A routine can post to Telegram, Discord, Slack, Email, or a webhook, or stay in this chat."
     )
     assert store.list_schedules(bot["id"]) == []
     client.close()

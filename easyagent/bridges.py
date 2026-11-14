@@ -2,6 +2,19 @@
 
 A stranger is ignored and logged. A reply goes back to the person who wrote.
 Messaging anyone else waits for a card. Tokens stay in the keychain.
+
+A webhook bridge can also send out. When it has a post_url, EasyAgent POSTs
+JSON to that address so a relay (for example Baileys for WhatsApp) can show
+the text. The message body is:
+
+    {"text": <message>, "bridge": <bridge name>, "recipient": <allowlisted id>}
+
+An approval card adds "card_id", "approve_text" ("approve <card_id>"),
+"deny_text" ("deny <card_id>"), "callback_approve" ("ea:<card_id>:approve"),
+and "callback_deny" ("ea:<card_id>:deny"). The relay shows two buttons and
+answers back through the inbound webhook route with the person's user id and
+the decision text. Without a post_url a webhook send stays in the outbox
+file, exactly as before.
 """
 
 from __future__ import annotations
@@ -67,6 +80,7 @@ def public_record(row: dict) -> dict:
         "mail_user": str(row.get("mail_user") or ""),
         "mail_imap_host": str(row.get("mail_imap_host") or ""),
         "mail_smtp_host": str(row.get("mail_smtp_host") or ""),
+        "post_url": str(row.get("post_url") or ""),
     }
 
 
@@ -98,6 +112,7 @@ def add_bridge(
     mail_user: str = "",
     mail_imap_host: str = "",
     mail_smtp_host: str = "",
+    post_url: str = "",
 ) -> dict:
     platform = kind if kind in _KINDS else ""
     if not platform:
@@ -107,6 +122,9 @@ def add_bridge(
     mail_smtp_host = (mail_smtp_host or "").strip()
     if platform == "email" and not (mail_user and mail_imap_host and mail_smtp_host):
         raise StoreError("An email bridge needs the address and the mail server names.", 400)
+    post_url = (post_url or "").strip()
+    if post_url and not post_url.lower().startswith(("http://", "https://")):
+        raise StoreError("The post address must start with http:// or https://.", 400)
     label = " ".join((name or platform).split())[:80]
     ids = _ids(allow_ids)
     if platform == "email":
@@ -132,6 +150,7 @@ def add_bridge(
         "mail_user": mail_user,
         "mail_imap_host": mail_imap_host,
         "mail_smtp_host": mail_smtp_host,
+        "post_url": post_url,
     }
     try:
         put_secret(secret_account(row["id"]), secret, store)
@@ -153,6 +172,7 @@ def update_bridge(
     mail_user: str | None = None,
     mail_imap_host: str | None = None,
     mail_smtp_host: str | None = None,
+    post_url: str | None = None,
 ) -> dict:
     rows = list_records(store)
     row = next((item for item in rows if item.get("id") == bridge_id), None)
@@ -173,6 +193,11 @@ def update_bridge(
         row["mail_imap_host"] = mail_imap_host.strip()
     if mail_smtp_host is not None and str(row.get("kind") or "") == "email":
         row["mail_smtp_host"] = mail_smtp_host.strip()
+    if post_url is not None and str(row.get("kind") or "") == "webhook":
+        url = post_url.strip()
+        if url and not url.lower().startswith(("http://", "https://")):
+            raise StoreError("The post address must start with http:// or https://.", 400)
+        row["post_url"] = url
     if str(row.get("kind") or "") == "email" and not (
         str(row.get("mail_user") or "").strip()
         and str(row.get("mail_imap_host") or "").strip()
@@ -483,6 +508,11 @@ async def _send_card(store: Store, bot_id: str, card) -> None:
                 note = str(buttons.get("reply_note") or "")
                 card_text = f"{text}\n\n{note}".strip() if note else text
                 await asyncio.to_thread(mailbridge.smtp_send, row, token, chat_id, "EasyAgent needs you", card_text)
+            elif row.get("kind") == "webhook":
+                if webhook_post_url(row):
+                    await webhook_send(row, text, user_id, card.id)
+                else:
+                    await telegram_send(token, chat_id, text, buttons.get("inline_keyboard"))
             else:
                 await telegram_send(token, chat_id, text, buttons.get("inline_keyboard"))
         except Exception:
@@ -555,6 +585,30 @@ async def slack_send(token: str, chat_id: str, text: str, blocks: list | None = 
     )
     if data.get("ok") is False:
         raise RuntimeError(str(data.get("error") or "Slack did not answer."))
+
+
+def webhook_post_url(row: dict) -> str:
+    """The relay address of a webhook bridge. Empty means it has none."""
+    return str(row.get("post_url") or "").strip()
+
+
+def webhook_payload(row: dict, text: str, recipient: str = "", card_id: str = "") -> dict:
+    """The JSON a relay receives. The shape is written at the top of this file."""
+    payload: dict = {"text": (text or "")[:8000], "bridge": str(row.get("name") or "")}
+    if recipient:
+        payload["recipient"] = recipient
+    if card_id:
+        payload["card_id"] = card_id
+        payload["approve_text"] = f"approve {card_id}"
+        payload["deny_text"] = f"deny {card_id}"
+        payload["callback_approve"] = f"ea:{card_id}:approve"
+        payload["callback_deny"] = f"ea:{card_id}:deny"
+    return payload
+
+
+async def webhook_send(row: dict, text: str, recipient: str = "", card_id: str = "") -> None:
+    """POST one message to the bridge's relay address. No answer is a failure."""
+    await post_json(webhook_post_url(row), webhook_payload(row, text, recipient, card_id))
 
 
 def bump_offset(store: Store, bridge_id: str, offset: int) -> None:
@@ -717,6 +771,11 @@ async def post_allowlisted(store: Store, row: dict, recipient: str, text: str) -
         await slack_send(token, target, body)
     elif row.get("kind") == "email":
         await asyncio.to_thread(mailbridge.smtp_send, row, token, target, _email_subject(body), body)
+    elif row.get("kind") == "webhook":
+        if webhook_post_url(row):
+            await webhook_send(row, body, target)
+        else:
+            await telegram_send(token, target, body)
     else:
         await telegram_send(token, target, body)
     log_event(store, row.get("kind") or "", target, "sent")
@@ -747,6 +806,8 @@ async def deliver(store: Store, request, bot_id: str | None = None) -> str:
         raise ToolError("That bridge has no token in the keychain. It was not sent.")
     try:
         if row.get("kind") == "webhook":
+            if webhook_post_url(row):
+                await webhook_send(row, text, recipient)
             _remember_webhook(store, row, recipient, text)
         elif row.get("kind") == "discord":
             await discord_send(token, recipient, text)
@@ -790,7 +851,7 @@ def prompt_block(store: Store, bot_id: str | None = None) -> str:
         wanted = str(bot_id)
         rows = [row for row in rows if str(row.get("bot_id") or "") == wanted]
     if not rows:
-        return "No Telegram, Discord, Slack, or Email bridge is set up. Do not invent one."
+        return "No Telegram, Discord, Slack, Email, or webhook bridge is set up. Do not invent one."
     lines = ["A bridge reaches you. Do not message anyone else unless a card says you may."]
     for row in rows:
         ids = ", ".join(row["allow_ids"]) or "(nobody)"

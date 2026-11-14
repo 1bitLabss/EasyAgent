@@ -773,6 +773,12 @@ async def _lifespan(app: FastAPI):
     from easyagent.sandbox import warm_probe
 
     warm_probe()
+    try:
+        from easyagent import delegate as _delegate
+
+        await asyncio.to_thread(_delegate.settle_orphan_children, app.state.store)
+    except Exception:
+        pass
     await _kick_auto_resume(app.state.store)
     await _kick_unanswered(app.state.store)
     stop = asyncio.Event()

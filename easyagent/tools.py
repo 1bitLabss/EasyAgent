@@ -393,6 +393,7 @@ class ToolRequest:
     timeout: int = -1
     workdir: str = ""
     schema_json: str = ""
+    background: bool = False
 
 
 @dataclass(frozen=True)
@@ -1102,6 +1103,7 @@ def _request_from_call(data: dict) -> ToolRequest:
             body=task,
             command=json.dumps([str(item) for item in listed]),
             schema_json=schema_json,
+            background=bool(raw_args.get("background")),
         )
     if name == "python":
         code = str(raw_args.get("code") or content or "").strip()
@@ -1805,6 +1807,7 @@ def _delegate_from_body(body: str) -> ToolRequest:
     lines = (body or "").splitlines()
     tools: list = []
     schema_json = ""
+    background = False
     task_lines: list[str] = []
     for line in lines:
         if line.startswith("schema:"):
@@ -1815,6 +1818,9 @@ def _delegate_from_body(body: str) -> ToolRequest:
                 parsed = None
             if isinstance(parsed, dict) and parsed:
                 schema_json = json.dumps(parsed)
+            continue
+        if line.startswith("background:"):
+            background = line.split(":", 1)[1].strip().lower() in {"true", "yes", "1"}
             continue
         if line.startswith("tools:"):
             raw = line.split(":", 1)[1].strip()
@@ -1831,7 +1837,10 @@ def _delegate_from_body(body: str) -> ToolRequest:
     task = "\n".join(task_lines).strip()
     if not task:
         raise ToolError("Name the task. The child was not started.")
-    return ToolRequest(kind="delegate", body=task, command=json.dumps(tools), schema_json=schema_json)
+    return ToolRequest(
+        kind="delegate", body=task, command=json.dumps(tools),
+        schema_json=schema_json, background=background,
+    )
 
 
 def _skill_from_body(body: str) -> ToolRequest | None:

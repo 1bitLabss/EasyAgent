@@ -40,6 +40,7 @@ class HelperSpec:
     seconds: int
     listed: tuple[str, ...] = ()
     schema: dict | None = None
+    child_id: str = ""  # set by a background delegate so the record and the run share one id
 
 
 def in_helper() -> bool:

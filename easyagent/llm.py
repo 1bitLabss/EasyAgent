@@ -738,6 +738,13 @@ NATIVE_TOOLS = [
                     "it gets one correction try."
                 ),
             },
+            "background": {
+                "type": "boolean",
+                "description": (
+                    "When true the child keeps working after your turn ends. "
+                    "Its result arrives on its own later."
+                ),
+            },
         },
         ["task"],
     ),
@@ -960,7 +967,9 @@ def _fence_for_call(call: dict) -> str:
         if task:
             extra = ""
             if isinstance(schema, dict) and schema:
-                extra = "\nschema: " + json.dumps(schema, separators=(",", ":"))
+                extra += "\nschema: " + json.dumps(schema, separators=(",", ":"))
+            if args.get("background"):
+                extra += "\nbackground: true"
             return f"```delegate\n{task}\ntools: {tools}{extra}\n```"
     if name in {"routine", "create_routine", "edit_routine", "delete_routine"}:
         routine_action = str(args.get("action") or "").strip().lower()

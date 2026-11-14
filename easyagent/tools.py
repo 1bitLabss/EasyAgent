@@ -81,6 +81,10 @@ _MEMORY_FENCE = re.compile(r"```memory[ \t]*\r?\n(.*?)```", re.DOTALL | re.IGNOR
 _FINISH_FENCE = re.compile(r"```finish[ \t]*\r?\n(.*?)```", re.DOTALL | re.IGNORECASE)
 _REACT_FENCE = re.compile(r"```react[ \t]*\r?\n(.*?)```", re.DOTALL | re.IGNORECASE)
 _ROUTINE_FENCE = re.compile(r"```routine[ \t]*\r?\n(.*?)```", re.DOTALL | re.IGNORECASE)
+_ROUTINE_ACTIONS = {
+    "create", "edit", "delete", "pause", "resume", "list",
+    "followup", "followups", "cancel_followup",
+}
 _BROWSER_FENCE = re.compile(r"```browser[ \t]*\r?\n(.*?)```", re.DOTALL | re.IGNORECASE)
 _MCP_FENCE = re.compile(r"```mcp[ \t]*\r?\n(.*?)```", re.DOTALL | re.IGNORECASE)
 _BRIDGE_FENCE = re.compile(r"```bridge[ \t]*\r?\n(.*?)```", re.DOTALL | re.IGNORECASE)
@@ -3435,13 +3439,14 @@ def _routine_request(name: str, raw: dict) -> ToolRequest:
         action = "edit"
     elif name == "delete_routine":
         action = "delete"
-    if action not in {"create", "edit", "delete", "pause", "resume", "list"}:
+    if action not in _ROUTINE_ACTIONS:
         action = "create"
     spec = {
         "action": action,
         "id": str(raw.get("id") or "").strip(),
         "name": str(raw.get("name") or "").strip(),
         "prompt": str(raw.get("prompt") or raw.get("body") or raw.get("text") or "").strip(),
+        "in": str(raw.get("in") or raw.get("in_minutes") or "").strip(),
         "cron": str(raw.get("cron") or "").strip(),
         "every_minutes": raw.get("every_minutes") or raw.get("every") or "",
         "daily": str(raw.get("daily") or "").strip(),
@@ -3468,13 +3473,16 @@ def _routine_from_body(body: str) -> ToolRequest | None:
     if not fields and not prompt.strip():
         return None
     action = (fields.get("action") or "create").strip().lower()
-    if action not in {"create", "edit", "delete", "pause", "resume", "list"}:
-        raise ToolError("A routine action is create, edit, delete, or list.")
+    if action not in _ROUTINE_ACTIONS:
+        raise ToolError(
+            "A routine action is create, edit, delete, list, followup, followups, or cancel_followup."
+        )
     spec = {
         "action": action,
         "id": fields.get("id") or "",
         "name": fields.get("name") or "",
-        "prompt": (prompt or fields.get("prompt") or "").strip(),
+        "prompt": (prompt or fields.get("prompt") or fields.get("text") or "").strip(),
+        "in": (fields.get("in") or fields.get("in_minutes") or "").strip(),
         "cron": fields.get("cron") or "",
         "every_minutes": fields.get("every_minutes") or fields.get("every") or "",
         "daily": fields.get("daily") or "",
@@ -3489,7 +3497,53 @@ def _routine_from_body(body: str) -> ToolRequest | None:
         raise ToolError("Name the routine.")
     if action == "create" and not spec["prompt"]:
         raise ToolError("Write what the routine should do.")
+    if action == "followup" and not spec["prompt"]:
+        raise ToolError("Write what the follow-up should do.")
     return ToolRequest(kind="routine", action=action, path=spec["name"], body=spec["prompt"], call_arguments=json.dumps(spec))
+
+
+_FOLLOWUP_IN = re.compile(r"(\d+(?:\.\d+)?)\s*(hours?|hrs?|h|minutes?|mins?|m)?", re.IGNORECASE)
+
+
+def _followup_minutes(raw: str) -> float:
+    """Minutes from '10', '10 minutes', '1 hour', '90m'. Plain numbers are minutes."""
+    text = str(raw or "").strip().lower()
+    match = _FOLLOWUP_IN.fullmatch(text)
+    if not match:
+        raise ToolError("Say how long to wait, like in 10 minutes.")
+    value = float(match.group(1))
+    unit = (match.group(2) or "m").lower()
+    return value * 60 if unit.startswith("h") else value
+
+
+async def _followup_action(store: Store, bot_id: str | None, action: str, spec: dict) -> str:
+    """Card-free scoped self-scheduling: one follow-up into this same chat.
+
+    Bounded, so no confirm card: same chat, at most a few pending, one minute
+    to twenty-four hours out, and a fired follow-up may schedule only one more.
+    """
+    from easyagent import followup as followup_mod
+    from easyagent import turn as turn_mod
+
+    if not bot_id:
+        raise ToolError("A follow-up needs a bot. It was not scheduled.")
+    slot = turn_mod.current_slot()
+    chat_id = str(slot.chat_id) if slot is not None and slot.chat_id else ""
+    if not chat_id:
+        raise ToolError("A follow-up works only inside a chat. It was not scheduled.")
+    try:
+        if action == "followups":
+            return followup_mod.list_text(store, bot_id, chat_id)
+        if action == "cancel_followup":
+            return followup_mod.cancel_followup(store, bot_id, chat_id, spec.get("id") or "")
+        record = followup_mod.schedule_followup(
+            store, bot_id, chat_id, spec.get("prompt") or "", _followup_minutes(spec.get("in") or "")
+        )
+    except followup_mod.FollowupError as exc:
+        raise ToolError(str(exc)) from exc
+    line = f"I will {record['text']} in {followup_mod.human_phrase(record['minutes'])}."
+    _queue_turn_note("followup", line)
+    return line
 
 
 async def _routine_proposal(store: Store, request: ToolRequest, bot_id: str | None) -> str:
@@ -3507,6 +3561,8 @@ async def _routine_proposal(store: Store, request: ToolRequest, bot_id: str | No
     if not isinstance(spec, dict):
         spec = {}
     action = (spec.get("action") or request.action or "create").strip().lower()
+    if action in {"followup", "followups", "cancel_followup"}:
+        return await _followup_action(store, bot_id, action, spec)
     if action == "list":
         lines = ["Routines"]
         warn = tzdata_warning()

@@ -286,3 +286,42 @@ def test_plan_payload_exposes_keep_going_fields(tmp_path):
     assert public["plan"]["keep_going"] is True
     assert public["plan"]["budget"] == 5
     app.close()
+
+
+def test_plan_keep_route_toggles(tmp_path):
+    """POST /plan/keep turns keep-going on and off from the UI."""
+    from fastapi.testclient import TestClient
+
+    fastapi_app = create_app(tmp_path)
+    app = TestClient(fastapi_app)
+    store = fastapi_app.state.store
+    endpoint = app.post(
+        "/api/endpoints", json={"name": "local", "base_url": "http://127.0.0.1:9/v1"}
+    ).json()
+    bot = app.post("/api/bots", json={"name": "Ada", "endpoint_id": endpoint["id"]}).json()
+    chat = app.post(f"/api/bots/{bot['id']}/chats").json()
+    turn_mod.bind(store, chat["id"], bot_id=bot["id"])
+
+    missing = app.post(f"/api/bots/{bot['id']}/chats/{chat['id']}/plan/keep", json={"on": True})
+    assert missing.status_code == 404
+
+    asyncio.run(execute(
+        store,
+        ToolRequest(kind="plan", action="set", body="Notes\n- Write the summary\n- Send it"),
+        bot["id"],
+    ))
+    turned_on = app.post(f"/api/bots/{bot['id']}/chats/{chat['id']}/plan/keep", json={"on": True})
+    assert turned_on.status_code == 200
+    plan = turned_on.json()["plan"]
+    assert plan["keep_going"] is True
+    assert plan["budget"] >= 1
+    assert plan["continued"] == 0
+
+    with_budget = app.post(
+        f"/api/bots/{bot['id']}/chats/{chat['id']}/plan/keep", json={"on": True, "budget": 3}
+    )
+    assert with_budget.json()["plan"]["budget"] == 3
+
+    turned_off = app.post(f"/api/bots/{bot['id']}/chats/{chat['id']}/plan/keep", json={"on": False})
+    assert turned_off.json()["plan"]["keep_going"] is False
+    app.close()

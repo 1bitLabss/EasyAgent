@@ -740,6 +740,19 @@ export function ChatPane() {
       setError(reason instanceof Error ? reason.message : "YOLO was not changed.");
     }
   }
+  async function toggleKeepGoing(on: boolean) {
+    if (!botId || !chatId) return;
+    try {
+      const next = await api<Chat>(`/api/bots/${botId}/chats/${chatId}/plan/keep`, {
+        method: "POST",
+        json: { on },
+      });
+      const prev = queryClient.getQueryData<Chat>(["chat", botId, chatId]);
+      queryClient.setQueryData(["chat", botId, chatId], mergeChat(prev, next));
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "Keep-going was not changed.");
+    }
+  }
   const flight = botId && chatId ? flightFor(botId, chatId) : null;
   const live = useLive(botId, chatId);
   const serverRun = chat.data?.run?.status;
@@ -1012,6 +1025,8 @@ export function ChatPane() {
   // child's result while the run is busy is the only signal there.
   const childWorking = running && !streamingReply && rows[rows.length - 1]?.subagent === true;
   const checklist = (open?.plan?.steps || []).filter((step) => step && step.text);
+  const keepOn = Boolean(open?.plan?.keep_going);
+  const keepCount = `${open?.plan?.continued ?? 0}/${open?.plan?.budget ?? 0}`;
   const active = Boolean(open && (running || (flight?.sending && live && live.phase !== "error" && live.phase !== "stopped")));
   const presenceStep = named;
   const runStarted = live?.run?.started_at || open?.run?.started_at || live?.run?.activity_started_at || open?.run?.activity_started_at;
@@ -1155,14 +1170,45 @@ export function ChatPane() {
                 </div>
               ) : null}
               {checklist.length ? (
-                <ol data-testid="plan-checklist" className="rounded-lg border border-border bg-card px-4 py-3 text-sm">
-                  {open?.plan?.title ? <li className="mb-1 list-none font-medium">{open.plan.title}</li> : null}
-                  {checklist.map((step) => (
-                    <li key={step.id} data-state={step.state} className={step.state === "done" ? "text-muted line-through" : step.state === "doing" ? "font-medium" : ""}>
-                      {step.text}
-                    </li>
-                  ))}
-                </ol>
+                <div className="flex flex-col gap-1.5">
+                  <ol data-testid="plan-checklist" className="rounded-lg border border-border bg-card px-4 py-3 text-sm">
+                    {open?.plan?.title ? <li className="mb-1 list-none font-medium">{open.plan.title}</li> : null}
+                    {checklist.map((step) => (
+                      <li key={step.id} data-state={step.state} className={step.state === "done" ? "text-muted line-through" : step.state === "doing" ? "font-medium" : ""}>
+                        {step.text}
+                      </li>
+                    ))}
+                  </ol>
+                  {keepOn ? (
+                    <span
+                      data-testid="keep-going-chip"
+                      title="The bot continues the plan on its own"
+                      className="inline-flex w-fit items-center gap-1.5 rounded-full bg-white px-2.5 py-1 text-xs font-semibold text-foreground dark:bg-white/10"
+                    >
+                      Keep going {keepCount}
+                      <button
+                        type="button"
+                        data-testid="keep-going-stop"
+                        aria-label="Stop keep-going"
+                        title="Stop keep-going"
+                        className="text-muted hover:text-foreground"
+                        onClick={() => void toggleKeepGoing(false)}
+                      >
+                        ×
+                      </button>
+                    </span>
+                  ) : (
+                    <button
+                      type="button"
+                      data-testid="keep-going-button"
+                      title="The bot continues the plan on its own"
+                      className="w-fit rounded-full bg-white px-2.5 py-1 text-xs font-semibold text-foreground dark:bg-white/10"
+                      onClick={() => void toggleKeepGoing(true)}
+                    >
+                      Keep going
+                    </button>
+                  )}
+                </div>
               ) : null}
               {(open.window_start ?? 0) > 0 ? (
                 <button type="button" className="sys-line" onClick={() => void loadOlder()}>Earlier messages</button>

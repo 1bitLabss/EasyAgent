@@ -246,6 +246,14 @@ async def schedule_loop(store: Store, stop: asyncio.Event) -> None:
             # A bad schedule file must not kill the loop. The next tick tries again.
             pass
         try:
+            from easyagent.followup import sweep_followups
+
+            # On the loop thread so a fired follow-up can kick its chat at once.
+            sweep_followups(store)
+        except Exception:
+            # A bad follow-up file must not kill the loop either.
+            pass
+        try:
             await asyncio.wait_for(stop.wait(), timeout=max(tick, 1))
         except asyncio.TimeoutError:
             continue

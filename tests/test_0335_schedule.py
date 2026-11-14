@@ -3,6 +3,7 @@
 import asyncio
 
 from easyagent.delivery import abandon, claim, enqueue, mark_delivered, status_of
+from easyagent.followup import FIRE_PREFIX, followups_path, schedule_followup, sweep_followups
 from easyagent.safety import is_unattended
 from easyagent.schedule import run_due_schedules
 from tests.test_schedule import at, put_schedule, seed
@@ -74,3 +75,31 @@ def test_a_killed_delivery_is_sent_once_on_the_next_start(tmp_path):
     posted = [item for item in chat["messages"] if item.get("content") == "queued-result"]
     assert len(posted) == 1
     assert posted[0]["delivery_id"] == delivery_id
+
+
+def test_one_tick_fires_routines_and_followups_without_interference(tmp_path, monkeypatch):
+    """The scheduler tick hosts both: a due routine runs its own path and a due
+    follow-up lands in its own chat as a user-shaped line."""
+
+    async def complete(**kwargs):
+        return "routine said"
+
+    monkeypatch.setattr("easyagent.llm.complete", complete)
+
+    async def kick(_store):
+        return 0
+
+    monkeypatch.setattr("easyagent.app.kick", kick)
+    store, bot, _endpoint = seed(tmp_path)
+    put_schedule(store, bot, kind="interval", every_minutes=5, name="Watch", quiet=False)
+    chat = store.ongoing_chat(bot["id"])
+    record = schedule_followup(store, bot["id"], chat["id"], "check the build", 1)
+    moment = at(record["due_at"] + 60)
+    fired = asyncio.run(run_due_schedules(store, moment))
+    assert fired and fired[0]["status"] == "ok"
+    assert sweep_followups(store, now=record["due_at"] + 60) == 1
+    chat = store.get_chat(bot["id"], chat["id"])
+    contents = [item.get("content") for item in chat["messages"]]
+    assert "routine said" in contents
+    assert FIRE_PREFIX + "check the build" in contents
+    assert not followups_path(store, bot["id"], chat["id"]).exists()

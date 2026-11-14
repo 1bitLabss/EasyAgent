@@ -88,6 +88,7 @@ def build_system(
 # Routines
 You have a built-in scheduler. Use it for reminders and recurring work. Do not use Task Scheduler, schtasks, crontab, or launchd.
 You can save a routine: a cron job, a reminder, a recurring task, or a check every morning. Fields: name, prompt, cron, daily, weekdays, weekly, once, every_minutes, timezone, quiet. Use the routine tool. {open_note} It is not saved until the person confirms the card. A quiet routine with nothing to say replies: nothing new
+To wake this same chat later without a card, use the routine tool with action followup, in <minutes>, and the line to act on: 1 minute to 24 hours out, at most 3 waiting, and a fired follow-up may schedule only one more.
 
 Write in plain sentences. A greeting you already know does not need a tool.
 

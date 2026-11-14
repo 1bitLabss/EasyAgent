@@ -611,6 +611,14 @@ class ClassGrantIn(BaseModel):
     on: bool = False
 
 
+class KeepGoingIn(BaseModel):
+    """Turn keep-going on or off for the chat's plan. Budget is optional."""
+
+    model_config = ConfigDict(extra="ignore")
+    on: bool = True
+    budget: int | None = None
+
+
 class BridgeIn(BaseModel):
     model_config = ConfigDict(extra="ignore")
     kind: str = "telegram"
@@ -777,6 +785,13 @@ async def _lifespan(app: FastAPI):
         from easyagent import delegate as _delegate
 
         await asyncio.to_thread(_delegate.settle_orphan_children, app.state.store)
+    except Exception:
+        pass
+    try:
+        from easyagent import followup as _followup
+
+        # A follow-up whose time passed while the app was closed fires on start.
+        await asyncio.to_thread(_followup.sweep_followups, app.state.store)
     except Exception:
         pass
     await _kick_auto_resume(app.state.store)
@@ -2072,6 +2087,17 @@ def create_app(data_dir: str | Path | None = None) -> FastAPI:
         )
         if not result.ok:
             raise HTTPException(400, result.message)
+        return _public_chat(store, store.get_chat(bot_id, chat_id))
+
+    @app.post("/api/bots/{bot_id}/chats/{chat_id}/plan/keep")
+    def set_plan_keep_going(bot_id: str, chat_id: str, body: KeepGoingIn):
+        """Turn keep-going on or off for this chat's plan. Only the plan block reaches this route."""
+        from easyagent.plan import set_keep_going
+
+        store.get_chat(bot_id, chat_id)
+        plan = set_keep_going(store, bot_id, chat_id, on=body.on, budget=body.budget)
+        if plan is None:
+            raise HTTPException(404, "This chat has no plan yet.")
         return _public_chat(store, store.get_chat(bot_id, chat_id))
 
     @app.post("/api/bots/{bot_id}/chats/{chat_id}/class-grants")
@@ -3514,6 +3540,7 @@ def _public_chat(store: Store, chat: dict, window: int | None = None) -> dict:
         "context": _metered_stats(store, chat, prepared.stats),
         "run": public_run(chat, store),
         "plan": _public_plan(store, chat),
+        "followups": _public_followups(store, chat),
         "yolo": _public_yolo(store, chat),
         "class_grants": _public_class_grants(chat),
     }
@@ -6056,6 +6083,16 @@ def _public_plan(store: Store, chat: dict) -> dict | None:
         "continued": int(plan.get("continued") or 0),
         "budget": int(plan.get("budget") or 0),
     }
+
+
+def _public_followups(store: Store, chat: dict) -> list[dict]:
+    """Pending card-free follow-ups this chat scheduled for itself."""
+    from easyagent.followup import pending_view
+
+    try:
+        return pending_view(store, chat.get("bot_id") or "", chat.get("id") or "")
+    except Exception:
+        return []
 
 
 def _overlay_queue(store: Store, chat: dict, public: dict) -> None:

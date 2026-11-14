@@ -28,6 +28,22 @@ def turn_checks_start_clear():
 
 
 @pytest.fixture(autouse=True)
+def turn_context_starts_clear():
+    """A test that binds a turn must not leave its cancel flag for the next one.
+
+    A set `_cancel` beside a rebound `_slot` makes every later llm call in the
+    process raise TurnCancelled. Each test starts and ends with a clear context.
+    """
+    from easyagent import turn as turn_mod
+
+    turn_mod._cancel.set(None)
+    turn_mod._slot.set(None)
+    yield
+    turn_mod._cancel.set(None)
+    turn_mod._slot.set(None)
+
+
+@pytest.fixture(autouse=True)
 def safety_starts_clean():
     from easyagent.safety import reset_for_tests
 

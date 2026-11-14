@@ -42,6 +42,9 @@ export type Plan = {
   steps: PlanStep[];
   updated_at?: string;
   dismissed?: boolean;
+  keep_going?: boolean;
+  continued?: number;
+  budget?: number;
 };
 
 export type Run = {

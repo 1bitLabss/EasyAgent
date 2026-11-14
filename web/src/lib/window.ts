@@ -82,6 +82,24 @@ export function sameRun(left: Chat["run"], right: Chat["run"]) {
   return left.id === right.id && left.status === right.status && left.started_at === right.started_at && left.last_activity_at === right.last_activity_at && left.current_step === right.current_step && left.reason === right.reason && left.activity_started_at === right.activity_started_at;
 }
 
+function samePlan(left: Chat["plan"], right: Chat["plan"]) {
+  if (left === right) return true;
+  if (!left || !right) return !left && !right;
+  return (
+    left.title === right.title &&
+    left.dismissed === right.dismissed &&
+    left.keep_going === right.keep_going &&
+    left.continued === right.continued &&
+    left.budget === right.budget &&
+    (left.steps === right.steps ||
+      (left.steps.length === right.steps.length &&
+        left.steps.every((step, index) => {
+          const other = right.steps[index];
+          return other && step.id === other.id && step.text === other.text && step.state === other.state;
+        })))
+  );
+}
+
 function looseKey(message: ChatMessage): string {
   if (message.client_id) return `c:${message.client_id}`;
   if (message.id) return `i:${message.id}`;
@@ -249,7 +267,8 @@ export function shareChat(prev: unknown, incoming: unknown): unknown {
     older.message_count === next.message_count &&
     older.window_start === next.window_start &&
     older.updated_at === next.updated_at &&
-    sameRun(older.run, next.run)
+    sameRun(older.run, next.run) &&
+    samePlan(older.plan, next.plan)
   ) {
     return older;
   }

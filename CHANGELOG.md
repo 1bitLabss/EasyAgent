@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.3.57
+- Slack is now a full channel. A bot can send to a Slack channel, listen to it, and put its approval cards right there — tapping Approve in Slack decides the card here. Scheduled routines can post their result to Slack beside Telegram and Discord.
+- Bots can reach email. Give a bot an IMAP/SMTP account and it reads unread mail from senders you allowlist, answers over SMTP, and takes approvals from a plain text reply: "approve <card id>" or "deny <card id>". Scheduled routines can mail their result to an allowlisted address too. Nothing new to install — email runs on the Python standard library.
+- Inbound mail and messages stay data: a stranger's email is ignored, quoted text cannot smuggle an instruction, and the same allow-list and approval rules apply as on every other channel.
+
 ## 0.3.56
 - Bots get past login pages. A page that pops a confirm or alert no longer stalls the browser — the dialog is answered with a safe default and named in the next read. When a page asks for a file, an upload fence hands it a file from the bot's workspace; anything outside stays out.
 - Saved sign-ins. A credential saved for a site can be typed as `vault:<name>` — the secret is opened only at the moment of typing, only when the page you are on is the site the credential belongs to, and it never appears in the chat or the approval card, which shows just the name and the host. Sign-ins can be listed, saved, and removed from settings, and a login page now names the saved sign-ins it has for that site.

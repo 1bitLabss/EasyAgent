@@ -796,14 +796,14 @@ async def _deliver(store: Store, bot: dict, schedule: dict, entry: dict) -> None
 
 
 async def _post_outside(store: Store, bot: dict, schedule: dict, text: str, name: str) -> None:
-    """Optional post to this bot's Telegram or Discord, allowlisted chat only. One retry."""
+    """Optional post to this bot's Telegram, Discord, or Slack, allowlisted chat only. One retry."""
     from easyagent.bridges import BridgeDenied, bridge_for, post_allowlisted
 
     kind = str(schedule.get("deliver") or "").strip().lower()
     chat_id = str(schedule.get("deliver_chat") or "").strip()
-    if kind not in {"telegram", "discord"} or not chat_id:
+    if kind not in {"telegram", "discord", "slack"} or not chat_id:
         return
-    label = "Discord" if kind == "discord" else "Telegram"
+    label = {"telegram": "Telegram", "discord": "Discord", "slack": "Slack"}[kind]
     row = bridge_for(store, str(bot.get("id") or ""), kind)
 
     async def once() -> None:
@@ -1261,13 +1261,13 @@ def compile_routine(fields: dict, *, created_at: str | None = None) -> dict:
 
 
 def _delivery_fields(fields: dict) -> dict:
-    """Optional Telegram or Discord target. The chat id is one allowlisted id."""
+    """Optional Telegram, Discord, or Slack target. The chat id is one allowlisted id."""
     kind = str(fields.get("deliver") or "").strip().lower()
     chat = str(fields.get("deliver_chat") or "").strip()
     if kind in {"", "none", "off", "chat"}:
         return {}
-    if kind not in {"telegram", "discord"}:
-        raise ScheduleError("A routine can post to Telegram or Discord, or stay in this chat.")
+    if kind not in {"telegram", "discord", "slack"}:
+        raise ScheduleError("A routine can post to Telegram, Discord, or Slack, or stay in this chat.")
     if not chat or len(chat) > 40 or any(ch.isspace() for ch in chat):
         raise ScheduleError("Name the allowlisted chat that should receive this routine.")
     return {"deliver": kind, "deliver_chat": chat}

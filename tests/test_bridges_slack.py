@@ -20,6 +20,7 @@ from easyagent.bridges import (
 from easyagent.safety import list_pending, resolve_card
 from easyagent.store import Store
 from easyagent.tools import ToolError, ToolRequest, execute
+from tests.test_plan_0320 import _client
 
 SLACK_URL = "https://slack.com/api/chat.postMessage"
 OPEN_URL = "https://slack.com/api/apps.connections.open"
@@ -480,3 +481,103 @@ def test_run_bridges_starts_a_slack_session(tmp_path, monkeypatch):
 
     asyncio.run(drive())
     assert started == [(row["id"], TOKEN)]
+
+
+# --- routine delivery gate ----------------------------------------------------
+
+
+def test_schedule_saves_a_slack_routine_for_an_allowlisted_chat(tmp_path):
+    app, client, bot, _chat = _client(tmp_path)
+    store = app.state.store
+    add_bridge(
+        store, kind="slack", name="Slack", bot_id=bot["id"],
+        allow_ids=["C123"], token=TOKEN,
+    )
+    body = {
+        "name": "Brief",
+        "prompt": "Say good morning.",
+        "daily": "8:00 AM",
+        "deliver": "slack",
+        "deliver_chat": "C123",
+    }
+    saved = client.post(f"/api/bots/{bot['id']}/schedules", json=body)
+    assert saved.status_code == 200, saved.text
+    assert saved.json()["deliver_chat"] == "C123"
+    assert len(store.list_schedules(bot["id"])) == 1
+    client.close()
+
+
+def test_schedule_rejects_a_slack_chat_that_is_not_allowlisted(tmp_path):
+    app, client, bot, _chat = _client(tmp_path)
+    store = app.state.store
+    add_bridge(
+        store, kind="slack", name="Slack", bot_id=bot["id"],
+        allow_ids=["C123"], token=TOKEN,
+    )
+    body = {
+        "name": "Brief",
+        "prompt": "Say good morning.",
+        "daily": "8:00 AM",
+        "deliver": "slack",
+        "deliver_chat": "C999",
+    }
+    refused = client.post(f"/api/bots/{bot['id']}/schedules", json=body)
+    assert refused.status_code == 400, refused.text
+    assert (
+        refused.json()["detail"]
+        == "That chat is not on this bot's Slack allow list. The routine was not saved."
+    )
+    assert store.list_schedules(bot["id"]) == []
+    client.close()
+
+
+def test_routine_run_posts_to_the_allowlisted_slack_chat(tmp_path, monkeypatch):
+    from easyagent.schedule import _deliver, compile_routine
+
+    app, client, bot, _chat = _client(tmp_path)
+    store = app.state.store
+    add_bridge(
+        store, kind="slack", name="Slack", bot_id=bot["id"],
+        allow_ids=["C123"], token=TOKEN,
+    )
+    calls = []
+
+    async def fake_slack_send(token, chat_id, text, blocks=None):
+        calls.append((chat_id, text))
+
+    monkeypatch.setattr("easyagent.bridges.slack_send", fake_slack_send)
+    record = compile_routine({
+        "name": "Brief",
+        "prompt": "Say good morning.",
+        "daily": "8:00 AM",
+        "deliver": "slack",
+        "deliver_chat": "C123",
+    })
+    entry = {"status": "ok", "output": "Good morning.", "name": "Brief"}
+    asyncio.run(_deliver(store, bot, record, entry))
+    assert calls == [("C123", "Good morning.")]
+    client.close()
+
+
+def test_schedule_rejects_a_telegram_chat_that_is_not_allowlisted(tmp_path):
+    app, client, bot, _chat = _client(tmp_path)
+    store = app.state.store
+    add_bridge(
+        store, kind="telegram", name="Phone", bot_id=bot["id"],
+        allow_ids=["42"], token="token-value",
+    )
+    body = {
+        "name": "Brief",
+        "prompt": "Say good morning.",
+        "daily": "8:00 AM",
+        "deliver": "telegram",
+        "deliver_chat": "999",
+    }
+    refused = client.post(f"/api/bots/{bot['id']}/schedules", json=body)
+    assert refused.status_code == 400, refused.text
+    assert (
+        refused.json()["detail"]
+        == "That chat is not on this bot's Telegram allow list. The routine was not saved."
+    )
+    assert store.list_schedules(bot["id"]) == []
+    client.close()

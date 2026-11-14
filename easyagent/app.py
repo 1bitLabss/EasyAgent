@@ -5893,11 +5893,11 @@ def _require_delivery_allowed(store: Store, bot_id: str, record: dict) -> None:
     """A routine delivery chat has to be on this bot's bridge allow list before it is saved."""
     kind = str(record.get("deliver") or "").strip().lower()
     target = str(record.get("deliver_chat") or "").strip()
-    if kind not in {"telegram", "discord"} or not target:
+    if kind not in {"telegram", "discord", "slack"} or not target:
         return
     from easyagent.bridges import admitted, bridge_for
 
-    label = "Discord" if kind == "discord" else "Telegram"
+    label = {"telegram": "Telegram", "discord": "Discord", "slack": "Slack"}[kind]
     row = bridge_for(store, bot_id, kind)
     if row is None or not admitted(row, target):
         raise HTTPException(400, f"That chat is not on this bot's {label} allow list. The routine was not saved.")

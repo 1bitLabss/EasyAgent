@@ -353,3 +353,27 @@ def test_retry_while_busy_is_refused(tmp_path):
     assert response.status_code == 409
     assert store.get_chat(bot["id"], chat["id"])["run"]["id"] == "run-keep"
     client.close()
+
+
+def test_new_plan_defaults_keep_going_off(tmp_path):
+    """A fresh checklist carries the keep-going fields, defaulted off so nothing changes."""
+    app, client, bot, chat = _client(tmp_path)
+    store = app.state.store
+    _checklist(store, bot["id"], chat["id"])
+    plan = load_plan(store, bot["id"], chat["id"])
+    assert plan["keep_going"] is False
+    assert plan["continued"] == 0
+    assert plan["budget"] == 0
+    public = client.get(f"/api/bots/{bot['id']}/chats/{chat['id']}").json()
+    assert public["plan"]["keep_going"] is False
+    assert public["plan"]["continued"] == 0
+    assert public["plan"]["budget"] == 0
+    client.close()
+
+
+def test_keep_fence_is_a_plan_tool_action():
+    request = parse_tool("```plan\nkeep\n```")
+    assert request is not None
+    assert request.kind == "plan"
+    assert request.action == "keep"
+    assert parse_tool("```plan\nkeep off\n```").command == "off"

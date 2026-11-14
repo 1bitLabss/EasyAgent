@@ -6045,6 +6045,10 @@ def _public_plan(store: Store, chat: dict) -> dict | None:
         "steps": list(plan.get("steps") or []),
         "updated_at": plan.get("updated_at"),
         "dismissed": bool(plan.get("dismissed")),
+        # Additive keep-going fields. An older UI ignores unknown keys.
+        "keep_going": bool(plan.get("keep_going")),
+        "continued": int(plan.get("continued") or 0),
+        "budget": int(plan.get("budget") or 0),
     }
 
 
@@ -6187,12 +6191,19 @@ async def _finish_turn(store: Store, bot_id: str, chat_id: str) -> None:
         pass
     async with turn_mod.boundary(store, chat_id):
         slot = turn_mod.slot_for(store, chat_id)
+        nudge = str(getattr(slot, "keep_going_nudge", "") or "")
+        slot.keep_going_nudge = ""
+        was_continuation = bool(getattr(slot, "keep_going_turn", False))
+        slot.keep_going_turn = False
         if slot.user_stop:
-            from easyagent.plan import release_hold_for_send
+            from easyagent.plan import release_hold_for_send, set_keep_going
 
             slot.user_stop = False
             slot.side_answer = False
+            nudge = ""
             release_hold_for_send(store, bot_id, chat_id)
+            # Stop is the person taking the wheel. Keep-going waits for them to ask again.
+            set_keep_going(store, bot_id, chat_id, on=False)
             _force_clear_running(store, bot_id, chat_id, "you pressed Stop")
         else:
             _park_side_answer(store, bot_id, chat_id)
@@ -6213,9 +6224,19 @@ async def _finish_turn(store: Store, bot_id: str, chat_id: str) -> None:
         if _FINISH_GAP is not None:
             await _FINISH_GAP(store, bot_id, chat_id)
         if waiting or _queue_waiting(store, bot_id, chat_id):
+            if was_continuation:
+                # The person spoke during a continuation. Their line is the driver now.
+                from easyagent.plan import set_keep_going
+
+                set_keep_going(store, bot_id, chat_id, on=False)
             _spawn_drain(store, bot_id, chat_id)
             return
         turn_mod.slot_for(store, chat_id).deliver_queue = False
+        if nudge and not _run_paused(store, bot_id, chat_id):
+            task = asyncio.create_task(_keep_going_turn(store, bot_id, chat_id, nudge))
+            slot.worker = task
+            turn_mod.track_worker(task)
+            return
         turn_mod.clear_busy(store, chat_id)
         _settle_idle_when_nothing_is_queued(store, bot_id, chat_id)
         _seal_wedged_run(store, bot_id, chat_id, force=True)
@@ -6725,6 +6746,25 @@ async def _auto_resume_turn(store: Store, bot_id: str, chat_id: str) -> None:
             await _reply_json(store, bot_id, chat_id)
     except Exception as exc:
         _log.warning("Auto resume failed: %s", exc)
+    finally:
+        await _finish_turn(store, bot_id, chat_id)
+
+
+async def _keep_going_turn(store: Store, bot_id: str, chat_id: str, nudge: str) -> None:
+    """Keep-going: the plan still has steps, so this turn continues without a new message.
+
+    Same shape as _auto_resume_turn: claim, bind, save the plain-voice nudge as the
+    user line, run one reply. The budget lives on the plan file, not here.
+    """
+    try:
+        turn_mod.slot_for(store, chat_id).user_stop = False
+        async with chat_lock(store, chat_id):
+            slot = turn_mod.bind(store, chat_id, bot_id=bot_id, resume=True)
+            slot.keep_going_turn = True
+            _save_user_turn(store, bot_id, chat_id, nudge)
+            await _reply_json(store, bot_id, chat_id)
+    except Exception as exc:
+        _log.warning("Keep-going continuation failed: %s", exc)
     finally:
         await _finish_turn(store, bot_id, chat_id)
 

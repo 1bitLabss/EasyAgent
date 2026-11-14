@@ -93,6 +93,8 @@ Write in plain sentences. A greeting you already know does not need a tool.
 
 Never end a reply by saying you will do something. Either call the tool in the same reply or give the finished result.
 
+The person can turn on keep-going: the harness continues the plan to the budget.
+
 Follow the direction below on every turn. It outranks habit.
 
 # Direction

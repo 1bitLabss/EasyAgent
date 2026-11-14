@@ -25,6 +25,10 @@ STUCK_SECONDS = 90
 MAX_STEPS = 12
 MAX_STEP = 160
 MAX_TITLE = 80
+# Keep-going: how many times the harness may continue a plan on its own
+# when the person turns it on without naming a number.
+KEEP_GOING_BUDGET = 8
+KEEP_GOING_MAX_BUDGET = 24
 
 _STATES = {"todo", "doing", "done"}
 _SECRET = re.compile(
@@ -153,6 +157,65 @@ def progress(plan: dict | None) -> tuple[int, int, str]:
         if step.get("state") == "doing":
             return index, total, str(step.get("text") or "")
     return 0, total, ""
+
+
+def unfinished(plan: dict | None) -> int:
+    """Steps still open: todo or doing."""
+    if not isinstance(plan, dict):
+        return 0
+    return sum(
+        1
+        for step in plan.get("steps") or []
+        if isinstance(step, dict) and step.get("state") != "done"
+    )
+
+
+def next_unfinished(plan: dict | None) -> str:
+    """The text of the first step that is not done."""
+    if not isinstance(plan, dict):
+        return ""
+    for step in plan.get("steps") or []:
+        if isinstance(step, dict) and step.get("state") != "done":
+            return str(step.get("text") or "")
+    return ""
+
+
+def budget_left(plan: dict | None) -> int:
+    """Continuations still allowed. Zero when keep-going is off or the budget is spent."""
+    if not isinstance(plan, dict) or not plan.get("keep_going"):
+        return 0
+    return max(0, int(plan.get("budget") or 0) - int(plan.get("continued") or 0))
+
+
+def set_keep_going(store: Store, bot_id: str, chat_id: str, *, on: bool, budget: int | None = None) -> dict | None:
+    """Turn the keep-going engine on or off for this chat's plan. Missing fields read as off."""
+    plan = load_plan(store, bot_id, chat_id)
+    if not plan:
+        return None
+    if not on and not plan.get("keep_going"):
+        return plan
+    if on:
+        plan["keep_going"] = True
+        plan["budget"] = max(1, min(int(budget or KEEP_GOING_BUDGET), KEEP_GOING_MAX_BUDGET))
+        plan["continued"] = 0
+        plan["keep_going_mark"] = 0
+    else:
+        plan["keep_going"] = False
+    plan["updated_at"] = now_iso()
+    _write_plan(store, bot_id, chat_id, plan)
+    return plan
+
+
+def note_continuation(store: Store, bot_id, chat_id: str, *, cost: int = 1, mark: int | None = None) -> None:
+    """Stamp one continuation against the budget. A no-progress turn costs double."""
+    plan = load_plan(store, bot_id, chat_id)
+    if not plan:
+        return
+    plan["continued"] = int(plan.get("continued") or 0) + max(1, int(cost))
+    if mark is not None:
+        plan["keep_going_mark"] = int(mark)
+    plan["updated_at"] = now_iso()
+    _write_plan(store, bot_id, chat_id, plan)
 
 
 def _parse_time(value) -> datetime | None:
@@ -328,7 +391,15 @@ def _steps_from_lines(store: Store, title: str, lines: list[str]) -> dict:
     if not steps or len(steps) > MAX_STEPS:
         raise PlanError("A checklist needs 1 to 12 steps. Nothing was saved.")
     _one_doing(steps)
-    return {"title": title, "steps": steps, "updated_at": now_iso(), "dismissed": False}
+    return {
+        "title": title,
+        "steps": steps,
+        "updated_at": now_iso(),
+        "dismissed": False,
+        "keep_going": False,
+        "continued": 0,
+        "budget": 0,
+    }
 
 
 def _parse_set_body(store: Store, body: str) -> dict:
@@ -396,6 +467,11 @@ def prompt_block(plan: dict | None) -> str:
     if not plan or not plan.get("steps") or plan.get("dismissed"):
         return rules + "\nNo checklist is saved yet. Use the plan tool when the job has steps."
     body = describe(plan)
+    if plan.get("keep_going"):
+        body += (
+            f"\nKeep-going is on: continuation {int(plan.get('continued') or 0)} of "
+            f"{int(plan.get('budget') or 0)} for this goal."
+        )
     # The person's own request is already their message. Recording that copy as
     # tool output would make every path they named look copied from a file.
     if plan.get("origin") == "user":
@@ -455,13 +531,15 @@ def apply_plan(store: Store, bot_id: str, request) -> str:
         raise PlanError("This turn has no chat, so the checklist was not saved.")
     store.get_chat(bot_id, chat_id)
     action = (getattr(request, "action", "") or "read").strip().lower()
-    if action not in {"read", "set", "step", "clear"}:
+    if action not in {"read", "set", "step", "clear", "keep"}:
         action = "read"
     if action == "read":
         return describe(load_plan(store, bot_id, chat_id))
     if action == "clear":
         _write_plan(store, bot_id, chat_id, None)
         return "The checklist was cleared. The job was not restarted."
+    if action == "keep":
+        return _apply_keep(store, bot_id, chat_id, request)
     if action == "step":
         return _apply_step(store, bot_id, chat_id, request)
     plan = _parse_set_body(store, getattr(request, "body", "") or "")
@@ -515,6 +593,35 @@ def _apply_step(store: Store, bot_id: str, chat_id: str, request) -> str:
     return "Checklist updated. The job was not restarted."
 
 
+def _apply_keep(store: Store, bot_id: str, chat_id: str, request) -> str:
+    """Turn keep-going on or off. A number sets the budget: how many times it may continue itself."""
+    choice = " ".join(str(getattr(request, "command", "") or getattr(request, "body", "") or "").split()).lower()
+    plan = load_plan(store, bot_id, chat_id)
+    if not plan or not plan.get("steps"):
+        raise PlanError("There is no checklist to keep going on. Nothing was changed.")
+    if choice in {"off", "no", "stop", "false"}:
+        set_keep_going(store, bot_id, chat_id, on=False)
+        return "Keep-going is off. The job was not restarted."
+    budget = None
+    if choice and choice not in {"on", "yes", "true"}:
+        if not choice.isdigit():
+            raise PlanError("Keep-going takes on, off, or a number of times. Nothing was changed.")
+        budget = int(choice)
+    saved = set_keep_going(store, bot_id, chat_id, on=True, budget=budget)
+    if saved is None:
+        raise PlanError("There is no checklist to keep going on. Nothing was changed.")
+    left = unfinished(saved)
+    if not left:
+        return (
+            f"Keep-going is on, up to {saved.get('budget')} times. "
+            "Every step is done, so there is nothing to continue."
+        )
+    return (
+        f"Keep-going is on, up to {saved.get('budget')} times. "
+        f"The plan still has {left} steps. Stop turns it off."
+    )
+
+
 def request_from_fence(body: str):
     from easyagent.tools import ToolRequest
 
@@ -522,6 +629,11 @@ def request_from_fence(body: str):
     first = (lines[0] if lines else "").strip().lower()
     if first in {"read", "clear"}:
         return ToolRequest(kind="plan", action=first)
+    if first == "keep" or first.startswith("keep "):
+        rest = first[4:].strip()
+        if not rest:
+            rest = next((line.strip().lower() for line in lines[1:] if line.strip()), "")
+        return ToolRequest(kind="plan", action="keep", command=rest)
     if first == "step":
         parts = [line.strip() for line in lines[1:] if line.strip()]
         return ToolRequest(

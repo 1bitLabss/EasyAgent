@@ -1234,8 +1234,10 @@ def _request_from_call(data: dict) -> ToolRequest:
         title = str(raw_args.get("title") or "").strip()
         steps = raw_args.get("steps")
         plan_body = content
-        if action not in {"read", "set", "step", "clear"}:
+        if action not in {"read", "set", "step", "clear", "keep"}:
             action = "set" if (plan_body.strip() or title or isinstance(steps, list)) else "read"
+        if action == "keep" and not state.strip() and plan_body.strip():
+            state = plan_body.strip()
         if action == "set" and not plan_body.strip():
             plan_body = json.dumps({"title": title, "steps": steps if isinstance(steps, list) else []})
         if action == "step" and not plan_body.strip():
@@ -7858,6 +7860,8 @@ async def run_turn(
     success_keys: list[tuple] = []
     fails: list[dict] = []
     bare_held = False
+    # True only in the loop pass where the model called finish. Keep-going stamps there.
+    finish_close = False
     opening = ""
     notes_text = ""
     streamed = ""
@@ -8448,6 +8452,42 @@ async def run_turn(
         yield "ledger", json.dumps(_ledger_items())
         yield "final", final or ""
 
+    def _keep_going_stamp() -> str:
+        """Keep-going: a finish that leaves steps on the plan continues the chat on its own.
+
+        Returns the honest close line when the budget is spent. Otherwise it stamps
+        one continuation and leaves the nudge line on the slot for the harness to run.
+        """
+        if store is None or not bot_id or not chat_id:
+            return ""
+        try:
+            from easyagent import plan as plan_mod
+
+            plan = plan_mod.load_plan(store, bot_id, chat_id)
+            if not plan or plan.get("dismissed") or not plan.get("keep_going"):
+                return ""
+            left = plan_mod.unfinished(plan)
+            if not left:
+                plan_mod.set_keep_going(store, bot_id, chat_id, on=False)
+                return ""
+            if plan_mod.budget_left(plan) <= 0:
+                plan_mod.set_keep_going(store, bot_id, chat_id, on=False)
+                return f"Stopped at the budget: {left} steps left. Say continue to keep going."
+            seam = turn_mod.current_slot()
+            if seam is None:
+                return ""
+            cost = 1
+            if getattr(seam, "keep_going_turn", False) and left == int(plan.get("keep_going_mark") or -1):
+                # This continuation ended with the same todo count it started with.
+                cost = 2
+            plan_mod.note_continuation(store, bot_id, chat_id, cost=cost, mark=left)
+            seam.keep_going_nudge = (
+                f"Keep going: the plan still has {left} steps. Next: {plan_mod.next_unfinished(plan)}."
+            )
+        except Exception:
+            return ""
+        return ""
+
     def close(answer: str):
         nonlocal streamed
         # Tokens for this reply are already in hand. A pause flag from the
@@ -8489,6 +8529,10 @@ async def run_turn(
                 steps,
             ))))
             final = _drop_known_logs(final, lines)
+        if finish_close:
+            extra = _keep_going_stamp()
+            if extra and extra not in final:
+                final = f"{final}\n\n{extra}" if final.strip() else extra
         if not _answer_is_failure(final):
             payload = _made_payload(lines)
             if payload:
@@ -8593,6 +8637,7 @@ async def run_turn(
     model_slot = None
     searches_run = 0
     while True:
+        finish_close = False
         if len(steps) >= TURN_STEP_CAP:
             _note_heuristic("_steps", "the step cap is reached, so the turn answers with what it has")
             yield "ledger", json.dumps(_ledger_items())
@@ -9206,6 +9251,7 @@ async def run_turn(
                 )
                 request = None
         if request is not None and request.kind == "finish":
+            finish_close = True
             spoken_body = _drop_known_logs(_spoken(text or ""), lines)
             written = spoken_body.strip()
             if written and _repeats_result(written, raws):

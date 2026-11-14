@@ -189,7 +189,7 @@ async def flush(store) -> int:
 async def _post_outside_once(store, payload: dict) -> None:
     kind = str(payload.get("deliver") or "").strip().lower()
     chat_id = str(payload.get("deliver_chat") or "").strip()
-    if kind not in {"telegram", "discord", "slack"} or not chat_id:
+    if kind not in {"telegram", "discord", "slack", "email"} or not chat_id:
         return
     from easyagent.schedule import _post_outside
 

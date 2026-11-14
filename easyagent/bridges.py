@@ -10,18 +10,23 @@ import asyncio
 import hmac
 import json
 import re
+import time
 from pathlib import Path
 
 import httpx
 
+from easyagent import mailbridge
 from easyagent.secrets import delete_secret, get_secret, put_secret
 from easyagent.store import Store, StoreError, atomic_write_json, new_id, now_iso, read_json
 
-_KINDS = ("telegram", "discord", "slack", "webhook")
+_KINDS = ("telegram", "discord", "slack", "email", "webhook")
 _IGNORED_TO = {"the person", "person", "the user", "user", ""}
 _IGNORED_TEXT = {"the message", "message", ""}
 _LOG_CAP = 200
 _NOTIFIED: set[str] = set()
+_EMAIL_POLL_SECONDS = 30
+_EMAIL_LAST_POLL: dict[str, float] = {}
+_EMAIL_DECISION = re.compile(r"(approve|deny)\s+([0-9a-fA-F-]{36})", re.IGNORECASE)
 
 
 def bridge_path(store: Store) -> Path:
@@ -59,6 +64,9 @@ def public_record(row: dict) -> dict:
         "allow_ids": [str(item) for item in (row.get("allow_ids") or [])],
         "has_token": bool(row.get("has_token")),
         "last_user_id": str(row.get("last_user_id") or ""),
+        "mail_user": str(row.get("mail_user") or ""),
+        "mail_imap_host": str(row.get("mail_imap_host") or ""),
+        "mail_smtp_host": str(row.get("mail_smtp_host") or ""),
     }
 
 
@@ -87,12 +95,22 @@ def add_bridge(
     bot_id: str,
     allow_ids: list[str],
     token: str,
+    mail_user: str = "",
+    mail_imap_host: str = "",
+    mail_smtp_host: str = "",
 ) -> dict:
     platform = kind if kind in _KINDS else ""
     if not platform:
-        raise StoreError("A bridge is Telegram, Discord, Slack, or a webhook.", 400)
+        raise StoreError("A bridge is Telegram, Discord, Slack, Email, or a webhook.", 400)
+    mail_user = (mail_user or "").strip().lower()
+    mail_imap_host = (mail_imap_host or "").strip()
+    mail_smtp_host = (mail_smtp_host or "").strip()
+    if platform == "email" and not (mail_user and mail_imap_host and mail_smtp_host):
+        raise StoreError("An email bridge needs the address and the mail server names.", 400)
     label = " ".join((name or platform).split())[:80]
     ids = _ids(allow_ids)
+    if platform == "email":
+        ids = [item.lower() for item in ids]
     if not ids:
         raise StoreError("Add your own user id. An empty list would ignore you too.", 400)
     secret = (token or "").strip()
@@ -111,6 +129,9 @@ def add_bridge(
         "update_offset": 0,
         "last_user_id": "",
         "last_chat_id": "",
+        "mail_user": mail_user,
+        "mail_imap_host": mail_imap_host,
+        "mail_smtp_host": mail_smtp_host,
     }
     try:
         put_secret(secret_account(row["id"]), secret, store)
@@ -122,7 +143,17 @@ def add_bridge(
     return row
 
 
-def update_bridge(store: Store, bridge_id: str, *, enabled: bool | None, allow_ids: list[str] | None, token: str | None) -> dict:
+def update_bridge(
+    store: Store,
+    bridge_id: str,
+    *,
+    enabled: bool | None,
+    allow_ids: list[str] | None,
+    token: str | None,
+    mail_user: str | None = None,
+    mail_imap_host: str | None = None,
+    mail_smtp_host: str | None = None,
+) -> dict:
     rows = list_records(store)
     row = next((item for item in rows if item.get("id") == bridge_id), None)
     if row is None:
@@ -131,9 +162,23 @@ def update_bridge(store: Store, bridge_id: str, *, enabled: bool | None, allow_i
         row["enabled"] = bool(enabled)
     if allow_ids is not None:
         ids = _ids(allow_ids)
+        if str(row.get("kind") or "") == "email":
+            ids = [item.lower() for item in ids]
         if not ids:
             raise StoreError("Add your own user id. An empty list would ignore you too.", 400)
         row["allow_ids"] = ids
+    if mail_user is not None and str(row.get("kind") or "") == "email":
+        row["mail_user"] = mail_user.strip().lower()
+    if mail_imap_host is not None and str(row.get("kind") or "") == "email":
+        row["mail_imap_host"] = mail_imap_host.strip()
+    if mail_smtp_host is not None and str(row.get("kind") or "") == "email":
+        row["mail_smtp_host"] = mail_smtp_host.strip()
+    if str(row.get("kind") or "") == "email" and not (
+        str(row.get("mail_user") or "").strip()
+        and str(row.get("mail_imap_host") or "").strip()
+        and str(row.get("mail_smtp_host") or "").strip()
+    ):
+        raise StoreError("An email bridge needs the address and the mail server names.", 400)
     if token is not None and token.strip():
         try:
             put_secret(secret_account(bridge_id), token.strip(), store)
@@ -336,6 +381,8 @@ def keyboard(card_id: str, kind: str) -> dict:
                 ],
             }]
         }
+    if kind == "email":
+        return {"reply_note": f"Reply with: approve {card_id} or deny {card_id}"}
     if kind == "slack":
         return {
             "blocks": [{
@@ -432,6 +479,10 @@ async def _send_card(store: Store, bot_id: str, card) -> None:
                 await discord_send(token, chat_id, text, buttons)
             elif row.get("kind") == "slack":
                 await slack_send(token, chat_id, text, buttons.get("blocks"))
+            elif row.get("kind") == "email":
+                note = str(buttons.get("reply_note") or "")
+                card_text = f"{text}\n\n{note}".strip() if note else text
+                await asyncio.to_thread(mailbridge.smtp_send, row, token, chat_id, "EasyAgent needs you", card_text)
             else:
                 await telegram_send(token, chat_id, text, buttons.get("inline_keyboard"))
         except Exception:
@@ -644,6 +695,11 @@ def bridge_for(store: Store, bot_id: str, kind: str) -> dict | None:
     return None
 
 
+def _email_subject(text: str) -> str:
+    first = next((line.strip() for line in (text or "").splitlines() if line.strip()), "")
+    return (first[:60] + "…") if len(first) > 60 else (first or "EasyAgent message")
+
+
 async def post_allowlisted(store: Store, row: dict, recipient: str, text: str) -> None:
     """Send only to an allowlisted chat. Anything else is refused before the network."""
     target = str(recipient or "").strip()
@@ -659,6 +715,8 @@ async def post_allowlisted(store: Store, row: dict, recipient: str, text: str) -
         await discord_send(token, target, body)
     elif row.get("kind") == "slack":
         await slack_send(token, target, body)
+    elif row.get("kind") == "email":
+        await asyncio.to_thread(mailbridge.smtp_send, row, token, target, _email_subject(body), body)
     else:
         await telegram_send(token, target, body)
     log_event(store, row.get("kind") or "", target, "sent")
@@ -694,6 +752,8 @@ async def deliver(store: Store, request, bot_id: str | None = None) -> str:
             await discord_send(token, recipient, text)
         elif row.get("kind") == "slack":
             await slack_send(token, recipient, text)
+        elif row.get("kind") == "email":
+            await asyncio.to_thread(mailbridge.smtp_send, row, token, recipient, _email_subject(text), text)
         else:
             await telegram_send(token, recipient, text)
     except RuntimeError as exc:
@@ -730,7 +790,7 @@ def prompt_block(store: Store, bot_id: str | None = None) -> str:
         wanted = str(bot_id)
         rows = [row for row in rows if str(row.get("bot_id") or "") == wanted]
     if not rows:
-        return "No Telegram, Discord, or Slack bridge is set up. Do not invent one."
+        return "No Telegram, Discord, Slack, or Email bridge is set up. Do not invent one."
     lines = ["A bridge reaches you. Do not message anyone else unless a card says you may."]
     for row in rows:
         ids = ", ".join(row["allow_ids"]) or "(nobody)"
@@ -753,6 +813,12 @@ async def run_bridges(store: Store, stop: asyncio.Event, reply) -> None:
                     _ensure_discord(store, row, token, reply)
                 elif row.get("kind") == "slack":
                     _ensure_slack(store, row, token, reply)
+                elif row.get("kind") == "email":
+                    now = time.monotonic()
+                    key = str(row.get("id") or "")
+                    if now - _EMAIL_LAST_POLL.get(key, 0.0) >= _EMAIL_POLL_SECONDS:
+                        _EMAIL_LAST_POLL[key] = now
+                        await _poll_email(store, row, token, reply)
             except Exception:
                 continue
         try:
@@ -771,6 +837,42 @@ async def _poll_telegram(store: Store, row: dict, token: str, reply) -> None:
         offset = nxt
         bump_offset(store, row["id"], offset)
         row["update_offset"] = offset
+
+
+async def handle_email_message(store: Store, row: dict, message: dict, token: str, reply) -> bool:
+    """One unread mail. Return False when it should be tried again later."""
+    sender = str(message.get("from_addr") or "").strip().lower()
+    if not sender or sender == str(row.get("mail_user") or "").strip().lower():
+        return True
+    if not admitted(row, sender):
+        log_event(store, "email", sender, "ignored")
+        return True
+    body = str(message.get("body_text") or "").strip()
+    decision = _EMAIL_DECISION.fullmatch(body)
+    if decision:
+        apply_callback(store, row, sender, f"ea:{decision.group(2)}:{decision.group(1).lower()}")
+        return True
+    if await _lane_holding(store, row.get("bot_id") or ""):
+        return False
+    if not take_inbound(store, row, sender, body, sender):
+        return True
+    answer = await reply(store, row.get("bot_id") or "")
+    if answer:
+        await asyncio.to_thread(
+            mailbridge.smtp_send, row, token, sender, _email_subject(answer), scrub(answer, store)
+        )
+        log_event(store, "email", sender, "sent")
+    return True
+
+
+async def _poll_email(store: Store, row: dict, token: str, reply) -> None:
+    """Read the unread mail, answer it, and mark it seen only once it is handled."""
+    messages = await asyncio.to_thread(mailbridge.fetch_unseen, row, token)
+    for message in messages:
+        handled = await handle_email_message(store, row, message, token, reply)
+        if not handled:
+            return
+        await asyncio.to_thread(mailbridge.mark_seen, row, token, message.get("uid"))
 
 
 _DISCORD: dict[str, asyncio.Task] = {}

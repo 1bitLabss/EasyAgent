@@ -618,6 +618,9 @@ class BridgeIn(BaseModel):
     bot_id: str = ""
     allow_ids: list[str] = Field(default_factory=list)
     token: str = ""
+    mail_user: str = ""
+    mail_imap_host: str = ""
+    mail_smtp_host: str = ""
 
 
 class WebhookIn(BaseModel):
@@ -633,6 +636,9 @@ class BridgePatch(BaseModel):
     enabled: bool | None = None
     allow_ids: list[str] | None = None
     token: str = ""
+    mail_user: str | None = None
+    mail_imap_host: str | None = None
+    mail_smtp_host: str | None = None
 
 
 class MemoryIn(BaseModel):
@@ -1396,6 +1402,9 @@ def create_app(data_dir: str | Path | None = None) -> FastAPI:
                 bot_id=body.bot_id,
                 allow_ids=body.allow_ids,
                 token=body.token,
+                mail_user=body.mail_user,
+                mail_imap_host=body.mail_imap_host,
+                mail_smtp_host=body.mail_smtp_host,
             )
         except StoreError as exc:
             raise HTTPException(exc.status, exc.message) from exc
@@ -1412,6 +1421,9 @@ def create_app(data_dir: str | Path | None = None) -> FastAPI:
                 enabled=body.enabled,
                 allow_ids=body.allow_ids,
                 token=body.token or None,
+                mail_user=body.mail_user,
+                mail_imap_host=body.mail_imap_host,
+                mail_smtp_host=body.mail_smtp_host,
             )
         except StoreError as exc:
             raise HTTPException(exc.status, exc.message) from exc
@@ -5893,11 +5905,11 @@ def _require_delivery_allowed(store: Store, bot_id: str, record: dict) -> None:
     """A routine delivery chat has to be on this bot's bridge allow list before it is saved."""
     kind = str(record.get("deliver") or "").strip().lower()
     target = str(record.get("deliver_chat") or "").strip()
-    if kind not in {"telegram", "discord", "slack"} or not target:
+    if kind not in {"telegram", "discord", "slack", "email"} or not target:
         return
     from easyagent.bridges import admitted, bridge_for
 
-    label = {"telegram": "Telegram", "discord": "Discord", "slack": "Slack"}[kind]
+    label = {"telegram": "Telegram", "discord": "Discord", "slack": "Slack", "email": "Email"}[kind]
     row = bridge_for(store, bot_id, kind)
     if row is None or not admitted(row, target):
         raise HTTPException(400, f"That chat is not on this bot's {label} allow list. The routine was not saved.")

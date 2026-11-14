@@ -276,7 +276,7 @@ def test_routine_posts_only_to_an_allowlisted_chat(tmp_path, monkeypatch):
     texts = [item.get("content") for item in store.get_chat(bot["id"], store.ongoing_chat(bot["id"])["id"])["messages"]]
     assert any("could not post to Telegram" in str(item) for item in texts)
     with pytest.raises(ScheduleError):
-        compile_routine({"name": "Bad", "prompt": "x", "daily": "8:00 AM", "deliver": "email", "deliver_chat": "42"})
+        compile_routine({"name": "Bad", "prompt": "x", "daily": "8:00 AM", "deliver": "carrier-pigeon", "deliver_chat": "42"})
     client.close()
 
 

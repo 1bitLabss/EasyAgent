@@ -1224,6 +1224,7 @@ function RoutineForm({ botId, onError }: { botId: string; onError: (message: str
             <option value="telegram">Telegram, allowlisted chat</option>
             <option value="discord">Discord, allowlisted chat</option>
             <option value="slack">Slack, allowlisted chat</option>
+            <option value="email">Email, allowlisted address</option>
           </select>
         </label>
         <Input name="deliver_chat" maxLength={40} placeholder="Allowlisted chat id, if you post out" />

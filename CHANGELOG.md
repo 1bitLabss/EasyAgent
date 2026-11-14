@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.3.58
+- Bots finish long work instead of waiting to be asked. A plan can be put in **keep-going** mode from a chip beside it: when a turn ends with steps left, the bot continues on its own up to a budget you can see ("Keep going 3/8") and stop any time. A continuation that makes no progress costs double, and running out says what is left instead of going quiet.
+- **Background workers.** A delegated task can run in the background: your turn ends clean, the worker keeps going, and its result arrives in the chat on its own and wakes the bot. Workers are recorded on disk — a restart settles them honestly ("The app restarted while this worker was running.") instead of losing them.
+- **Follow-ups.** A bot can schedule its own next step into the chat without an approval card — "I will check the build in 10 minutes." Up to three can wait, one minute to a day out, and one whose time passed while the app was down fires on start (or says it expired, if it waited too long). Real routines keep their confirm card as before.
+- Fixes: shared chat windows no longer drop plan updates; turn-context test suites no longer leak state into each other.
+
 ## 0.3.57
 - Slack is now a full channel. A bot can send to a Slack channel, listen to it, and put its approval cards right there — tapping Approve in Slack decides the card here. Scheduled routines can post their result to Slack beside Telegram and Discord.
 - Bots can reach email. Give a bot an IMAP/SMTP account and it reads unread mail from senders you allowlist, answers over SMTP, and takes approvals from a plain text reply: "approve <card id>" or "deny <card id>". Scheduled routines can mail their result to an allowlisted address too. Nothing new to install — email runs on the Python standard library.

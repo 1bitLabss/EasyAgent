@@ -88,6 +88,7 @@ _ROUTINE_ACTIONS = {
 _BROWSER_FENCE = re.compile(r"```browser[ \t]*\r?\n(.*?)```", re.DOTALL | re.IGNORECASE)
 _MCP_FENCE = re.compile(r"```mcp[ \t]*\r?\n(.*?)```", re.DOTALL | re.IGNORECASE)
 _BRIDGE_FENCE = re.compile(r"```bridge[ \t]*\r?\n(.*?)```", re.DOTALL | re.IGNORECASE)
+_IMAGE_FENCE = re.compile(r"```image[ \t]*\r?\n(.*?)```", re.DOTALL | re.IGNORECASE)
 _BROWSER_ACTIONS = {"open", "read", "click", "type", "select", "scroll", "back", "wait", "tabs", "download", "upload"}
 _HISTORY_FENCE = re.compile(r"```history[ \t]*\r?\n(.*?)```", re.DOTALL | re.IGNORECASE)
 _DELEGATE_FENCE = re.compile(r"```delegate[ \t]*\r?\n(.*?)```", re.DOTALL | re.IGNORECASE)
@@ -979,7 +980,7 @@ _KNOWN_TOOLS = (
     "execute_command", "run_command", "run_ssh", "run_windows", "connector",
     "create_routine", "edit_routine", "delete_routine", "duckduckgo",
     "save_file", "create_file", "list_directory", "ls", "reaction", "tapback",
-    "delegate_task", "skill",
+    "delegate_task", "skill", "image", "generate_image",
 )
 
 
@@ -1220,6 +1221,11 @@ def _request_from_call(data: dict) -> ToolRequest:
         if request is None:
             raise ToolError("Name the bridge, who receives it, and the message.")
         return request
+    if name in {"image", "generate_image"}:
+        picture = str(raw_args.get("prompt") or raw_args.get("message") or content or "").strip()
+        if not picture:
+            raise ToolError("Name the picture you want. Nothing was made.")
+        return ToolRequest(kind="image", body=picture[:1000])
     if name in {"fetch_page", "fetch"}:
         page = str(raw_args.get("url") or raw_args.get("href") or "").strip()
         if not page:
@@ -1659,6 +1665,14 @@ def _fetch_from_body(body: str) -> ToolRequest | None:
     return ToolRequest(kind="fetch", body=url[:500])
 
 
+def _image_from_body(body: str) -> ToolRequest | None:
+    """One picture request. The sample line in the prompt is not a call."""
+    prompt = " ".join((body or "").split())
+    if not prompt or prompt.lower() in {"the prompt", "prompt", "the picture you want"}:
+        return None
+    return ToolRequest(kind="image", body=prompt[:1000])
+
+
 def _research_from_body(body: str) -> ToolRequest | None:
     question = " ".join((body or "").split())
     if not question or question.lower() in {"the question", "question"}:
@@ -1763,6 +1777,7 @@ def parse_tools(text: str) -> list[ToolRequest]:
     take(_BROWSER_FENCE, _browser_from_body)
     take(_MCP_FENCE, _mcp_from_body)
     take(_BRIDGE_FENCE, _bridge_from_body)
+    take(_IMAGE_FENCE, _image_from_body)
     take(search_mod.FENCE_RE, _search_from_body)
     take(search_mod.FETCH_RE, _fetch_from_body)
     take(search_mod.RESEARCH_RE, _research_from_body)
@@ -3775,6 +3790,38 @@ async def _run_python(store: Store, request: ToolRequest, bot_id: str | None) ->
     return await _execute_now(store, ToolRequest(kind="shell", command=command, timeout=wait), bot_id)
 
 
+async def _run_image(store: Store, request: ToolRequest, bot_id: str | None) -> str:
+    """Make one picture and leave it where this turn's previews are read from."""
+    import uuid
+
+    from easyagent import imagegen
+
+    prompt = (request.body or "").strip()
+    if not prompt:
+        raise ToolError("Name the picture you want. Nothing was made.")
+    try:
+        data = await imagegen.generate_image(store, prompt)
+    except imagegen.ImageGenError as exc:
+        raise ToolError(str(exc)) from exc
+    except OSError as exc:
+        raise ToolError(f"The picture could not be saved. {exc}") from exc
+    if bot_id:
+        from easyagent.workspace import bot_workspace
+
+        folder = bot_workspace(store, bot_id, create=True)
+    else:
+        folder = default_deliverable_dir()
+    folder.mkdir(parents=True, exist_ok=True)
+    path = folder / f"image-{uuid.uuid4().hex[:8]}.png"
+    path.write_bytes(data)
+    note_turn_effect()
+    return (
+        f'Made a picture from "{prompt}".\n'
+        f"Wrote {display_path(path)}.\n"
+        "The person sees the picture in this chat."
+    )
+
+
 async def _run_ask_bot(store: Store, bot_id: str, name: str, message: str) -> str:
     from easyagent.app import _ask_named
 
@@ -3873,6 +3920,8 @@ async def _run_allowed_tool(store: Store, request: ToolRequest, bot_id: str | No
         text = await deliver(store, request, bot_id)
         turn_mod.raise_if_cancelled()
         return text
+    if request.kind == "image":
+        return await _run_image(store, request, bot_id)
     if request.kind == "browser":
         from easyagent.browser import note_vision_shot, perform
 
@@ -3994,6 +4043,9 @@ def happened_line(request: ToolRequest, messages: list[dict] | None = None, resu
         return f"Called {request.command} on {request.path}."
     if request.kind == "bridge":
         return "Sent a bridge message."
+    if request.kind == "image":
+        match = re.search(r"^Wrote (.+)\.$", result or "", re.MULTILINE)
+        return f"Wrote {match.group(1)}." if match else "Made a picture."
     if request.kind == "fetch":
         return "Fetched a page."
     if request.kind == "research":

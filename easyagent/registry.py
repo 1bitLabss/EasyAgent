@@ -50,6 +50,7 @@ _ALIASES = {
     "reaction": "react",
     "tapback": "react",
     "connector": "mcp",
+    "generate_image": "image",
     "create_routine": "routine",
     "edit_routine": "routine",
     "delete_routine": "routine",
@@ -78,6 +79,7 @@ _KIND_TOOLS = {
     "ask_bot": "ask_bot",
     "skill": "skill",
     "routine": "routine",
+    "image": "image",
 }
 
 

@@ -525,6 +525,15 @@ class TtsIn(BaseModel):
     voice: str = ""
 
 
+class ImageGenIn(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+    enabled: bool | None = None
+    base_url: str | None = None
+    api_key: str | None = None
+    model: str | None = None
+    size: str | None = None
+
+
 class TtsVoiceIn(BaseModel):
     model_config = ConfigDict(extra="ignore")
     voice: str = ""
@@ -1649,6 +1658,29 @@ def create_app(data_dir: str | Path | None = None) -> FastAPI:
         except ValueError:
             raise HTTPException(400, "That voice is not on the list.")
         return {"voice": get_voice(bot)}
+
+    @app.get("/api/imagegen")
+    def get_imagegen():
+        from easyagent.imagegen import load_config, public_config
+
+        return public_config(load_config(store))
+
+    @app.put("/api/imagegen")
+    def put_imagegen(body: ImageGenIn):
+        from easyagent.imagegen import load_config, public_config, save_config
+
+        try:
+            save_config(
+                store,
+                enabled=body.enabled,
+                base_url=body.base_url,
+                api_key=body.api_key,
+                model=body.model,
+                size=body.size,
+            )
+        except ValueError as exc:
+            raise HTTPException(400, str(exc))
+        return public_config(load_config(store))
 
     @app.post("/api/bots/{bot_id}/tts")
     def post_tts(bot_id: str, body: TtsIn):

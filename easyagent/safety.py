@@ -3422,7 +3422,7 @@ def classify(store: Store, request, bot_id: str | None) -> Verdict:
                 reach[:500],
                 _fp("own-server", reach[:180]),
             )
-    if kind in {"search", "fetch", "research", "question", "finish", "plan", "react", "memory", "history", "project"}:
+    if kind in {"search", "fetch", "research", "question", "finish", "plan", "react", "memory", "history", "project", "image"}:
         verdict = _verdict(ALLOW, kind or "meta", "That does not change the computer.", kind, _fp(kind, getattr(request, "body", "")[:80]))
     elif kind == "search_files":
         path = _file_request_path(store, getattr(request, "path", "") or ".", cwd, bot_id)

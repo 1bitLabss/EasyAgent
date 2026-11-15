@@ -7,6 +7,7 @@ change to the outbound path cannot quietly break the inbound route.
 
 import asyncio
 import json
+import time
 
 import httpx
 import pytest
@@ -15,6 +16,7 @@ from easyagent import bridges as bridges_mod
 from easyagent.bridges import (
     BridgeDenied,
     _send_card,
+    accept_webhook,
     add_bridge,
     deliver,
     post_allowlisted,
@@ -22,6 +24,7 @@ from easyagent.bridges import (
     remember_sender,
     update_bridge,
 )
+from easyagent.safety import Pending, _PENDING
 from easyagent.store import Store, StoreError
 from easyagent.tools import ToolError, ToolRequest, execute
 from tests.test_0335_channels import (
@@ -217,6 +220,105 @@ def test_card_without_post_url_behaves_as_before(tmp_path, monkeypatch):
     asyncio.run(_send_card(store, bot["id"], _Card()))
     assert len(posts) == 1
     assert "api.telegram.org" in posts[0]["url"]
+
+
+# --- inbound decision resolution (wave 3b) ------------------------------------------
+
+
+def _pending_card(bot, card_id):
+    return Pending(
+        id=card_id,
+        bot_id=bot["id"],
+        tier="ask",
+        rule="bridge-send",
+        why="That message goes to someone else.",
+        detail="webhook\nto: 7\nhi",
+        fingerprint="x",
+        exact="7",
+        offer_always=False,
+        created=time.time(),
+    )
+
+
+def test_a_forwarded_tap_resolves_the_pending_card(tmp_path):
+    store, bot = _store(tmp_path)
+    row = _webhook_bridge(store, bot, RELAY)
+    card = _pending_card(bot, "22222222-2222-2222-2222-222222222222")
+    _PENDING[card.id] = card
+
+    assert accept_webhook(store, row["id"], "ada", f"approve {card.id}", TOKEN) is True
+
+    assert card.decision == "approve"
+    assert card.event.is_set() is True
+    stored = store.ongoing_chat(bot["id"])
+    assert all(m["content"] != f"approve {card.id}" for m in stored["messages"])
+    log = json.loads((tmp_path / "bridge-log.json").read_text(encoding="utf-8"))
+    assert ("ada", "approve") in [(e["user_id"], e["decision"]) for e in log]
+
+
+def test_a_forwarded_deny_resolves_the_pending_card(tmp_path):
+    store, bot = _store(tmp_path)
+    row = _webhook_bridge(store, bot, RELAY)
+    card = _pending_card(bot, "33333333-3333-3333-3333-333333333333")
+    _PENDING[card.id] = card
+
+    assert accept_webhook(store, row["id"], "ada", f"deny {card.id}", TOKEN) is True
+
+    assert card.decision == "deny"
+    assert card.event.is_set() is True
+    stored = store.ongoing_chat(bot["id"])
+    assert all(m["content"] != f"deny {card.id}" for m in stored["messages"])
+
+
+def test_a_decision_with_extra_prose_stays_plain_chat(tmp_path):
+    """The decision line must be the whole message, like the email fullmatch."""
+    store, bot = _store(tmp_path)
+    row = _webhook_bridge(store, bot, RELAY)
+    card = _pending_card(bot, "44444444-4444-4444-4444-444444444444")
+    _PENDING[card.id] = card
+
+    assert accept_webhook(store, row["id"], "ada", f"approve {card.id} please", TOKEN) is True
+
+    assert card.event.is_set() is False
+    stored = store.ongoing_chat(bot["id"])
+    assert stored["messages"][-1]["content"] == f"approve {card.id} please"
+
+
+def test_a_strangers_tap_does_not_resolve_the_card(tmp_path):
+    store, bot = _store(tmp_path)
+    row = _webhook_bridge(store, bot, RELAY)
+    card = _pending_card(bot, "55555555-5555-5555-5555-555555555555")
+    _PENDING[card.id] = card
+
+    assert accept_webhook(store, row["id"], "stranger", f"approve {card.id}", TOKEN) is False
+    assert card.event.is_set() is False
+    stored = store.ongoing_chat(bot["id"])
+    assert all(m["content"] != f"approve {card.id}" for m in stored["messages"])
+    log = json.loads((tmp_path / "bridge-log.json").read_text(encoding="utf-8"))
+    assert ("stranger", "ignored") in [(e["user_id"], e["decision"]) for e in log]
+
+
+def test_a_tap_with_a_bad_token_still_resolves_nothing(tmp_path):
+    store, bot = _store(tmp_path)
+    row = _webhook_bridge(store, bot, RELAY)
+    card = _pending_card(bot, "66666666-6666-6666-6666-666666666666")
+    _PENDING[card.id] = card
+
+    assert accept_webhook(store, row["id"], "ada", f"approve {card.id}", "wrong-token") is False
+    assert card.event.is_set() is False
+
+
+def test_a_tap_for_a_card_that_is_not_pending_stays_plain_chat(tmp_path):
+    store, bot = _store(tmp_path)
+    row = _webhook_bridge(store, bot, RELAY)
+    card = _pending_card(bot, "77777777-7777-7777-7777-777777777777")
+    _PENDING[card.id] = card
+    card.decision = "deny"
+    card.event.set()
+
+    assert accept_webhook(store, row["id"], "ada", f"approve {card.id}", TOKEN) is True
+    stored = store.ongoing_chat(bot["id"])
+    assert stored["messages"][-1]["content"] == f"approve {card.id}"
 
 
 # --- failures surface ---------------------------------------------------------------

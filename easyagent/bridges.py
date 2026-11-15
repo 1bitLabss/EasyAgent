@@ -39,7 +39,7 @@ _LOG_CAP = 200
 _NOTIFIED: set[str] = set()
 _EMAIL_POLL_SECONDS = 30
 _EMAIL_LAST_POLL: dict[str, float] = {}
-_EMAIL_DECISION = re.compile(r"(approve|deny)\s+([0-9a-fA-F-]{36})", re.IGNORECASE)
+_DECISION = re.compile(r"(approve|deny)\s+([0-9a-fA-F-]{36})", re.IGNORECASE)
 
 
 def bridge_path(store: Store) -> Path:
@@ -291,6 +291,14 @@ def accept_webhook(store: Store, bridge_id: str, user_id: str, text: str, token:
     if not saved or not _same_secret(saved, token or ""):
         log_event(store, "webhook", user_id, "ignored")
         return False
+    decision = _DECISION.fullmatch(" ".join((text or "").split()))
+    if decision:
+        from easyagent import safety as safety_mod
+
+        waiting = safety_mod._PENDING.get(decision.group(2))
+        if waiting is None or not waiting.event.is_set():
+            if apply_callback(store, row, user_id, f"ea:{decision.group(2)}:{decision.group(1).lower()}"):
+                return True
     return take_inbound(store, row, user_id, text, user_id)
 
 
@@ -909,7 +917,7 @@ async def handle_email_message(store: Store, row: dict, message: dict, token: st
         log_event(store, "email", sender, "ignored")
         return True
     body = str(message.get("body_text") or "").strip()
-    decision = _EMAIL_DECISION.fullmatch(body)
+    decision = _DECISION.fullmatch(body)
     if decision:
         apply_callback(store, row, sender, f"ea:{decision.group(2)}:{decision.group(1).lower()}")
         return True

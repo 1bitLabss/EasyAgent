@@ -137,6 +137,26 @@ def inflight(scope: str | None = None) -> int:
         return _INFLIGHT.get(scope, 0)
 
 
+def running_children(store, bot_id: str, chat_id: str) -> int:
+    """How many children this chat has working right now.
+
+    A background worker holds its slot until it lands, so the per-chat inflight
+    counter and the running records in .children.json are two views of the same
+    set; the higher one wins. Keep-going parks while this is non-zero: the
+    child's result wakes the chat through the queue anyway, so a finish that
+    ends waiting should spend no continuation and count no stuck try.
+    """
+    count = inflight(str(chat_id or ""))
+    if store is not None:
+        recorded = sum(
+            1
+            for row in _read_children(children_path(store, bot_id, chat_id))
+            if str(row.get("state") or "") == "running"
+        )
+        count = max(count, recorded)
+    return count
+
+
 def _scope(bot_id: str | None) -> str:
     """The counter key: the parent chat when the turn has one, else the bot."""
     slot = turn_mod.current_slot()

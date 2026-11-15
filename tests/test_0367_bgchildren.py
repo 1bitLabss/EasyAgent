@@ -333,3 +333,113 @@ def test_background_result_wakes_the_parent_through_the_queue(tmp_path, monkeypa
         bg = [item for item in children if item.get("background")]
         assert bg and bg[0]["state"] == "done" and bg[0]["task_excerpt"] == "count the notes"
     reset_for_tests()
+
+
+def test_keep_going_parks_while_a_background_child_runs(tmp_path, monkeypatch):
+    """Keep-going parks while a background worker is in flight: a finish with
+    the plan still open spends no continuation and writes no close line — it
+    just goes idle. The child landing wakes the chat through the queue as
+    normal, and the run is parked, not stopped."""
+    import httpx
+
+    from easyagent.delegate import (
+        _settle_bg_child,
+        deliver_bg_result,
+        register_bg_child,
+        running_children,
+    )
+    from easyagent.tools import execute
+
+    reset_for_tests()
+    tape = [
+        "The first step is done.\n\n```finish\nproven\nGathered the sources.\n```",
+        "Thanks — the notes are counted.",
+    ]
+    calls = []
+
+    async def fake_complete(*, messages, **kwargs):
+        calls.append(messages)
+        return tape.pop(0) if tape else "Nothing else is owed."
+
+    monkeypatch.setattr("easyagent.llm.complete", fake_complete)
+
+    async def scene():
+        app = create_app(tmp_path)
+        store = app.state.store
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+            endpoint = (
+                await client.post(
+                    "/api/endpoints", json={"name": "local", "base_url": "http://127.0.0.1:9/v1"}
+                )
+            ).json()
+            bot = (
+                await client.post("/api/bots", json={"name": "Ada", "endpoint_id": endpoint["id"]})
+            ).json()
+            chat = (await client.post(f"/api/bots/{bot['id']}/chats")).json()
+            bot_id, chat_id = bot["id"], chat["id"]
+            turn_mod.bind(store, chat_id, bot_id=bot_id)
+            await execute(
+                store,
+                ToolRequest(
+                    kind="plan",
+                    action="set",
+                    body="Notes\n- Gather sources\n- Write the summary\n- Send it",
+                ),
+                bot_id,
+            )
+            await execute(store, ToolRequest(kind="plan", action="step", path="1", command="done"), bot_id)
+            turn_mod.slot_for(store, chat_id).worker = None
+
+            # A background worker is in flight for this chat.
+            register_bg_child(store, bot_id, chat_id, "bg1", "count the notes")
+            assert running_children(store, bot_id, chat_id) == 1
+
+            sent = await client.post(
+                f"/api/bots/{bot_id}/chats/{chat_id}/messages", json={"content": "do the job"}
+            )
+            assert sent.status_code == 200, sent.text
+            deadline = time.time() + 10
+            while time.time() < deadline and turn_mod.slot_for(store, chat_id).busy:
+                await asyncio.sleep(0.05)
+            assert not turn_mod.slot_for(store, chat_id).busy, "the parked turn never went idle"
+
+            # Parked: no continuation fired, no close line, keep-going still armed.
+            plan_data = plan.load_plan(store, bot_id, chat_id)
+            assert plan_data["keep_going"] is True
+            assert int(plan_data.get("continued") or 0) == 0
+            assert int(plan_data.get("stuck") or 0) == 0
+            blob = " | ".join(
+                str(m.get("content") or "")
+                for m in (store.get_chat(bot_id, chat_id).get("messages") or [])
+            )
+            assert "Keep going:" not in blob
+            assert "no progress" not in blob and "Say continue" not in blob
+
+            # The child lands: the real delivery path wakes the chat.
+            _settle_bg_child(store, bot_id, chat_id, "bg1", "done", "found 3 notes")
+            assert running_children(store, bot_id, chat_id) == 0
+            deliver_bg_result(
+                store, bot_id, chat_id, "Background worker finished: count the notes. Result: found 3 notes"
+            )
+            deadline = time.time() + 10
+            woke = ""
+            while time.time() < deadline:
+                woke = " | ".join(
+                    str(m.get("content") or "")
+                    for m in (store.get_chat(bot_id, chat_id).get("messages") or [])
+                )
+                if "Thanks — the notes are counted." in woke:
+                    break
+                await asyncio.sleep(0.05)
+            assert "Background worker finished: count the notes" in woke, "the child result never woke the chat"
+            assert "Thanks — the notes are counted." in woke
+
+            # The run was parked, not stopped: keep-going is still armed and
+            # nothing was consumed while the worker ran.
+            plan_data = plan.load_plan(store, bot_id, chat_id)
+            assert plan_data["keep_going"] is True
+            assert int(plan_data.get("continued") or 0) == 0
+
+    asyncio.run(scene())
+    reset_for_tests()

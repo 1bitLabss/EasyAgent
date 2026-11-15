@@ -8,6 +8,7 @@ the same turn can fold it in.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 from datetime import datetime, timezone
@@ -181,6 +182,23 @@ def next_unfinished(plan: dict | None) -> str:
     return ""
 
 
+def plan_digest(plan: dict | None) -> str:
+    """A stable digest of the plan's steps: ids, states, and texts in order.
+
+    The keep-going witness uses it to tell a productive continuation from a
+    stall. Hermes' judge is semantic; this deterministic proxy must not punish
+    productive churn — reopening a done step, adding a subtask, or reordering
+    is progress even when the open count holds. A continuation that changes
+    nothing at all leaves the digest untouched.
+    """
+    steps = [
+        [str(step.get("id") or ""), str(step.get("state") or ""), str(step.get("text") or "")]
+        for step in ((plan or {}).get("steps") or [])
+        if isinstance(step, dict)
+    ]
+    return hashlib.sha256(json.dumps(steps).encode("utf-8")).hexdigest()
+
+
 def budget_left(plan: dict | None) -> int:
     """Continuations still allowed before the hard cap. Zero when keep-going is off."""
     if not isinstance(plan, dict) or not plan.get("keep_going"):
@@ -240,15 +258,17 @@ def auto_arm_keep_going(plan: dict) -> dict:
 
 
 def note_continuation(
-    store: Store, bot_id, chat_id: str, *, mark: int | None = None, stuck: int | None = None
+    store: Store, bot_id, chat_id: str, *, mark: object = None, stuck: int | None = None
 ) -> None:
-    """Stamp one continuation. Record the todo count it ended on and the stuck count."""
+    """Stamp one continuation. Record the plan digest it ended on (plan_digest:
+    a continuation whose digest comes back identical changed nothing, which is
+    what a stall means) and the stuck count after it."""
     plan = load_plan(store, bot_id, chat_id)
     if not plan:
         return
     plan["continued"] = int(plan.get("continued") or 0) + 1
     if mark is not None:
-        plan["keep_going_mark"] = int(mark)
+        plan["keep_going_mark"] = str(mark)
     if stuck is not None:
         plan["stuck"] = int(stuck)
     plan["updated_at"] = now_iso()

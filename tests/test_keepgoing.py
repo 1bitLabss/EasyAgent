@@ -2,9 +2,12 @@
 
 Keep-going runs until the plan is done or it clearly stalls. After a finish
 while the plan still has todo steps, the harness runs one continuation turn
-with a plain-voice nudge. Two continuations in a row that end with the same
-todo count stop the run with an honest close line; any progress resets that
-counter. A hard cap of KEEP_GOING_HARD_CAP continuations is a runaway backstop.
+with a plain-voice nudge. Two continuations in a row that end with the plan
+truly unchanged stop the run with an honest close line; any progress resets
+that counter. Progress is a smaller open count OR any change to the plan
+itself: reopening a done step, adding a subtask, or reordering is productive
+churn, witnessed by a digest of the steps list (ids, states, texts). A hard
+cap of KEEP_GOING_HARD_CAP continuations is a runaway backstop.
 Stop, a new message during a continuation, or a finished plan turns it off.
 """
 
@@ -15,6 +18,7 @@ import time
 
 import httpx
 
+from easyagent import plan as plan_mod
 from easyagent import turn as turn_mod
 from easyagent.app import _finish_turn, create_app
 from easyagent.plan import KEEP_GOING_HARD_CAP, _write_plan, budget_left, load_plan, set_keep_going
@@ -213,6 +217,74 @@ def test_progress_between_no_progress_tries_resets_the_counter(tmp_path, monkeyp
         assert plan["continued"] == 4
         # The last try was a no-progress one, but not in a row: stuck sits at 1.
         assert int(plan.get("stuck") or 0) == 1
+
+    asyncio.run(scenario())
+
+
+def _churn_reply(done_n: int, reopen_n: int) -> str:
+    """A continuation that marks one step done and reopens another: the open
+    count does not move, but the plan changed — productive churn, not a stall."""
+    return (
+        f"```plan\nstep\n{done_n}\ndone\n```\n"
+        f"```plan\nstep\n{reopen_n}\ntodo\n```\n"
+        f"Step {done_n} is done; step {reopen_n} needs another pass.\n\n"
+        f"```finish\nproven\nRevised the plan.\n```"
+    )
+
+
+def _grow_reply() -> str:
+    """A continuation that adds a subtask and finishes two steps: the open
+    count stays 2, but the plan grew and moved."""
+    return (
+        "```plan\nNotes\n- Gather sources\n- Verify the numbers\n- Write the summary\n- Send it\n```\n"
+        "```plan\nstep\n1\ndone\n```\n"
+        "```plan\nstep\n2\ndone\n```\n"
+        "Added a subtask and finished two steps.\n\n"
+        "```finish\nproven\nGrew the plan.\n```"
+    )
+
+
+def test_reopening_a_step_counts_as_progress(tmp_path, monkeypatch):
+    """(o) plan mutation is progress: two continuations that reopen a done step
+    while the open count holds at 2 keep going; the old count-only rule stalled."""
+
+    async def scenario():
+        store, bot, chat, recorder = await _world(
+            tmp_path, monkeypatch,
+            [FINISH, _churn_reply(2, 1), _churn_reply(3, 2), "Idle."], keep=6,
+        )
+        lines = _lines(store, bot["id"], chat["id"])
+        assert not any(STALL in line for line in lines)
+        assert len(_nudges(store, bot["id"], chat["id"])) == 3
+        plan = load_plan(store, bot["id"], chat["id"])
+        assert plan["keep_going"] is True
+        assert plan["continued"] == 3
+        assert int(plan.get("stuck") or 0) == 0
+        # The mark stored is the plan digest, not the bare open count.
+        assert plan["keep_going_mark"] == plan_mod.plan_digest(plan)
+
+    asyncio.run(scenario())
+
+
+def test_adding_a_subtask_counts_as_progress(tmp_path, monkeypatch):
+    """(p) a continuation that grows the plan (new subtask, steps finished,
+    open count unchanged) is progress, not a stall."""
+
+    async def scenario():
+        store, bot, chat, recorder = await _world(
+            tmp_path, monkeypatch,
+            [FINISH, _grow_reply(), _churn_reply(3, 1), "Idle."], keep=6,
+        )
+        lines = _lines(store, bot["id"], chat["id"])
+        assert not any(STALL in line for line in lines)
+        assert len(_nudges(store, bot["id"], chat["id"])) == 3
+        plan = load_plan(store, bot["id"], chat["id"])
+        assert plan["keep_going"] is True
+        # The set inside the first continuation re-armed the run (a plan set
+        # resets the counters), so two stamps remain from that point on.
+        assert plan["continued"] == 2
+        assert int(plan.get("stuck") or 0) == 0
+        assert plan_mod.unfinished(plan) == 2
 
     asyncio.run(scenario())
 

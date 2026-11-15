@@ -8589,6 +8589,13 @@ async def run_turn(
             if not left:
                 plan_mod.set_keep_going(store, bot_id, chat_id, on=False)
                 return ""
+            # Park while background workers are in flight. The child's result
+            # wakes this chat through the queue anyway, so a finish that ends
+            # waiting spends no continuation and counts no stuck try.
+            from easyagent import delegate as delegate_mod
+
+            if delegate_mod.running_children(store, bot_id, chat_id):
+                return ""
             cap = int(plan.get("budget") or plan_mod.KEEP_GOING_HARD_CAP)
             if int(plan.get("continued") or 0) >= cap:
                 plan_mod.set_keep_going(store, bot_id, chat_id, on=False)
@@ -8596,8 +8603,13 @@ async def run_turn(
             seam = turn_mod.current_slot()
             if seam is None:
                 return ""
-            no_progress = bool(getattr(seam, "keep_going_turn", False)) and left == int(
-                plan.get("keep_going_mark") or -1
+            # Progress is a smaller open count or any change to the plan:
+            # reopening a step, adding a subtask, or reordering is productive
+            # churn, not a stall. The digest of the steps list is the witness;
+            # only a continuation that changes nothing at all counts as stuck.
+            digest = plan_mod.plan_digest(plan)
+            no_progress = bool(getattr(seam, "keep_going_turn", False)) and digest == str(
+                plan.get("keep_going_mark") or ""
             )
             # Progress resets the stuck counter; two no-progress tries in a row stop.
             stuck = int(plan.get("stuck") or 0) + 1 if no_progress else 0
@@ -8607,7 +8619,7 @@ async def run_turn(
                     f"Stopped: two tries in a row made no progress. {left} steps left. "
                     "Say continue to keep going."
                 )
-            plan_mod.note_continuation(store, bot_id, chat_id, mark=left, stuck=stuck)
+            plan_mod.note_continuation(store, bot_id, chat_id, mark=digest, stuck=stuck)
             seam.keep_going_nudge = (
                 f"Keep going: the plan still has {left} steps. Next: {plan_mod.next_unfinished(plan)}."
             )

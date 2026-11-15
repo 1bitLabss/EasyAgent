@@ -288,10 +288,10 @@ def test_system_prompt_stays_under_eight_thousand_characters(monkeypatch):
     from easyagent.prompt import _shell_note, build_system
 
     text = build_system(bot_name="Ada", direction="", summary="", skills_text="", workspace="/tmp/work")
-    # The shared prompt stays under 8650 (raised from 8000 for the browser
+    # The shared prompt stays under 8670 (raised from 8000 for the browser
     # credential, upload, and long-task lines, then again for the image tool
-    # block); the shell note is extra.
-    assert len(text) - len(_shell_note()) <= 8650
+    # block, then again for the keep-going stall line); the shell note is extra.
+    assert len(text) - len(_shell_note()) <= 8670
     monkeypatch.setattr(sys, "platform", "win32")
     assert len(_shell_note()) <= 400
     assert "Never say you can't" not in text

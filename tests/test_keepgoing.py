@@ -1,9 +1,11 @@
 """Keep-going: a finish that leaves steps on the plan continues the chat on its own.
 
-The person turns keep-going on once. After that, when a turn ends on `finish`
+Keep-going runs until the plan is done or it clearly stalls. After a finish
 while the plan still has todo steps, the harness runs one continuation turn
-with a plain-voice nudge, up to the budget. Stop, a new message during a
-continuation, the budget, or a finished plan turn it back off.
+with a plain-voice nudge. Two continuations in a row that end with the same
+todo count stop the run with an honest close line; any progress resets that
+counter. A hard cap of KEEP_GOING_HARD_CAP continuations is a runaway backstop.
+Stop, a new message during a continuation, or a finished plan turns it off.
 """
 
 from __future__ import annotations
@@ -15,11 +17,12 @@ import httpx
 
 from easyagent import turn as turn_mod
 from easyagent.app import _finish_turn, create_app
-from easyagent.plan import KEEP_GOING_BUDGET, budget_left, load_plan
+from easyagent.plan import KEEP_GOING_HARD_CAP, _write_plan, budget_left, load_plan, set_keep_going
 from easyagent.tools import ToolRequest, execute, parse_tool
 
 NUDGE = "Keep going: the plan still has 2 steps. Next: Write the summary."
-CLOSE = "Stopped at the budget: 2 steps left. Say continue to keep going."
+STALL = "Stopped: two tries in a row made no progress. 2 steps left. Say continue to keep going."
+CAP = "Stopped after 40 goes: 2 steps left. Say continue."
 FINISH = "The first step is done.\n\n```finish\nproven\nGathered the sources.\n```"
 
 
@@ -42,6 +45,14 @@ def _checklist_reply(m):
     return "The summary is drafted and sent.\n\n```finish\nproven\nWrote and sent it.\n```"
 
 
+def _progress_reply(n: int) -> str:
+    """A continuation that marks step n done, then finishes: real progress."""
+    return (
+        f"```plan\nstep\n{n}\ndone\n```\nStep {n} is done.\n\n"
+        f"```finish\nproven\nFinished step {n}.\n```"
+    )
+
+
 DONE = "The summary is drafted and sent."
 
 
@@ -58,11 +69,12 @@ async def _settle(store, chat_id, timeout=10.0):
 
 
 async def _world(tmp_path, monkeypatch, tape, *, keep=None, content="do the job",
-                 plan_body="Notes\n- Gather sources\n- Write the summary\n- Send it"):
+                 plan_body="Notes\n- Gather sources\n- Write the summary\n- Send it",
+                 continued=0):
     """A chat with a 3-step plan, step 1 done, and keep-going set as asked.
 
     plan_body=None skips the pre-made checklist, for tests where the bot builds
-    the plan inside the turn.
+    the plan inside the turn. continued pre-stamps the counter before the send.
     """
     recorder = Recorder(tape)
     monkeypatch.setattr("easyagent.llm.complete", recorder)
@@ -91,6 +103,10 @@ async def _world(tmp_path, monkeypatch, tape, *, keep=None, content="do the job"
             await execute(store, ToolRequest(kind="plan", action="step", path="1", command="done"), bot["id"])
         if keep is not None:
             await execute(store, ToolRequest(kind="plan", action="keep", command=str(keep)), bot["id"])
+        if continued:
+            stamped = load_plan(store, bot["id"], chat["id"])
+            stamped["continued"] = continued
+            _write_plan(store, bot["id"], chat["id"], stamped)
         # bind() above claimed this task as the chat's worker. The send must own the next turn.
         turn_mod.slot_for(store, chat["id"]).worker = None
         sent = await client.post(
@@ -130,41 +146,124 @@ def test_finish_with_steps_left_schedules_one_continuation(tmp_path, monkeypatch
         assert any(NUDGE in str(m.get("content") or "") for m in recorder.seen[-1])
         plan = load_plan(store, bot["id"], chat["id"])
         assert plan["continued"] == 1
-        assert plan["budget"] == 6
-        assert budget_left(plan) == 5
-        # The first turn's answer is unchanged: no budget line while budget remains.
-        assert not any(CLOSE in line for line in _lines(store, bot["id"], chat["id"]))
+        # The number on the fence is ignored: the budget field carries the hard cap.
+        assert plan["budget"] == KEEP_GOING_HARD_CAP
+        assert budget_left(plan) == KEEP_GOING_HARD_CAP - 1
+        # The first turn's answer is unchanged: no close line while the run continues.
+        assert not any(STALL in line for line in _lines(store, bot["id"], chat["id"]))
 
     asyncio.run(scenario())
 
 
-def test_budget_exhausted_closes_honestly_once(tmp_path, monkeypatch):
-    """(b) budget spent: no further continuation, the honest close line exactly once."""
+def test_ten_progressing_continuations_all_fire(tmp_path, monkeypatch):
+    """(b) progress-based stopping: 10 progressing continuations all fire (old code stopped at 8)."""
+
+    async def scenario():
+        steps = "\n".join(f"- Step {n}" for n in range(1, 13))
+        tape = [FINISH] + [_progress_reply(n) for n in range(2, 12)]
+        store, bot, chat, recorder = await _world(
+            tmp_path, monkeypatch, tape + ["All done."],
+            plan_body="Notes\n" + steps,
+        )
+        assert len(_nudges(store, bot["id"], chat["id"])) == 11
+        assert len(recorder.seen) == 12
+        plan = load_plan(store, bot["id"], chat["id"])
+        assert plan["keep_going"] is True
+        # 10 progressing continuations fired (plus the first turn's stamp).
+        assert plan["continued"] == 11
+        assert int(plan.get("stuck") or 0) == 0
+        assert not any(STALL in line for line in _lines(store, bot["id"], chat["id"]))
+        assert not any(CAP in line for line in _lines(store, bot["id"], chat["id"]))
+
+    asyncio.run(scenario())
+
+
+def test_two_no_progress_tries_stop_with_the_stall_line(tmp_path, monkeypatch):
+    """(c) two consecutive no-progress continuations: the stall line once, no third continuation."""
 
     async def scenario():
         store, bot, chat, recorder = await _world(
-            tmp_path, monkeypatch, [FINISH, _checklist_reply], keep=1
+            tmp_path, monkeypatch, [FINISH, FINISH, FINISH, "Idle."], keep=6
         )
         lines = _lines(store, bot["id"], chat["id"])
-        assert sum(1 for line in lines if CLOSE in line) == 1
-        # One continuation ran (the one that hit the wall), and no nudge followed it.
-        assert len(_nudges(store, bot["id"], chat["id"])) == 1
-        assert len(recorder.seen) == 2
+        assert sum(1 for line in lines if STALL in line) == 1
+        # Two continuations ran; the second no-progress try closed the run, no nudge after it.
+        assert len(_nudges(store, bot["id"], chat["id"])) == 2
+        assert len(recorder.seen) == 3
         plan = load_plan(store, bot["id"], chat["id"])
         assert plan["keep_going"] is False
-        assert plan["continued"] == 1
+        assert plan["continued"] == 2
+
+    asyncio.run(scenario())
+
+
+def test_progress_between_no_progress_tries_resets_the_counter(tmp_path, monkeypatch):
+    """(d) no-progress, progress, no-progress: the stuck counter resets, the run keeps going."""
+
+    async def scenario():
+        store, bot, chat, recorder = await _world(
+            tmp_path, monkeypatch, [FINISH, FINISH, _progress_reply(2), FINISH, "Idle."], keep=6
+        )
+        lines = _lines(store, bot["id"], chat["id"])
+        assert not any(STALL in line for line in lines)
+        assert len(_nudges(store, bot["id"], chat["id"])) == 4
+        assert len(recorder.seen) == 5
+        plan = load_plan(store, bot["id"], chat["id"])
+        assert plan["keep_going"] is True
+        assert plan["continued"] == 4
+        # The last try was a no-progress one, but not in a row: stuck sits at 1.
+        assert int(plan.get("stuck") or 0) == 1
+
+    asyncio.run(scenario())
+
+
+def test_hard_cap_closes_honestly_once(tmp_path, monkeypatch):
+    """(e) the hard cap is a backstop: at 40 goes the run closes with the cap line."""
+
+    async def scenario():
+        store, bot, chat, recorder = await _world(
+            tmp_path, monkeypatch, [FINISH, "Idle."], continued=KEEP_GOING_HARD_CAP
+        )
+        lines = _lines(store, bot["id"], chat["id"])
+        assert sum(1 for line in lines if CAP in line) == 1
+        assert not _nudges(store, bot["id"], chat["id"])
+        assert len(recorder.seen) == 1
+        plan = load_plan(store, bot["id"], chat["id"])
+        assert plan["keep_going"] is False
+        assert plan["continued"] == KEEP_GOING_HARD_CAP
+
+    asyncio.run(scenario())
+
+
+def test_continue_after_a_stall_rearms_with_counters_reset(tmp_path, monkeypatch):
+    """(f) after a stall, turning keep-going back on resets continued and the stuck counter."""
+
+    async def scenario():
+        store, bot, chat, recorder = await _world(
+            tmp_path, monkeypatch, [FINISH, FINISH, FINISH, "Idle."], keep=6
+        )
+        stalled = load_plan(store, bot["id"], chat["id"])
+        assert stalled["keep_going"] is False
+        assert stalled["continued"] == 2
+        # The person says continue: the same re-arm the chip and the fence use.
+        set_keep_going(store, bot["id"], chat["id"], on=True)
+        plan = load_plan(store, bot["id"], chat["id"])
+        assert plan["keep_going"] is True
+        assert plan["continued"] == 0
+        assert int(plan.get("stuck") or 0) == 0
+        assert budget_left(plan) == KEEP_GOING_HARD_CAP
 
     asyncio.run(scenario())
 
 
 def test_keep_going_off_is_today_behavior(tmp_path, monkeypatch):
-    """(c) opt-out: keep off (by the person or the bot) makes a finish go idle."""
+    """(g) opt-out: keep off (by the person or the bot) makes a finish go idle."""
 
     async def scenario():
         store, bot, chat, recorder = await _world(tmp_path, monkeypatch, [FINISH], keep="off")
         assert len(recorder.seen) == 1
         assert not _nudges(store, bot["id"], chat["id"])
-        assert not any(CLOSE in line for line in _lines(store, bot["id"], chat["id"]))
+        assert not any(STALL in line for line in _lines(store, bot["id"], chat["id"]))
         plan = load_plan(store, bot["id"], chat["id"])
         assert not plan.get("keep_going")
         assert int(plan.get("continued") or 0) == 0
@@ -174,7 +273,7 @@ def test_keep_going_off_is_today_behavior(tmp_path, monkeypatch):
 
 
 def test_stop_during_a_continuation_cancels_further_continuations(tmp_path, monkeypatch):
-    """(d) Stop wins: the pending continuation is dropped and keep-going turns off."""
+    """(h) Stop wins: the pending continuation is dropped and keep-going turns off."""
 
     async def scenario():
         recorder = Recorder([FINISH])
@@ -214,26 +313,8 @@ def test_stop_during_a_continuation_cancels_further_continuations(tmp_path, monk
     asyncio.run(scenario())
 
 
-def test_no_progress_continuation_costs_two(tmp_path, monkeypatch):
-    """(e) a continuation that ends with the same todo count costs the budget double."""
-
-    async def scenario():
-        # Turn 1 finishes with 2 steps left. The continuation finishes with the
-        # same 2 left: no progress, so it costs 2 of the budget of 4.
-        store, bot, chat, recorder = await _world(
-            tmp_path, monkeypatch, [FINISH, FINISH, "Nothing else is owed."], keep=4
-        )
-        plan = load_plan(store, bot["id"], chat["id"])
-        assert plan["continued"] == 3
-        assert budget_left(plan) == 1
-        assert len(_nudges(store, bot["id"], chat["id"])) == 2
-        assert len(recorder.seen) == 3
-
-    asyncio.run(scenario())
-
-
 def test_plan_fence_toggles_keep_going(tmp_path):
-    """(f) the plan fence gains a sibling action: keep / keep off / keep <number>."""
+    """(i) the plan fence gains a sibling action: keep / keep off / keep <number>."""
     from fastapi.testclient import TestClient
 
     fastapi_app = create_app(tmp_path)
@@ -258,8 +339,9 @@ def test_plan_fence_toggles_keep_going(tmp_path):
     ))
     said = asyncio.run(execute(store, ToolRequest(kind="plan", action="keep", command="3"), bot["id"]))
     plan = load_plan(store, bot["id"], chat["id"])
-    assert plan["keep_going"] is True and plan["budget"] == 3 and plan["continued"] == 0
-    assert "up to 3 times" in said
+    # A number is accepted but ignored: the run ends on progress, not on a count.
+    assert plan["keep_going"] is True and plan["budget"] == KEEP_GOING_HARD_CAP and plan["continued"] == 0
+    assert "stalls twice in a row" in said
     asyncio.run(execute(store, ToolRequest(kind="plan", action="keep", command="off"), bot["id"]))
     assert load_plan(store, bot["id"], chat["id"])["keep_going"] is False
     app.close()
@@ -285,14 +367,14 @@ def test_plan_payload_exposes_keep_going_fields(tmp_path):
     ))
     public = app.get(f"/api/bots/{bot['id']}/chats/{chat['id']}").json()
     plan = public["plan"]
-    # A 2-step plan arms keep-going by default at the default budget.
+    # A 2-step plan arms keep-going by default at the hard cap.
     assert plan["keep_going"] is True
     assert plan["continued"] == 0
-    assert plan["budget"] == KEEP_GOING_BUDGET
+    assert plan["budget"] == KEEP_GOING_HARD_CAP
     asyncio.run(execute(store, ToolRequest(kind="plan", action="keep", command="5"), bot["id"]))
     public = app.get(f"/api/bots/{bot['id']}/chats/{chat['id']}").json()
     assert public["plan"]["keep_going"] is True
-    assert public["plan"]["budget"] == 5
+    assert public["plan"]["budget"] == KEEP_GOING_HARD_CAP
     app.close()
 
 
@@ -322,13 +404,14 @@ def test_plan_keep_route_toggles(tmp_path):
     assert turned_on.status_code == 200
     plan = turned_on.json()["plan"]
     assert plan["keep_going"] is True
-    assert plan["budget"] >= 1
+    assert plan["budget"] == KEEP_GOING_HARD_CAP
     assert plan["continued"] == 0
 
+    # A budget number is accepted and ignored: the cap is the cap.
     with_budget = app.post(
         f"/api/bots/{bot['id']}/chats/{chat['id']}/plan/keep", json={"on": True, "budget": 3}
     )
-    assert with_budget.json()["plan"]["budget"] == 3
+    assert with_budget.json()["plan"]["budget"] == KEEP_GOING_HARD_CAP
 
     turned_off = app.post(f"/api/bots/{bot['id']}/chats/{chat['id']}/plan/keep", json={"on": False})
     assert turned_off.json()["plan"]["keep_going"] is False
@@ -352,7 +435,7 @@ def _bare_world(tmp_path):
 
 
 def test_multi_step_plan_autoarms_without_a_tap(tmp_path):
-    """(g) a 3-step plan created during a task arms keep-going by itself."""
+    """(j) a 3-step plan created during a task arms keep-going by itself."""
     app, store, bot, chat = _bare_world(tmp_path)
     asyncio.run(execute(
         store,
@@ -361,14 +444,14 @@ def test_multi_step_plan_autoarms_without_a_tap(tmp_path):
     ))
     plan = load_plan(store, bot["id"], chat["id"])
     assert plan["keep_going"] is True
-    assert plan["budget"] == KEEP_GOING_BUDGET
+    assert plan["budget"] == KEEP_GOING_HARD_CAP
     assert plan["continued"] == 0
     assert not plan.get("keep_off_by_user")
     app.close()
 
 
 def test_single_step_plan_does_not_autoarm(tmp_path):
-    """(h) one step is not multi-step work: no auto-arm."""
+    """(k) one step is not multi-step work: no auto-arm."""
     app, store, bot, chat = _bare_world(tmp_path)
     asyncio.run(execute(
         store,
@@ -382,7 +465,7 @@ def test_single_step_plan_does_not_autoarm(tmp_path):
 
 
 def test_stop_blocks_rearming_on_later_plan_edits(tmp_path):
-    """(i) the person tapped stop in this plan: later plan edits do not re-arm."""
+    """(l) the person tapped stop in this plan: later plan edits do not re-arm."""
     app, store, bot, chat = _bare_world(tmp_path)
     asyncio.run(execute(
         store,
@@ -408,7 +491,7 @@ def test_stop_blocks_rearming_on_later_plan_edits(tmp_path):
 
 
 def test_keep_on_again_clears_the_off_flag_and_rearms(tmp_path):
-    """(j) the person taps keep on: the off-flag clears and later edits re-arm."""
+    """(m) the person taps keep on: the off-flag clears and later edits re-arm."""
     app, store, bot, chat = _bare_world(tmp_path)
     asyncio.run(execute(
         store,
@@ -429,12 +512,12 @@ def test_keep_on_again_clears_the_off_flag_and_rearms(tmp_path):
     ))
     plan = load_plan(store, bot["id"], chat["id"])
     assert plan["keep_going"] is True
-    assert plan["budget"] == KEEP_GOING_BUDGET
+    assert plan["budget"] == KEEP_GOING_HARD_CAP
     app.close()
 
 
 def test_plan_created_during_a_task_continues_without_a_tap(tmp_path, monkeypatch):
-    """(k) end to end: the bot makes a 3-step plan mid-task and keeps going on its own."""
+    """(n) end to end: the bot makes a 3-step plan mid-task and keeps going on its own."""
     fence = "```plan\nNotes\n- Gather sources\n- Write the summary\n- Send it\n```"
     first = fence + "\nStep one is done.\n\n```finish\nproven\nGathered the sources.\n```"
 
@@ -444,7 +527,7 @@ def test_plan_created_during_a_task_continues_without_a_tap(tmp_path, monkeypatc
         )
         plan = load_plan(store, bot["id"], chat["id"])
         assert plan["keep_going"] is True
-        assert plan["budget"] == KEEP_GOING_BUDGET
+        assert plan["budget"] == KEEP_GOING_HARD_CAP
         assert plan["continued"] == 1
         nudges = _nudges(store, bot["id"], chat["id"])
         assert len(nudges) == 1

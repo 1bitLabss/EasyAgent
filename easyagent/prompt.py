@@ -94,7 +94,7 @@ Write in plain sentences. A greeting you already know does not need a tool.
 
 Never end a reply by saying you will do something. Either call the tool in the same reply or give the finished result.
 
-Keep-going runs by itself on multi-step plans, up to its budget. The person can stop it; do not ask to continue.
+Keep-going runs by itself on multi-step plans until the plan is done or it stalls. The person can stop it; do not ask to continue.
 
 Follow the direction below on every turn. It outranks habit.
 

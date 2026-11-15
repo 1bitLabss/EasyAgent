@@ -25,10 +25,11 @@ STUCK_SECONDS = 90
 MAX_STEPS = 12
 MAX_STEP = 160
 MAX_TITLE = 80
-# Keep-going: how many times the harness may continue a plan on its own
-# when the person turns it on without naming a number.
-KEEP_GOING_BUDGET = 8
-KEEP_GOING_MAX_BUDGET = 24
+# Keep-going: the harness continues a plan on its own until the work is done or
+# it stalls. The cap is a runaway backstop, not a cap on total work. A run stops
+# when KEEP_GOING_STUCK_LIMIT continuations in a row end with no progress.
+KEEP_GOING_HARD_CAP = 40
+KEEP_GOING_STUCK_LIMIT = 2
 
 _STATES = {"todo", "doing", "done"}
 _SECRET = re.compile(
@@ -181,10 +182,11 @@ def next_unfinished(plan: dict | None) -> str:
 
 
 def budget_left(plan: dict | None) -> int:
-    """Continuations still allowed. Zero when keep-going is off or the budget is spent."""
+    """Continuations still allowed before the hard cap. Zero when keep-going is off."""
     if not isinstance(plan, dict) or not plan.get("keep_going"):
         return 0
-    return max(0, int(plan.get("budget") or 0) - int(plan.get("continued") or 0))
+    cap = int(plan.get("budget") or KEEP_GOING_HARD_CAP)
+    return max(0, cap - int(plan.get("continued") or 0))
 
 
 def set_keep_going(
@@ -193,8 +195,10 @@ def set_keep_going(
     """Turn the keep-going engine on or off for this chat's plan. Missing fields read as off.
 
     A turn-off by the person (Stop, or the chip) also sets keep_off_by_user, so a
-    later plan edit does not re-arm it. The budget running out is not the person
-    opting out. Turning it back on clears the flag.
+    later plan edit does not re-arm it. A stall or the hard cap is not the person
+    opting out. Turning it back on clears the flag and resets the counters. The
+    budget parameter is accepted for compatibility and ignored: the run ends on
+    progress, not on a count.
     """
     plan = load_plan(store, bot_id, chat_id)
     if not plan:
@@ -203,8 +207,9 @@ def set_keep_going(
         return plan
     if on:
         plan["keep_going"] = True
-        plan["budget"] = max(1, min(int(budget or KEEP_GOING_BUDGET), KEEP_GOING_MAX_BUDGET))
+        plan["budget"] = KEEP_GOING_HARD_CAP
         plan["continued"] = 0
+        plan["stuck"] = 0
         plan["keep_going_mark"] = 0
         plan["keep_off_by_user"] = False
     else:
@@ -220,27 +225,32 @@ def auto_arm_keep_going(plan: dict) -> dict:
     """Multi-step plans keep going by default; the person's stop is the opt-out.
 
     Called whenever a plan is created or gains steps. Two or more open steps arm
-    the engine at the default budget, unless the person stopped it in this plan.
+    the engine at the hard cap, unless the person stopped it in this plan.
     """
     if plan.get("keep_off_by_user"):
         return plan
     steps = [step for step in plan.get("steps") or [] if isinstance(step, dict)]
     if len(steps) >= 2:
         plan["keep_going"] = True
-        plan["budget"] = KEEP_GOING_BUDGET
+        plan["budget"] = KEEP_GOING_HARD_CAP
         plan["continued"] = 0
+        plan["stuck"] = 0
         plan["keep_going_mark"] = 0
     return plan
 
 
-def note_continuation(store: Store, bot_id, chat_id: str, *, cost: int = 1, mark: int | None = None) -> None:
-    """Stamp one continuation against the budget. A no-progress turn costs double."""
+def note_continuation(
+    store: Store, bot_id, chat_id: str, *, mark: int | None = None, stuck: int | None = None
+) -> None:
+    """Stamp one continuation. Record the todo count it ended on and the stuck count."""
     plan = load_plan(store, bot_id, chat_id)
     if not plan:
         return
-    plan["continued"] = int(plan.get("continued") or 0) + max(1, int(cost))
+    plan["continued"] = int(plan.get("continued") or 0) + 1
     if mark is not None:
         plan["keep_going_mark"] = int(mark)
+    if stuck is not None:
+        plan["stuck"] = int(stuck)
     plan["updated_at"] = now_iso()
     _write_plan(store, bot_id, chat_id, plan)
 
@@ -426,6 +436,7 @@ def _steps_from_lines(store: Store, title: str, lines: list[str]) -> dict:
         "keep_going": False,
         "continued": 0,
         "budget": 0,
+        "stuck": 0,
     }
 
 
@@ -496,7 +507,7 @@ def prompt_block(plan: dict | None) -> str:
     body = describe(plan)
     if plan.get("keep_going"):
         body += (
-            f"\nKeep-going is on: continuation {int(plan.get('continued') or 0)} of "
+            f"\nKeep-going is on: continuation {int(plan.get('continued') or 0)} of up to "
             f"{int(plan.get('budget') or 0)} for this goal."
         )
     # The person's own request is already their message. Recording that copy as
@@ -625,7 +636,7 @@ def _apply_step(store: Store, bot_id: str, chat_id: str, request) -> str:
 
 
 def _apply_keep(store: Store, bot_id: str, chat_id: str, request) -> str:
-    """Turn keep-going on or off. A number sets the budget: how many times it may continue itself."""
+    """Turn keep-going on or off. A number is accepted and ignored: the run ends on progress, not a count."""
     choice = " ".join(str(getattr(request, "command", "") or getattr(request, "body", "") or "").split()).lower()
     plan = load_plan(store, bot_id, chat_id)
     if not plan or not plan.get("steps"):
@@ -633,23 +644,17 @@ def _apply_keep(store: Store, bot_id: str, chat_id: str, request) -> str:
     if choice in {"off", "no", "stop", "false"}:
         set_keep_going(store, bot_id, chat_id, on=False, by_user=True)
         return "Keep-going is off. The job was not restarted."
-    budget = None
-    if choice and choice not in {"on", "yes", "true"}:
-        if not choice.isdigit():
-            raise PlanError("Keep-going takes on, off, or a number of times. Nothing was changed.")
-        budget = int(choice)
-    saved = set_keep_going(store, bot_id, chat_id, on=True, budget=budget)
+    if choice and choice not in {"on", "yes", "true"} and not choice.isdigit():
+        raise PlanError("Keep-going takes on, off, or a number of times. Nothing was changed.")
+    saved = set_keep_going(store, bot_id, chat_id, on=True)
     if saved is None:
         raise PlanError("There is no checklist to keep going on. Nothing was changed.")
     left = unfinished(saved)
     if not left:
-        return (
-            f"Keep-going is on, up to {saved.get('budget')} times. "
-            "Every step is done, so there is nothing to continue."
-        )
+        return "Keep-going is on. Every step is done, so there is nothing to continue."
     return (
-        f"Keep-going is on, up to {saved.get('budget')} times. "
-        f"The plan still has {left} steps. Stop turns it off."
+        f"Keep-going is on. The plan still has {left} steps. "
+        "It runs until the plan is done or it stalls twice in a row. Stop turns it off."
     )
 
 

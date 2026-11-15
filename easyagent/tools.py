@@ -8572,8 +8572,10 @@ async def run_turn(
     def _keep_going_stamp() -> str:
         """Keep-going: a finish that leaves steps on the plan continues the chat on its own.
 
-        Returns the honest close line when the budget is spent. Otherwise it stamps
-        one continuation and leaves the nudge line on the slot for the harness to run.
+        Returns the honest close line when the plan stalls (two tries in a row
+        that end with the same todo count) or the hard cap is hit. Otherwise it
+        stamps one continuation and leaves the nudge line on the slot for the
+        harness to run.
         """
         if store is None or not bot_id or not chat_id:
             return ""
@@ -8587,17 +8589,25 @@ async def run_turn(
             if not left:
                 plan_mod.set_keep_going(store, bot_id, chat_id, on=False)
                 return ""
-            if plan_mod.budget_left(plan) <= 0:
+            cap = int(plan.get("budget") or plan_mod.KEEP_GOING_HARD_CAP)
+            if int(plan.get("continued") or 0) >= cap:
                 plan_mod.set_keep_going(store, bot_id, chat_id, on=False)
-                return f"Stopped at the budget: {left} steps left. Say continue to keep going."
+                return f"Stopped after {cap} goes: {left} steps left. Say continue."
             seam = turn_mod.current_slot()
             if seam is None:
                 return ""
-            cost = 1
-            if getattr(seam, "keep_going_turn", False) and left == int(plan.get("keep_going_mark") or -1):
-                # This continuation ended with the same todo count it started with.
-                cost = 2
-            plan_mod.note_continuation(store, bot_id, chat_id, cost=cost, mark=left)
+            no_progress = bool(getattr(seam, "keep_going_turn", False)) and left == int(
+                plan.get("keep_going_mark") or -1
+            )
+            # Progress resets the stuck counter; two no-progress tries in a row stop.
+            stuck = int(plan.get("stuck") or 0) + 1 if no_progress else 0
+            if stuck >= plan_mod.KEEP_GOING_STUCK_LIMIT:
+                plan_mod.set_keep_going(store, bot_id, chat_id, on=False)
+                return (
+                    f"Stopped: two tries in a row made no progress. {left} steps left. "
+                    "Say continue to keep going."
+                )
+            plan_mod.note_continuation(store, bot_id, chat_id, mark=left, stuck=stuck)
             seam.keep_going_nudge = (
                 f"Keep going: the plan still has {left} steps. Next: {plan_mod.next_unfinished(plan)}."
             )

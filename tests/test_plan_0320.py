@@ -356,18 +356,20 @@ def test_retry_while_busy_is_refused(tmp_path):
 
 
 def test_new_plan_defaults_keep_going_on(tmp_path):
-    """A fresh multi-step checklist arms keep-going by default at the default budget."""
+    """A fresh multi-step checklist arms keep-going by default at the hard cap."""
+    from easyagent.plan import KEEP_GOING_HARD_CAP
+
     app, client, bot, chat = _client(tmp_path)
     store = app.state.store
     _checklist(store, bot["id"], chat["id"])
     plan = load_plan(store, bot["id"], chat["id"])
     assert plan["keep_going"] is True
     assert plan["continued"] == 0
-    assert plan["budget"] == 8
+    assert plan["budget"] == KEEP_GOING_HARD_CAP
     public = client.get(f"/api/bots/{bot['id']}/chats/{chat['id']}").json()
     assert public["plan"]["keep_going"] is True
     assert public["plan"]["continued"] == 0
-    assert public["plan"]["budget"] == 8
+    assert public["plan"]["budget"] == KEEP_GOING_HARD_CAP
     client.close()
 
 

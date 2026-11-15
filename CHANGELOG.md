@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.3.59
+- Keep-going now runs until the work is done or it truly stalls. The old budget counted continuations; now a continuation that changes the plan at all — finishing a step, reopening one, adding a subtask — counts as progress and buys another turn. Only two continuations in a row that change nothing close the run, and the run says what is left. When the cap is reached, the chat says "Send continue" instead of going quiet.
+- Keep-going arms itself. A bot that makes a multi-step plan starts keeping going on its own — nothing to declare. The chip still lets you stop it, and your stop sticks.
+- While background workers are running, keep-going waits instead of burning turns: the parent rests until a worker reports back, so a long job with helpers no longer spends its continuations watching.
+- Bots can make pictures. A bot can draw an image from a text prompt and send it into the chat. Where pictures come from is set in Settings beside the other connections.
+- Webhook bridges can talk to a relay. A bot can send a message or an approval card out through your relay, and a tap you make on the relay comes back and decides the card here — approvals from your phone without a full channel.
+
 ## 0.3.58
 - Bots finish long work instead of waiting to be asked. A plan can be put in **keep-going** mode from a chip beside it: when a turn ends with steps left, the bot continues on its own up to a budget you can see ("Keep going 3/8") and stop any time. A continuation that makes no progress costs double, and running out says what is left instead of going quiet.
 - **Background workers.** A delegated task can run in the background: your turn ends clean, the worker keeps going, and its result arrives in the chat on its own and wakes the bot. Workers are recorded on disk — a restart settles them honestly ("The app restarted while this worker was running.") instead of losing them.

@@ -187,22 +187,49 @@ def budget_left(plan: dict | None) -> int:
     return max(0, int(plan.get("budget") or 0) - int(plan.get("continued") or 0))
 
 
-def set_keep_going(store: Store, bot_id: str, chat_id: str, *, on: bool, budget: int | None = None) -> dict | None:
-    """Turn the keep-going engine on or off for this chat's plan. Missing fields read as off."""
+def set_keep_going(
+    store: Store, bot_id: str, chat_id: str, *, on: bool, budget: int | None = None, by_user: bool = False
+) -> dict | None:
+    """Turn the keep-going engine on or off for this chat's plan. Missing fields read as off.
+
+    A turn-off by the person (Stop, or the chip) also sets keep_off_by_user, so a
+    later plan edit does not re-arm it. The budget running out is not the person
+    opting out. Turning it back on clears the flag.
+    """
     plan = load_plan(store, bot_id, chat_id)
     if not plan:
         return None
-    if not on and not plan.get("keep_going"):
+    if not on and not plan.get("keep_going") and not (by_user and not plan.get("keep_off_by_user")):
         return plan
     if on:
         plan["keep_going"] = True
         plan["budget"] = max(1, min(int(budget or KEEP_GOING_BUDGET), KEEP_GOING_MAX_BUDGET))
         plan["continued"] = 0
         plan["keep_going_mark"] = 0
+        plan["keep_off_by_user"] = False
     else:
         plan["keep_going"] = False
+        if by_user:
+            plan["keep_off_by_user"] = True
     plan["updated_at"] = now_iso()
     _write_plan(store, bot_id, chat_id, plan)
+    return plan
+
+
+def auto_arm_keep_going(plan: dict) -> dict:
+    """Multi-step plans keep going by default; the person's stop is the opt-out.
+
+    Called whenever a plan is created or gains steps. Two or more open steps arm
+    the engine at the default budget, unless the person stopped it in this plan.
+    """
+    if plan.get("keep_off_by_user"):
+        return plan
+    steps = [step for step in plan.get("steps") or [] if isinstance(step, dict)]
+    if len(steps) >= 2:
+        plan["keep_going"] = True
+        plan["budget"] = KEEP_GOING_BUDGET
+        plan["continued"] = 0
+        plan["keep_going_mark"] = 0
     return plan
 
 
@@ -543,6 +570,10 @@ def apply_plan(store: Store, bot_id: str, request) -> str:
     if action == "step":
         return _apply_step(store, bot_id, chat_id, request)
     plan = _parse_set_body(store, getattr(request, "body", "") or "")
+    old = load_plan(store, bot_id, chat_id)
+    if old and old.get("keep_off_by_user"):
+        plan["keep_off_by_user"] = True
+    auto_arm_keep_going(plan)
     _save(store, bot_id, chat_id, plan)
     index, total, label = progress(plan)
     return f"Checklist saved. Step {index} of {total}: {label}. The job was not restarted."
@@ -600,7 +631,7 @@ def _apply_keep(store: Store, bot_id: str, chat_id: str, request) -> str:
     if not plan or not plan.get("steps"):
         raise PlanError("There is no checklist to keep going on. Nothing was changed.")
     if choice in {"off", "no", "stop", "false"}:
-        set_keep_going(store, bot_id, chat_id, on=False)
+        set_keep_going(store, bot_id, chat_id, on=False, by_user=True)
         return "Keep-going is off. The job was not restarted."
     budget = None
     if choice and choice not in {"on", "yes", "true"}:

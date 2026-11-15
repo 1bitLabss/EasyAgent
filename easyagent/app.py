@@ -2131,7 +2131,7 @@ def create_app(data_dir: str | Path | None = None) -> FastAPI:
         from easyagent.plan import set_keep_going
 
         store.get_chat(bot_id, chat_id)
-        plan = set_keep_going(store, bot_id, chat_id, on=body.on, budget=body.budget)
+        plan = set_keep_going(store, bot_id, chat_id, on=body.on, budget=body.budget, by_user=True)
         if plan is None:
             raise HTTPException(404, "This chat has no plan yet.")
         return _public_chat(store, store.get_chat(bot_id, chat_id))
@@ -6282,7 +6282,7 @@ async def _finish_turn(store: Store, bot_id: str, chat_id: str) -> None:
             nudge = ""
             release_hold_for_send(store, bot_id, chat_id)
             # Stop is the person taking the wheel. Keep-going waits for them to ask again.
-            set_keep_going(store, bot_id, chat_id, on=False)
+            set_keep_going(store, bot_id, chat_id, on=False, by_user=True)
             _force_clear_running(store, bot_id, chat_id, "you pressed Stop")
         else:
             _park_side_answer(store, bot_id, chat_id)

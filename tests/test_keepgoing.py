@@ -15,7 +15,7 @@ import httpx
 
 from easyagent import turn as turn_mod
 from easyagent.app import _finish_turn, create_app
-from easyagent.plan import budget_left, load_plan
+from easyagent.plan import KEEP_GOING_BUDGET, budget_left, load_plan
 from easyagent.tools import ToolRequest, execute, parse_tool
 
 NUDGE = "Keep going: the plan still has 2 steps. Next: Write the summary."
@@ -57,7 +57,13 @@ async def _settle(store, chat_id, timeout=10.0):
     raise AssertionError("the chat never went idle")
 
 
-async def _world(tmp_path, monkeypatch, tape, *, keep=None, content="do the job"):
+async def _world(tmp_path, monkeypatch, tape, *, keep=None, content="do the job",
+                 plan_body="Notes\n- Gather sources\n- Write the summary\n- Send it"):
+    """A chat with a 3-step plan, step 1 done, and keep-going set as asked.
+
+    plan_body=None skips the pre-made checklist, for tests where the bot builds
+    the plan inside the turn.
+    """
     recorder = Recorder(tape)
     monkeypatch.setattr("easyagent.llm.complete", recorder)
     app = create_app(tmp_path)
@@ -72,16 +78,17 @@ async def _world(tmp_path, monkeypatch, tape, *, keep=None, content="do the job"
         bot = (await client.post("/api/bots", json={"name": "Ada", "endpoint_id": endpoint["id"]})).json()
         chat = (await client.post(f"/api/bots/{bot['id']}/chats")).json()
         turn_mod.bind(store, chat["id"], bot_id=bot["id"])
-        await execute(
-            store,
-            ToolRequest(
-                kind="plan",
-                action="set",
-                body="Notes\n- Gather sources\n- Write the summary\n- Send it",
-            ),
-            bot["id"],
-        )
-        await execute(store, ToolRequest(kind="plan", action="step", path="1", command="done"), bot["id"])
+        if plan_body:
+            await execute(
+                store,
+                ToolRequest(
+                    kind="plan",
+                    action="set",
+                    body=plan_body,
+                ),
+                bot["id"],
+            )
+            await execute(store, ToolRequest(kind="plan", action="step", path="1", command="done"), bot["id"])
         if keep is not None:
             await execute(store, ToolRequest(kind="plan", action="keep", command=str(keep)), bot["id"])
         # bind() above claimed this task as the chat's worker. The send must own the next turn.
@@ -151,10 +158,10 @@ def test_budget_exhausted_closes_honestly_once(tmp_path, monkeypatch):
 
 
 def test_keep_going_off_is_today_behavior(tmp_path, monkeypatch):
-    """(c) default off: a finish with steps left just goes idle. Nothing new happens."""
+    """(c) opt-out: keep off (by the person or the bot) makes a finish go idle."""
 
     async def scenario():
-        store, bot, chat, recorder = await _world(tmp_path, monkeypatch, [FINISH])
+        store, bot, chat, recorder = await _world(tmp_path, monkeypatch, [FINISH], keep="off")
         assert len(recorder.seen) == 1
         assert not _nudges(store, bot["id"], chat["id"])
         assert not any(CLOSE in line for line in _lines(store, bot["id"], chat["id"]))
@@ -278,9 +285,10 @@ def test_plan_payload_exposes_keep_going_fields(tmp_path):
     ))
     public = app.get(f"/api/bots/{bot['id']}/chats/{chat['id']}").json()
     plan = public["plan"]
-    assert plan["keep_going"] is False
+    # A 2-step plan arms keep-going by default at the default budget.
+    assert plan["keep_going"] is True
     assert plan["continued"] == 0
-    assert plan["budget"] == 0
+    assert plan["budget"] == KEEP_GOING_BUDGET
     asyncio.run(execute(store, ToolRequest(kind="plan", action="keep", command="5"), bot["id"]))
     public = app.get(f"/api/bots/{bot['id']}/chats/{chat['id']}").json()
     assert public["plan"]["keep_going"] is True
@@ -325,3 +333,121 @@ def test_plan_keep_route_toggles(tmp_path):
     turned_off = app.post(f"/api/bots/{bot['id']}/chats/{chat['id']}/plan/keep", json={"on": False})
     assert turned_off.json()["plan"]["keep_going"] is False
     app.close()
+
+
+def _bare_world(tmp_path):
+    """An app with one chat, no plan yet."""
+    from fastapi.testclient import TestClient
+
+    fastapi_app = create_app(tmp_path)
+    app = TestClient(fastapi_app)
+    store = fastapi_app.state.store
+    endpoint = app.post(
+        "/api/endpoints", json={"name": "local", "base_url": "http://127.0.0.1:9/v1"}
+    ).json()
+    bot = app.post("/api/bots", json={"name": "Ada", "endpoint_id": endpoint["id"]}).json()
+    chat = app.post(f"/api/bots/{bot['id']}/chats").json()
+    turn_mod.bind(store, chat["id"], bot_id=bot["id"])
+    return app, store, bot, chat
+
+
+def test_multi_step_plan_autoarms_without_a_tap(tmp_path):
+    """(g) a 3-step plan created during a task arms keep-going by itself."""
+    app, store, bot, chat = _bare_world(tmp_path)
+    asyncio.run(execute(
+        store,
+        ToolRequest(kind="plan", action="set", body="Notes\n- Gather sources\n- Write the summary\n- Send it"),
+        bot["id"],
+    ))
+    plan = load_plan(store, bot["id"], chat["id"])
+    assert plan["keep_going"] is True
+    assert plan["budget"] == KEEP_GOING_BUDGET
+    assert plan["continued"] == 0
+    assert not plan.get("keep_off_by_user")
+    app.close()
+
+
+def test_single_step_plan_does_not_autoarm(tmp_path):
+    """(h) one step is not multi-step work: no auto-arm."""
+    app, store, bot, chat = _bare_world(tmp_path)
+    asyncio.run(execute(
+        store,
+        ToolRequest(kind="plan", action="set", body="Notes\n- Gather sources"),
+        bot["id"],
+    ))
+    plan = load_plan(store, bot["id"], chat["id"])
+    assert not plan.get("keep_going")
+    assert int(plan.get("budget") or 0) == 0
+    app.close()
+
+
+def test_stop_blocks_rearming_on_later_plan_edits(tmp_path):
+    """(i) the person tapped stop in this plan: later plan edits do not re-arm."""
+    app, store, bot, chat = _bare_world(tmp_path)
+    asyncio.run(execute(
+        store,
+        ToolRequest(kind="plan", action="set", body="Notes\n- Write the summary\n- Send it"),
+        bot["id"],
+    ))
+    assert load_plan(store, bot["id"], chat["id"])["keep_going"] is True
+    turned_off = app.post(f"/api/bots/{bot['id']}/chats/{chat['id']}/plan/keep", json={"on": False})
+    assert turned_off.status_code == 200
+    plan = load_plan(store, bot["id"], chat["id"])
+    assert plan["keep_going"] is False
+    assert plan.get("keep_off_by_user") is True
+    # A later plan edit (steps gained) must not re-arm over the person's stop.
+    asyncio.run(execute(
+        store,
+        ToolRequest(kind="plan", action="set", body="Notes\n- Write the summary\n- Send it\n- Archive it"),
+        bot["id"],
+    ))
+    plan = load_plan(store, bot["id"], chat["id"])
+    assert plan["keep_going"] is False
+    assert plan.get("keep_off_by_user") is True
+    app.close()
+
+
+def test_keep_on_again_clears_the_off_flag_and_rearms(tmp_path):
+    """(j) the person taps keep on: the off-flag clears and later edits re-arm."""
+    app, store, bot, chat = _bare_world(tmp_path)
+    asyncio.run(execute(
+        store,
+        ToolRequest(kind="plan", action="set", body="Notes\n- Write the summary\n- Send it"),
+        bot["id"],
+    ))
+    app.post(f"/api/bots/{bot['id']}/chats/{chat['id']}/plan/keep", json={"on": False})
+    assert load_plan(store, bot["id"], chat["id"]).get("keep_off_by_user") is True
+    turned_on = app.post(f"/api/bots/{bot['id']}/chats/{chat['id']}/plan/keep", json={"on": True})
+    plan = turned_on.json()["plan"]
+    assert plan["keep_going"] is True
+    assert not plan.get("keep_off_by_user")
+    # Re-arming is back: a fresh multi-step set arms at the default budget.
+    asyncio.run(execute(
+        store,
+        ToolRequest(kind="plan", action="set", body="Notes\n- Write the summary\n- Send it\n- Archive it"),
+        bot["id"],
+    ))
+    plan = load_plan(store, bot["id"], chat["id"])
+    assert plan["keep_going"] is True
+    assert plan["budget"] == KEEP_GOING_BUDGET
+    app.close()
+
+
+def test_plan_created_during_a_task_continues_without_a_tap(tmp_path, monkeypatch):
+    """(k) end to end: the bot makes a 3-step plan mid-task and keeps going on its own."""
+    fence = "```plan\nNotes\n- Gather sources\n- Write the summary\n- Send it\n```"
+    first = fence + "\nStep one is done.\n\n```finish\nproven\nGathered the sources.\n```"
+
+    async def scenario():
+        store, bot, chat, recorder = await _world(
+            tmp_path, monkeypatch, [first, DONE], plan_body=None
+        )
+        plan = load_plan(store, bot["id"], chat["id"])
+        assert plan["keep_going"] is True
+        assert plan["budget"] == KEEP_GOING_BUDGET
+        assert plan["continued"] == 1
+        nudges = _nudges(store, bot["id"], chat["id"])
+        assert len(nudges) == 1
+        assert "3 steps" in nudges[0]["content"]
+
+    asyncio.run(scenario())

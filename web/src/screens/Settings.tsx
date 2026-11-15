@@ -106,6 +106,81 @@ function VoiceBlock() {
   );
 }
 
+type ImageGenSettings = { enabled: boolean; base_url: string; model: string; size: string; has_key: boolean };
+
+/** Picture making talks to one image service the person runs or subscribes to.
+ * The key never comes back from the server, so the form only shows whether one
+ * is saved; leaving the box blank keeps the key already there. */
+export function ImageGenBlock() {
+  const settings = useQuery({ queryKey: ["imagegen"], queryFn: () => api<ImageGenSettings>("/api/imagegen") });
+  const [enabled, setEnabled] = useState(false);
+  const [baseUrl, setBaseUrl] = useState("");
+  const [model, setModel] = useState("");
+  const [size, setSize] = useState("");
+  const [key, setKey] = useState("");
+  const [error, setError] = useState("");
+  const [saved, setSaved] = useState("");
+
+  useEffect(() => {
+    if (!settings.data) return;
+    setEnabled(settings.data.enabled);
+    setBaseUrl(settings.data.base_url);
+    setModel(settings.data.model);
+    setSize(settings.data.size);
+    setKey("");
+    setError("");
+    setSaved("");
+  }, [settings.data]);
+
+  async function save() {
+    setError("");
+    setSaved("");
+    const body: Record<string, unknown> = { enabled, base_url: baseUrl, model, size };
+    if (key.trim()) body.api_key = key.trim();
+    try {
+      await api("/api/imagegen", { method: "PUT", json: body });
+      await queryClient.invalidateQueries({ queryKey: ["imagegen"] });
+      setSaved("Image settings saved.");
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "The image settings were not saved.");
+    }
+  }
+
+  return (
+    <section id="imagegen" className="space-y-3 rounded-lg border border-border bg-card p-4">
+      <h2 className="text-sm font-medium">Image generation</h2>
+      <p className="text-xs text-muted">Lets a bot make a picture from your words. Add the image address and the model name from the service you use. The key stays on this computer.</p>
+      <label className="flex items-center justify-between gap-3 text-sm" data-testid="imagegen-enabled-row">
+        <span>Make pictures</span>
+        <Switch checked={enabled} aria-label="Make pictures" onCheckedChange={setEnabled} />
+      </label>
+      <label className="block text-sm">Image address
+        <Input className="mt-1" data-testid="imagegen-base-url" value={baseUrl} placeholder="http://127.0.0.1:8000/v1" onChange={(event) => setBaseUrl(event.target.value)} />
+      </label>
+      <label className="block text-sm">Model name
+        <Input className="mt-1" data-testid="imagegen-model" value={model} placeholder="the model the service answers to" onChange={(event) => setModel(event.target.value)} />
+      </label>
+      <label className="block text-sm">Picture size
+        <Input className="mt-1 max-w-[10rem]" data-testid="imagegen-size" value={size} onChange={(event) => setSize(event.target.value)} />
+      </label>
+      <label className="block text-sm">Key
+        <Input
+          className="mt-1"
+          type="password"
+          autoComplete="off"
+          data-testid="imagegen-key"
+          value={key}
+          placeholder={settings.data?.has_key ? "Saved — type to replace" : "only if the service asks"}
+          onChange={(event) => setKey(event.target.value)}
+        />
+      </label>
+      <Button type="button" data-testid="imagegen-save" onClick={() => void save()}>Save image settings</Button>
+      {saved ? <p className="text-sm" role="status">{saved}</p> : null}
+      {error ? <p className="text-sm text-danger" role="alert">{error}</p> : null}
+    </section>
+  );
+}
+
 function Block({ id, title, children }: { id?: string; title: string; children: ReactNode }) {
   return (
     <section id={id} className="space-y-3 rounded-lg border border-border bg-card p-4">
@@ -641,6 +716,7 @@ export function SettingsScreen() {
         <GlobalYolo />
         <CopyDiagnostics />
         <VoiceBlock />
+        <ImageGenBlock />
         <section>
           <h1 className="text-2xl font-semibold">Pick a bot first.</h1>
           <p className="mt-2 text-sm text-muted">The rest of Settings belongs to one bot. Chats are not changed here.</p>
@@ -680,6 +756,7 @@ export function SettingsScreen() {
         <GlobalYolo />
         <CopyDiagnostics />
         <VoiceBlock />
+        <ImageGenBlock />
       </div>
       <header className="px-6 py-5">
         <p className="text-xs uppercase tracking-wide text-muted">Bot settings</p>

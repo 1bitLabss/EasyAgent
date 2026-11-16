@@ -30,6 +30,11 @@ self.addEventListener("fetch", (event) => {
         caches.open(CACHE).then((cache) => cache.put(event.request, copy));
       }
       return response;
-    }).catch(() => caches.match(event.request)),
+    }).catch(() => {
+      // The installed app opens /?pair=<token> offline, but the shell cache only
+      // holds "/". Any failed navigation falls back to the cached shell.
+      if (event.request.mode === "navigate") return caches.match("/");
+      return caches.match(event.request);
+    }),
   );
 });

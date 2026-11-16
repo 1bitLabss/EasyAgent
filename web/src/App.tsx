@@ -36,7 +36,19 @@ export function App() {
   const botId = useApp((state) => state.botId);
   const jobsOpen = useApp((state) => state.jobsOpen);
   const selectBot = useApp((state) => state.selectBot);
-  const bots = useQuery({ queryKey: ["bots"], queryFn: () => api<Bot[]>("/api/bots") });
+  const bots = useQuery({
+    queryKey: ["bots"],
+    // A phone on the wrong Wi-Fi hangs instead of refusing; fail fast so the
+    // friendly "can't reach" state shows instead of an endless "Loading bots…".
+    queryFn: () =>
+      Promise.race([
+        api<Bot[]>("/api/bots"),
+        new Promise<never>((_, reject) =>
+          window.setTimeout(() => reject(new Error("EasyAgent did not answer.")), 8000),
+        ),
+      ]),
+    retry: false,
+  });
   useUnreadWatch();
 
   useLayoutEffect(() => {
@@ -97,11 +109,21 @@ export function App() {
   return (
     <div className="app-frame flex h-full flex-col bg-background text-foreground">
       {offline ? <p className="bg-danger px-3 py-1 text-sm text-white">{offline}</p> : null}
-      {bots.isError ? <p className="px-3 py-2 text-sm text-danger" role="alert">{(bots.error as Error).message}</p> : null}
       <div className="app-body flex min-h-0 flex-1">
         <aside className="app-rail w-20 shrink-0"><Sidebar /></aside>
         <main className="relative flex min-h-0 min-w-0 flex-1 flex-col">
-          {bots.isLoading ? <p className="p-6 text-sm text-muted">Loading bots…</p> : screen === "room" ? <RoomPane /> : <ChatPane />}
+          {bots.isError ? (
+            <div className="flex min-h-0 flex-1 flex-col items-center justify-center gap-3 p-6 text-center" data-testid="unreachable">
+              <p className="text-sm text-muted">Can't reach EasyAgent. Make sure the app is running and this phone is on the right Wi-Fi.</p>
+              <button
+                type="button"
+                className="rounded-full border border-border px-4 py-2 text-sm"
+                onClick={() => void bots.refetch()}
+              >
+                Try again
+              </button>
+            </div>
+          ) : bots.isLoading ? <p className="p-6 text-sm text-muted">Loading bots…</p> : screen === "room" ? <RoomPane /> : <ChatPane />}
           {screen !== "chat" && screen !== "room" ? <Sheet title={sheetTitle} onClose={() => setScreen("chat")}>{main}</Sheet> : null}
         </main>
         {jobsOpen ? <JobsPanel /> : null}

@@ -25,11 +25,13 @@ from easyagent.access import (
     token_matches,
 )
 
-FIREWALL_HINT = (
-    "Windows Defender Firewall, Advanced settings, Inbound Rules: "
-    "allow TCP port 44721 from the local subnet. "
-    "The button adds that rule when you agree."
-)
+def firewall_hint(port: int) -> str:
+    """The firewall instruction must name the port actually in use, not a fixed one."""
+    return (
+        "Windows Defender Firewall, Advanced settings, Inbound Rules: "
+        f"allow TCP port {int(port)} from the local subnet. "
+        "The button adds that rule when you agree."
+    )
 
 
 def device_name(user_agent: str) -> str:
@@ -190,7 +192,7 @@ def status_payload(phone: PhoneBook, port: int, *, listening: bool) -> dict:
         "pair_url": url,
         "listening": listening,
         "devices": phone.public_devices(),
-        "firewall": {"hint": FIREWALL_HINT, "windows": sys.platform == "win32"},
+        "firewall": {"hint": firewall_hint(port), "windows": sys.platform == "win32"},
     }
 
 
@@ -224,7 +226,7 @@ def add_firewall_rule(port: int, consent: bool, *, platform_name: str | None = N
         code = getattr(completed, "returncode", 0)
     if code:
         return {"added": False, "detail": "Windows Firewall did not add the rule."}
-    return {"added": True, "detail": "Windows Firewall allows TCP 44721 from the local subnet."}
+    return {"added": True, "detail": f"Windows Firewall allows TCP {int(port)} from the local subnet."}
 
 
 def launcher_firewall(enabled: bool, port: int) -> dict | None:

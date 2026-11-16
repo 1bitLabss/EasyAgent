@@ -57,6 +57,10 @@ body,
 #root {
   height: 100%;
   overflow: hidden;
+  /* iOS rotates to landscape without inflating text; no rubber-band chaining past the app frame. */
+  -webkit-text-size-adjust: 100%;
+  text-size-adjust: 100%;
+  overscroll-behavior: none;
 }
 
 html {
@@ -613,6 +617,12 @@ html[data-desktop="macos"] .rail {
     height: 44px;
   }
 
+  /* Settings checkboxes are 13px squares; give them a thumb-sized hit area. */
+  input[type="checkbox"] {
+    min-width: 28px;
+    min-height: 28px;
+  }
+
   input,
   textarea,
   select,
@@ -637,6 +647,22 @@ html[data-desktop="macos"] .rail {
     right: 12px;
     bottom: calc(76px + env(safe-area-inset-bottom));
     width: auto;
+  }
+}
+
+@media (max-width: 400px) {
+  /* The hidden stop-and-send slot still reserves 7.5rem and squeezes the
+     textarea to ~120px on small phones. Give the text the room instead. */
+  .composer .stop-send-slot:not(.is-on) {
+    display: none;
+  }
+
+  .composer .stop-send-slot.is-on {
+    width: 5.5rem;
+  }
+
+  .composer textarea {
+    flex: 1 1 auto;
   }
 }
 

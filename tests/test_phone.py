@@ -14,7 +14,7 @@ from PIL import Image
 from easyagent.access import access_decision, is_lan, lan_ip
 from easyagent.app import create_app
 from easyagent.icons import render_face_icon
-from easyagent.phone import FIREWALL_HINT, PhoneBook, add_firewall_rule, launcher_firewall
+from easyagent.phone import PhoneBook, add_firewall_rule, launcher_firewall
 from easyagent.store import Store
 from easyagent.__main__ import attach_lan
 
@@ -95,7 +95,7 @@ def test_lan_without_a_token_is_rejected_and_a_paired_token_works(tmp_path, monk
     assert body["pair_url"].startswith("http://")
     assert "?pair=" in body["pair_url"]
     invite = body["pair_url"].split("?pair=", 1)[1]
-    assert FIREWALL_HINT in body["firewall"]["hint"]
+    assert f"TCP port {body['port']}" in body["firewall"]["hint"]
     qr = local.get("/api/phone/qr.svg")
     assert qr.status_code == 200
     assert qr.headers["content-type"].startswith("image/svg+xml")

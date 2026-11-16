@@ -639,6 +639,7 @@ export function ChatPane() {
   const setAdding = useApp((state) => state.setAdding);
   const nudge = useApp((state) => state.nudge);
   const setNudge = useApp((state) => state.setNudge);
+  const jobsOpen = useApp((state) => state.jobsOpen);
   const bots = useQuery({ queryKey: ["bots"], queryFn: () => api<Bot[]>("/api/bots") });
   const ongoing = useQuery({
     queryKey: ["ongoing", botId],
@@ -1054,14 +1055,16 @@ export function ChatPane() {
     <section ref={sectionRef} className="relative flex h-full min-h-0 flex-1 flex-col">
       <div className="title-drag relative z-10 flex h-14 shrink-0 items-center justify-center" data-tauri-drag-region>
       <WindowControls />
-      <button
-        type="button"
-        className="absolute right-3 top-3 z-20 rounded-full border border-border bg-background px-3 py-1 text-sm"
-        data-testid="open-jobs"
-        onClick={() => useApp.getState().setJobs(true)}
-      >
-        Jobs
-      </button>
+      {jobsOpen ? null : (
+        <button
+          type="button"
+          className="absolute right-3 top-3 z-20 rounded-full border border-border bg-background px-3 py-1 text-sm"
+          data-testid="open-jobs"
+          onClick={() => useApp.getState().setJobs(true)}
+        >
+          Jobs
+        </button>
+      )}
       <div className="relative z-20 flex items-center justify-center gap-2" data-testid="bot-pill">
         <div className="relative">
           <button

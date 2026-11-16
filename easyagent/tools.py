@@ -981,6 +981,7 @@ _KNOWN_TOOLS = (
     "create_routine", "edit_routine", "delete_routine", "duckduckgo",
     "save_file", "create_file", "list_directory", "ls", "reaction", "tapback",
     "delegate_task", "skill", "image", "generate_image",
+    "desktop", "computer", "desktop_use",
 )
 
 
@@ -1201,6 +1202,8 @@ def _request_from_call(data: dict) -> ToolRequest:
         return _routine_request(name, raw_args)
     if name in {"browser", "browse"}:
         return _browser_request(raw_args)
+    if name in {"desktop", "computer", "desktop_use"}:
+        return _desktop_request(raw_args)
     if name in {"mcp", "connector"}:
         server = str(raw_args.get("server") or raw_args.get("connector") or "").strip()
         tool = str(raw_args.get("tool") or "").strip()
@@ -3394,6 +3397,37 @@ def _browser_request(raw: dict) -> ToolRequest:
     return ToolRequest(kind="browser", action=action, command=text or element, path=url)
 
 
+_DESKTOP_ACTIONS = {"capture", "list_windows", "wait", "click", "double_click", "type", "key"}
+
+
+def _desktop_request(raw: dict) -> ToolRequest:
+    action = str(raw.get("action") or "capture").strip().lower()
+    if action not in _DESKTOP_ACTIONS:
+        raise ToolError("That desktop action is not available yet. It is capture, list_windows, click, double_click, type, key, or wait.")
+    if action == "capture":
+        return ToolRequest(kind="desktop", action="capture", path=str(raw.get("window") or "").strip())
+    if action == "list_windows":
+        return ToolRequest(kind="desktop", action="list_windows")
+    if action == "wait":
+        return ToolRequest(kind="desktop", action="wait", command=str(raw.get("seconds") or "1").strip())
+    if action in {"click", "double_click"}:
+        coordinate = str(raw.get("coordinate") or raw.get("command") or "").strip()
+        if not coordinate and raw.get("x") is not None and raw.get("y") is not None:
+            coordinate = f"{raw.get('x')},{raw.get('y')}"
+        if not coordinate:
+            raise ToolError("A click needs a coordinate like 640,480.")
+        return ToolRequest(kind="desktop", action=action, command=coordinate)
+    if action == "type":
+        text = str(raw.get("text") or raw.get("value") or "")
+        if not text.strip():
+            raise ToolError("Type needs the text to type.")
+        return ToolRequest(kind="desktop", action="type", body=text)
+    combo = str(raw.get("combo") or raw.get("key") or raw.get("text") or "").strip()
+    if not combo:
+        raise ToolError("A key action needs a combo like ctrl-alt-delete.")
+    return ToolRequest(kind="desktop", action="key", command=combo)
+
+
 def _browser_from_body(body: str) -> ToolRequest | None:
     lines = [line.rstrip() for line in (body or "").splitlines()]
     while lines and not lines[0].strip():
@@ -3924,6 +3958,15 @@ async def _run_allowed_tool(store: Store, request: ToolRequest, bot_id: str | No
         return await _run_image(store, request, bot_id)
     if request.kind == "browser":
         from easyagent.browser import note_vision_shot, perform
+
+        text, shot = await asyncio.to_thread(perform, store, request, bot_id)
+        if shot:
+            note_vision_shot(shot)
+        turn_mod.raise_if_cancelled()
+        return wrap_output(request, text, store)
+    if request.kind == "desktop":
+        from easyagent.browser import note_vision_shot
+        from easyagent.desktop import perform
 
         text, shot = await asyncio.to_thread(perform, store, request, bot_id)
         if shot:

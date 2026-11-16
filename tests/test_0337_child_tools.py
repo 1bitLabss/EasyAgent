@@ -21,8 +21,8 @@ def _names() -> list[str]:
 
 def test_the_parent_tool_list_stays_whole_outside_a_child():
     full = _names()
-    # 27 since generate_image joined the parent tool list in 0.3.59.
-    assert len(full) == 27
+    # 28 since the desktop tool joined the parent tool list in Wave 1.
+    assert len(full) == 28
     token = llm.only_tools(["read_file"])
     try:
         assert _names() == ["read_file"]
@@ -65,7 +65,7 @@ def test_a_child_request_lists_only_the_tool_it_was_allowed(tmp_path, monkeypatc
     row = asyncio.run(_run_one(store, bot, endpoint, spec, yield_to_chats=False))
     assert seen["tools_flag"] is True
     assert seen["sent"] == ["read_file"]
-    assert len(_names()) == 27
+    assert len(_names()) == 28
     assert row["status"] == "done"
     assert row["result"] == "two notes"
 
@@ -94,4 +94,4 @@ def test_a_child_named_by_kind_sends_those_tools(tmp_path, monkeypatch):
     )
     asyncio.run(_run_one(store, bot, endpoint, spec, yield_to_chats=False))
     assert seen["sent"] == ["list_dir", "read_file", "write_file", "patch", "web_search"]
-    assert len(_names()) == 27
+    assert len(_names()) == 28

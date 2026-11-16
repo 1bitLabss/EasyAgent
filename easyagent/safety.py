@@ -379,6 +379,8 @@ def wrap_output(request, text: str, store: Store | None = None) -> str:
         return mark_untrusted(cleaned)
     if kind == "browser" and action in {"read", "open", "tabs"}:
         return mark_untrusted(cleaned)
+    if kind == "desktop" and action in {"capture", "list_windows"}:
+        return mark_untrusted(cleaned)
     return cleaned
 
 
@@ -3601,6 +3603,10 @@ def classify(store: Store, request, bot_id: str | None) -> Verdict:
             deny=list((bot or {}).get("browser_deny") or []),
             store=store,
         )
+    elif kind == "desktop":
+        from easyagent.desktop import judge_desktop
+
+        verdict = judge_desktop(request, store=store)
     else:
         verdict = _verdict(REVIEW, "unknown-tool", "That tool is not one the rules recognize.", kind, _fp(kind))
     if verdict.fingerprint in _denied(bot):
@@ -3911,7 +3917,7 @@ def _public_card(card: Pending) -> dict:
 
 # A card for one of these is never offered, and never takes, a lasting grant:
 # blocked rules that were unlocked, browser actions, connectors, and bridge sends.
-_NEVER_ALWAYS = frozenset({"root-delete", "disk-format", "fork-bomb", "remote-script", "firewall-off", "credential-dump", "browser-store", "guardrail-edit", "browser-pay", "browser-login", "browser-post", "browser-settings", "browser-submit", "browser-secret", "browser-credential", "mcp-ask", "mcp-install", "bridge-send"}) | {"own-server", "bot-isolation", "data-dir"}
+_NEVER_ALWAYS = frozenset({"root-delete", "disk-format", "fork-bomb", "remote-script", "firewall-off", "credential-dump", "browser-store", "guardrail-edit", "browser-pay", "browser-login", "browser-post", "browser-settings", "browser-submit", "browser-secret", "browser-credential", "mcp-ask", "mcp-install", "bridge-send", "desktop-input", "desktop-blocked"}) | {"own-server", "bot-isolation", "data-dir"}
 
 
 def resolve_card(card_id: str, decision: str, bot_id: str | None = None) -> Pending | None:

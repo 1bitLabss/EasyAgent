@@ -37,7 +37,7 @@ export const NEVER_ALWAYS = new Set([
   "root-delete", "disk-format", "fork-bomb", "remote-script", "firewall-off", "credential-dump",
   "browser-store", "guardrail-edit", "browser-pay", "browser-login", "browser-post", "browser-settings",
   "browser-submit", "browser-secret", "mcp-ask", "mcp-install", "bridge-send", "own-server",
-  "bot-isolation", "data-dir",
+  "bot-isolation", "data-dir", "desktop-input", "desktop-blocked",
 ]);
 
 export function ApprovalCard({ botId, botName, active }: { botId: string; botName: string; active: boolean }) {
@@ -111,7 +111,9 @@ export function ApprovalCard({ botId, botName, active }: { botId: string; botNam
         ? "Review this connector"
         : connector
           ? "Approve this connector"
-          : "Approve this action";
+          : card.rule === "desktop-input"
+            ? "Let the bot click, type, or press keys on this computer?"
+            : "Approve this action";
   const command = Array.isArray(card.proposal?.command) ? card.proposal?.command.join(" ") : card.proposal?.command;
 
   return (

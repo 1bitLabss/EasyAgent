@@ -92,7 +92,7 @@ def test_lan_without_a_token_is_rejected_and_a_paired_token_works(tmp_path, monk
     assert turned.status_code == 200
     body = turned.json()
     assert body["enabled"] is True
-    assert body["pair_url"].startswith("http://")
+    assert body["pair_url"].startswith("https://")
     assert "?pair=" in body["pair_url"]
     invite = body["pair_url"].split("?pair=", 1)[1]
     assert f"TCP port {body['port']}" in body["firewall"]["hint"]
@@ -238,7 +238,8 @@ def test_phone_access_opens_and_closes_the_lan_socket(tmp_path, monkeypatch):
         turned = httpx.post(f"http://127.0.0.1:{port}/api/phone", json={"enabled": True}, timeout=5)
         assert turned.status_code == 200
         assert turned.json()["listening"] is True
-        missed = httpx.get(f"http://{address}:{port}/api/health", timeout=2)
+        assert turned.json()["pair_url"].startswith("https://")
+        missed = httpx.get(f"https://{address}:{port}/api/health", verify=False, timeout=2)
         assert missed.status_code == 401
         hosts = []
         for item in server.servers:

@@ -168,14 +168,15 @@ class PhoneBook:
                 for item in self.devices
             ]
 
-    def pair_url(self, port: int) -> str:
+    def pair_url(self, port: int, *, tls: bool = False) -> str:
         with self._lock:
             if not self.enabled or not self.invite:
                 return ""
             ip = lan_ip()
             if not ip:
                 return ""
-            return f"http://{ip}:{port}/?pair={self.invite}"
+            scheme = "https" if tls else "http"
+            return f"{scheme}://{ip}:{port}/?pair={self.invite}"
 
 
 def access_for(host: str | None, presented: str, phone: PhoneBook) -> str:
@@ -183,8 +184,8 @@ def access_for(host: str | None, presented: str, phone: PhoneBook) -> str:
     return access_decision(host, presented, phone)
 
 
-def status_payload(phone: PhoneBook, port: int, *, listening: bool) -> dict:
-    url = phone.pair_url(port)
+def status_payload(phone: PhoneBook, port: int, *, listening: bool, tls: bool = False) -> dict:
+    url = phone.pair_url(port, tls=tls)
     return {
         "enabled": phone.enabled,
         "lan_ip": lan_ip(),
@@ -246,8 +247,10 @@ def qr_svg(text: str) -> str:
 class LanPort:
     """A second socket on the LAN address. Loopback stays the other socket."""
 
-    def __init__(self) -> None:
+    def __init__(self, root: Path | None = None) -> None:
         self.listener = None
+        self.root = Path(root) if root is not None else None
+        self.tls = False
 
     @property
     def listening(self) -> bool:
@@ -255,6 +258,7 @@ class LanPort:
 
     async def apply(self, server, port: int, enabled: bool) -> bool:
         await self.close(server)
+        self.tls = False
         if not enabled or server is None:
             return False
         host = lan_ip()
@@ -263,7 +267,16 @@ class LanPort:
         primary = getattr(getattr(server, "config", None), "host", None)
         if primary in {None, "0.0.0.0", "::", host}:
             return False
-        self.listener = await _listen_beside(server, host, int(port))
+        context = None
+        if self.root is not None:
+            try:
+                from easyagent.phonetls import ssl_context
+
+                context = ssl_context(self.root)
+            except Exception:
+                context = None
+        self.listener = await _listen_beside(server, host, int(port), context)
+        self.tls = context is not None and self.listener is not None
         return self.listener is not None
 
     async def close(self, server) -> None:
@@ -278,7 +291,7 @@ class LanPort:
             servers.remove(listener)
 
 
-async def _listen_beside(server, host: str, port: int):
+async def _listen_beside(server, host: str, port: int, ssl_context=None):
     import asyncio
 
     config = server.config
@@ -296,7 +309,7 @@ async def _listen_beside(server, host: str, port: int):
         create_protocol,
         host=host,
         port=port,
-        ssl=getattr(config, "ssl", None),
+        ssl=ssl_context if ssl_context is not None else getattr(config, "ssl", None),
         backlog=config.backlog,
     )
     servers = getattr(server, "servers", None)

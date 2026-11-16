@@ -861,7 +861,7 @@ def create_app(data_dir: str | Path | None = None) -> FastAPI:
     app = FastAPI(title="EasyAgent", lifespan=_lifespan)
     app.state.store = store
     app.state.phone = PhoneBook(store.root)
-    app.state.lan = LanPort()
+    app.state.lan = LanPort(store.root)
     app.state.token_guard = TokenGuessGuard()
 
     @app.middleware("http")
@@ -1049,19 +1049,27 @@ def create_app(data_dir: str | Path | None = None) -> FastAPI:
     @app.get("/api/phone")
     def phone_status(request: Request):
         _local_only(request)
-        return status_payload(app.state.phone, _phone_port(), listening=app.state.lan.listening)
+        return status_payload(
+            app.state.phone, _phone_port(), listening=app.state.lan.listening, tls=app.state.lan.tls
+        )
 
     @app.post("/api/phone")
     def phone_set(body: PhoneIn, request: Request):
         _local_only(request)
         app.state.phone.set_enabled(body.enabled)
         _apply_phone_listener()
-        return status_payload(app.state.phone, _phone_port(), listening=app.state.lan.listening)
+        if body.enabled and not app.state.lan.listening:
+            from easyagent.phonetls import ensure
+
+            app.state.lan.tls = ensure(store.root) is not None
+        return status_payload(
+            app.state.phone, _phone_port(), listening=app.state.lan.listening, tls=app.state.lan.tls
+        )
 
     @app.get("/api/phone/qr.svg")
     def phone_qr(request: Request):
         _local_only(request)
-        url = app.state.phone.pair_url(_phone_port())
+        url = app.state.phone.pair_url(_phone_port(), tls=app.state.lan.tls)
         if not url:
             raise HTTPException(404, "Phone access is off, or this computer has no LAN address.")
         return Response(content=qr_svg(url), media_type="image/svg+xml", headers={"Cache-Control": "no-store"})
@@ -1073,7 +1081,9 @@ def create_app(data_dir: str | Path | None = None) -> FastAPI:
             app.state.phone.revoke(device_id)
         except KeyError:
             raise HTTPException(404, "That phone is not paired.") from None
-        return status_payload(app.state.phone, _phone_port(), listening=app.state.lan.listening)
+        return status_payload(
+            app.state.phone, _phone_port(), listening=app.state.lan.listening, tls=app.state.lan.tls
+        )
 
     @app.post("/api/phone/firewall")
     def phone_firewall(body: FirewallIn, request: Request):

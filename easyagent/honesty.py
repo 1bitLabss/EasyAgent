@@ -47,6 +47,12 @@ _CLEAR_PUSHBACK = (
 )
 _AMBIGUOUS = re.compile(r"(?i)^\s*(no|nope|wrong|again|still|what\?|huh)\s*[.!?]*\s*$")
 _CLAIM = re.compile(r"(?i)\b(works now|tests pass|fixed|done|created|deleted)\b")
+_BLOCK_CLAIM = re.compile(r"(?i)\b(blocked|unavailable|broken|down|not working|not available)\b")
+_BLOCK_NOTE = "One failed call is not a blockage. Say the first attempt failed and what you retried, or try a changed call."
+_LOOP_WARN = (
+    "[Tool loop warning: repeated_exact_failure; count=2; The same call failed twice with "
+    "identical arguments. Inspect the error and change strategy instead of retrying it unchanged.]"
+)
 _NEG_BEFORE = re.compile(
     r"(?i)\b(not|never|unable|cannot|can't|didn't|did not|wasn't|isn't|without|no)\s*$"
 )
@@ -664,6 +670,7 @@ def after_tool(request, output: str, *, ok: bool) -> str:
     action = getattr(request, "action", "") or ""
     command = getattr(request, "command", "") or ""
     path = getattr(request, "path", "") or ""
+    sig = _signature(request)
     trace.events.append(
         {
             "kind": kind,
@@ -672,6 +679,7 @@ def after_tool(request, output: str, *, ok: bool) -> str:
             "path": path,
             "ok": not failed,
             "output": raw[:240],
+            "sig": sig,
         }
     )
     trace.last_progress = float(trace.clock())
@@ -681,8 +689,9 @@ def after_tool(request, output: str, *, ok: bool) -> str:
     executed = kind == "shell" and bool(command) and not refused and _shell_executed(trace, command, raw)
     trace.shell_ran = ""
     if failed:
-        sig = _signature(request)
         trace.fail_counts[sig] = trace.fail_counts.get(sig, 0) + 1
+        if trace.fail_counts[sig] == 2 and trace.settings.get("loop", True):
+            text = f"{text}\n{_LOOP_WARN}"
         if executed:
             trace.last_fail_command = command
             trace.last_fail_cwd = _cwd()
@@ -835,6 +844,29 @@ def _claims(text: str) -> list[str]:
         if word not in found:
             found.append(word)
     return found
+
+
+def _block_claim(text: str) -> bool:
+    """True when the reply asserts a standing blockage, not a negated one."""
+    for match in _BLOCK_CLAIM.finditer(text or ""):
+        window = (text or "")[max(0, match.start() - 24) : match.start()]
+        if _NEG_BEFORE.search(window):
+            continue
+        return True
+    return False
+
+
+def _blockage_contradicted(trace: Trace) -> bool:
+    """True when the trace says the blockage claim is wrong: nothing failed, or the failed call later succeeded."""
+    if not any(not event.get("ok") for event in trace.events):
+        return True
+    for index, event in enumerate(trace.events):
+        if event.get("ok") or not event.get("sig"):
+            continue
+        for later in trace.events[index + 1 :]:
+            if later.get("ok") and later.get("sig") == event.get("sig"):
+                return True
+    return False
 
 
 def _backing(trace: Trace) -> dict | None:
@@ -1042,6 +1074,12 @@ async def settle(text: str, *, allow_model: bool = False) -> Outcome:
         _chip(trace, "Reproduce first")
     if _APOLOGY.search(rewritten) and not trace.events and not _ACTION.search(rewritten):
         pieces.append("An apology needs a new action.")
+    if (
+        trace.settings.get("receipts", True)
+        and _block_claim(rewritten)
+        and _blockage_contradicted(trace)
+    ):
+        pieces.append(_hold(trace, _BLOCK_NOTE, "Not blocked"))
     if trace.settings.get("stall", True):
         stall = _stall_line(trace)
         joined = "\n".join(pieces)

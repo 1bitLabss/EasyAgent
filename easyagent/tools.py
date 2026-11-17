@@ -3839,8 +3839,8 @@ async def execute(store: Store, request: ToolRequest, bot_id: str | None = None)
     try:
         result = await _execute_now(store, request, bot_id)
     except ToolError as exc:
-        honesty.after_tool(request, str(exc), ok=False)
-        raise
+        # after_tool may append a loop warning to the failure text; the model reads it back.
+        raise ToolError(honesty.after_tool(request, str(exc), ok=False)) from exc
     return honesty.after_tool(request, result, ok=True)
 
 
@@ -10280,7 +10280,7 @@ async def run_turn(
                 page=_wants_page(ask),
                 voice=_page_voice() if _wants_page(ask) else _spoken(text or ""),
                 requests=[request],
-                note="That tool failed. The failure is not the reply. Change the call, or write the answer.",
+                note="That tool failed. The failure is not the reply. Change the call and try it again. After one failure do not tell the user it is blocked or unavailable. Write the answer only when no tool can help further.",
             )
             yield "status", "Thinking"
             continue

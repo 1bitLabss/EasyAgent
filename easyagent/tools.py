@@ -3397,15 +3397,17 @@ def _browser_request(raw: dict) -> ToolRequest:
     return ToolRequest(kind="browser", action=action, command=text or element, path=url)
 
 
-_DESKTOP_ACTIONS = {"capture", "list_windows", "wait", "click", "double_click", "type", "key"}
+_DESKTOP_ACTIONS = {"capture", "elements", "list_windows", "wait", "click", "double_click", "type", "key"}
 
 
 def _desktop_request(raw: dict) -> ToolRequest:
     action = str(raw.get("action") or "capture").strip().lower()
     if action not in _DESKTOP_ACTIONS:
-        raise ToolError("That desktop action is not available yet. It is capture, list_windows, click, double_click, type, key, or wait.")
+        raise ToolError("That desktop action is not available yet. It is capture, elements, list_windows, click, double_click, type, key, or wait.")
     if action == "capture":
         return ToolRequest(kind="desktop", action="capture", path=str(raw.get("window") or "").strip())
+    if action == "elements":
+        return ToolRequest(kind="desktop", action="elements", path=str(raw.get("window") or "").strip())
     if action == "list_windows":
         return ToolRequest(kind="desktop", action="list_windows")
     if action == "wait":
@@ -3414,8 +3416,15 @@ def _desktop_request(raw: dict) -> ToolRequest:
         coordinate = str(raw.get("coordinate") or raw.get("command") or "").strip()
         if not coordinate and raw.get("x") is not None and raw.get("y") is not None:
             coordinate = f"{raw.get('x')},{raw.get('y')}"
+        element = str(raw.get("element") or "").strip()
+        if element and coordinate:
+            raise ToolError("A click takes a coordinate or an element number, not both.")
+        if element:
+            if not element.isdigit():
+                raise ToolError("An element click needs a number from the element list.")
+            return ToolRequest(kind="desktop", action=action, command=f"element:{int(element)}")
         if not coordinate:
-            raise ToolError("A click needs a coordinate like 640,480.")
+            raise ToolError("A click needs a coordinate like 640,480, or an element number from the element list.")
         return ToolRequest(kind="desktop", action=action, command=coordinate)
     if action == "type":
         text = str(raw.get("text") or raw.get("value") or "")

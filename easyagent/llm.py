@@ -635,11 +635,12 @@ NATIVE_TOOLS = [
     _tool(
         "desktop",
         "Look at and use this computer's own screen on Windows. "
-        "action is capture, list_windows, click, double_click, type, key, or wait. "
+        "action is capture, elements, list_windows, click, double_click, type, key, or wait. "
         "Capture first, then act on what you saw, then capture again to check. "
-        "click takes a coordinate like 640,480. key takes a combo like ctrl-alt-delete. "
+        "elements lists the window's numbered controls; click or double_click takes element=N from that list "
+        "or a coordinate like 640,480. key takes a combo like ctrl-alt-delete. "
         "Do not type a password, a card number, or a 2FA code.",
-        {"action": _STRING, "window": _STRING, "coordinate": _STRING, "text": _STRING, "combo": _STRING, "seconds": _STRING},
+        {"action": _STRING, "window": _STRING, "coordinate": _STRING, "element": _STRING, "text": _STRING, "combo": _STRING, "seconds": _STRING},
         ["action"],
     ),
     _tool(

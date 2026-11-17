@@ -35,7 +35,7 @@ except Exception:
     pass
 
 FREE_ACTIONS = {"capture", "elements", "list_windows", "wait"}
-INPUT_ACTIONS = {"click", "double_click", "type", "key"}
+INPUT_ACTIONS = {"click", "double_click", "type", "key", "scroll", "drag", "set_value"}
 KNOWN_ACTIONS = FREE_ACTIONS | INPUT_ACTIONS
 
 # Hermes computer-use constants, copied verbatim (tools/computer_use/tool.py:44-58).
@@ -306,6 +306,10 @@ _INPUT_MOUSE = 0
 _INPUT_KEYBOARD = 1
 _MOUSEEVENTF_LEFTDOWN = 0x0002
 _MOUSEEVENTF_LEFTUP = 0x0004
+_MOUSEEVENTF_WHEEL = 0x0800
+_MOUSEEVENTF_HWHEEL = 0x1000
+_WHEEL_NOTCH = 120
+_SCROLL_MAX = 50
 _KEYEVENTF_KEYUP = 0x0002
 _KEYEVENTF_UNICODE = 0x0004
 _KEYEVENTF_SCANCODE = 0x0008
@@ -380,6 +384,75 @@ def press_combo(combo: str) -> None:
     _send_inputs(events)
 
 
+def clamp_scroll_amount(raw) -> int:
+    """Wheel notches to scroll, clamped to 1..50 (Hermes computer_use clamp)."""
+    try:
+        amount = int(float(raw))
+    except (TypeError, ValueError):
+        amount = 3
+    return max(1, min(_SCROLL_MAX, amount))
+
+
+class _Point(ctypes.Structure):
+    _fields_ = [("x", wintypes.LONG), ("y", wintypes.LONG)]
+
+
+def _cursor_pos() -> tuple[int, int]:
+    point = _Point()
+    user32.GetCursorPos(ctypes.byref(point))
+    return int(point.x), int(point.y)
+
+
+def _mouse_event(flags: int, mouse_data: int = 0) -> None:
+    event = _Input(type=_INPUT_MOUSE)
+    event.mi = _MouseInput(0, 0, mouse_data & 0xFFFFFFFF, flags, 0, None)
+    _send_inputs([event])
+
+
+def scroll_at(x: int, y: int, direction: str, amount: int) -> None:
+    """Wheel-scroll at a spot: the wheel goes to whatever sits under the cursor."""
+    user32.SetCursorPos(int(x), int(y))
+    if direction in ("up", "down"):
+        flags = _MOUSEEVENTF_WHEEL
+        delta = _WHEEL_NOTCH * amount * (1 if direction == "up" else -1)
+    elif direction in ("left", "right"):
+        flags = _MOUSEEVENTF_HWHEEL
+        delta = _WHEEL_NOTCH * amount * (1 if direction == "right" else -1)
+    else:
+        raise ValueError("Scroll needs a direction: up, down, left, or right.")
+    _mouse_event(flags, delta)
+
+
+def drag_to(x1: int, y1: int, x2: int, y2: int) -> None:
+    """Press at the start, walk to the end in small steps, release."""
+    user32.SetCursorPos(int(x1), int(y1))
+    _mouse_event(_MOUSEEVENTF_LEFTDOWN)
+    steps = 20
+    for i in range(1, steps + 1):
+        user32.SetCursorPos(
+            int(x1 + (x2 - x1) * i / steps),
+            int(y1 + (y2 - y1) * i / steps),
+        )
+        time.sleep(0.005)
+    _mouse_event(_MOUSEEVENTF_LEFTUP)
+
+
+def _raise_window(hwnd: int) -> bool:
+    """Bring the targeted window forward — SendInput only reaches the foreground.
+
+    Returns True only when a window actually had to be raised."""
+    try:
+        if not hwnd or int(user32.GetForegroundWindow() or 0) == int(hwnd):
+            return False
+        if user32.IsIconic(hwnd):
+            user32.ShowWindow(hwnd, 9)  # SW_RESTORE
+        user32.SetForegroundWindow(hwnd)
+        time.sleep(0.15)
+        return True
+    except Exception:
+        return False
+
+
 # ------------------------------------------------------------------- actions
 
 def _target_bbox(raw: str, bot_id: str | None) -> tuple[int, int, int, int] | None:
@@ -400,6 +473,34 @@ def _target_bbox(raw: str, bot_id: str | None) -> tuple[int, int, int, int] | No
         return _window_rect(_TARGET[bot_id])
     _TARGET[bot_id or ""] = 0
     return None
+
+
+def _resolve_point(token: str, bot_id: str | None) -> tuple[int, int]:
+    """Turn 'element:N' (bounds-center from the last snapshot) or 'x,y' into a screen point."""
+    from easyagent.tools import ToolError
+
+    token = (token or "").strip()
+    if token.startswith("element:"):
+        try:
+            wanted = int(token.split(":", 1)[1])
+        except ValueError:
+            raise ToolError("An element click needs a number from the element list.")
+        snapshot = _ELEMENTS.get(bot_id or "") or []
+        if not snapshot:
+            raise ToolError("no element list yet — run desktop elements first")
+        hit = next((e for e in snapshot if e.get("index") == wanted), None)
+        if hit is None:
+            raise ToolError(f"Element {wanted} is not in the last element list — it has {len(snapshot)}.")
+        x, y, w, h = hit["bounds"]
+        if not (w and h):
+            raise ToolError(f"Element {wanted} has no position on screen — click by coordinate instead.")
+        return x + w // 2, y + h // 2
+    try:
+        x_str, y_str = token.split(",", 1)
+        x, y = int(x_str.strip()), int(y_str.strip())
+    except ValueError:
+        raise ToolError("A click needs a coordinate like 640,480.")
+    return x, y
 
 
 def perform(store, request, bot_id: str | None) -> tuple[str, str]:
@@ -475,51 +576,88 @@ def perform(store, request, bot_id: str | None) -> tuple[str, str]:
         _ensure_interactive()
         if not (bot_id or "") in _SEEN:
             raise ToolError("no window targeted — capture first")
+        # Pure SendInput only reaches the foreground window, so raise the target first.
+        raised = _raise_window(_TARGET.get(bot_id or "", 0))
+        prefix = "Brought the window forward first. " if raised else ""
         if action in {"click", "double_click"}:
             command = (request.command or "").strip()
-            if command.startswith("element:"):
-                try:
-                    wanted = int(command.split(":", 1)[1])
-                except ValueError:
-                    raise ToolError("An element click needs a number from the element list.")
-                snapshot = _ELEMENTS.get(bot_id or "") or []
-                if not snapshot:
-                    raise ToolError("no element list yet — run desktop elements first")
-                hit = next((e for e in snapshot if e.get("index") == wanted), None)
-                if hit is None:
-                    raise ToolError(f"Element {wanted} is not in the last element list — it has {len(snapshot)}.")
-                x, y, w, h = hit["bounds"]
-                if not (w and h):
-                    raise ToolError(f"Element {wanted} has no position on screen — click by coordinate instead.")
-                x, y = x + w // 2, y + h // 2
-                click_at(x, y, double=(action == "double_click"))
-                _ELEMENTS.pop(bot_id or "", None)
-                return (
-                    f"Clicked element {wanted} at {x},{y}. verify_fresh_state: capture again before the next input.",
-                    "",
-                )
-            try:
-                x_str, y_str = command.split(",", 1)
-                x, y = int(x_str.strip()), int(y_str.strip())
-            except ValueError:
-                raise ToolError("A click needs a coordinate like 640,480.")
+            x, y = _resolve_point(command, bot_id)
             click_at(x, y, double=(action == "double_click"))
             _ELEMENTS.pop(bot_id or "", None)
-            return f"Clicked at {x},{y}. verify_fresh_state: capture again before the next input.", ""
+            if command.startswith("element:"):
+                wanted = command.split(":", 1)[1]
+                return (
+                    f"{prefix}Clicked element {wanted} at {x},{y}. verify_fresh_state: capture again before the next input.",
+                    "",
+                )
+            return f"{prefix}Clicked at {x},{y}. verify_fresh_state: capture again before the next input.", ""
+        if action == "scroll":
+            try:
+                direction, amount, spot = (request.command or "").split("|", 2)
+            except ValueError:
+                raise ToolError("Scroll needs a direction: up, down, left, or right.")
+            amount = clamp_scroll_amount(amount)
+            if spot:
+                x, y = _resolve_point(spot, bot_id)
+            else:
+                x, y = _cursor_pos()
+            try:
+                scroll_at(x, y, direction, amount)
+            except ValueError as exc:
+                raise ToolError(str(exc))
+            _ELEMENTS.pop(bot_id or "", None)
+            return (
+                f"{prefix}Scrolled {direction} {amount} at {x},{y}. verify_fresh_state: capture again before the next input.",
+                "",
+            )
+        if action == "drag":
+            parts = (request.command or "").split("|", 1)
+            if len(parts) != 2 or not parts[0].strip() or not parts[1].strip():
+                raise ToolError("A drag needs from/to elements or from/to coordinates.")
+            x1, y1 = _resolve_point(parts[0], bot_id)
+            x2, y2 = _resolve_point(parts[1], bot_id)
+            drag_to(x1, y1, x2, y2)
+            _ELEMENTS.pop(bot_id or "", None)
+            return (
+                f"{prefix}Dragged from {x1},{y1} to {x2},{y2}. verify_fresh_state: capture again before the next input.",
+                "",
+            )
+        if action == "set_value":
+            token = (request.command or "").strip()
+            if not token.startswith("element:"):
+                raise ToolError("set_value needs an element number from the element list.")
+            try:
+                wanted = int(token.split(":", 1)[1])
+            except ValueError:
+                raise ToolError("set_value needs an element number from the element list.")
+            value = request.body or ""
+            if not value:
+                raise ToolError("set_value needs the text to set.")
+            from easyagent import desktop_uia
+
+            try:
+                desktop_uia.set_value_by_index(_TARGET.get(bot_id or "", 0), wanted, value)
+            except Exception as exc:
+                raise ToolError(str(exc) or "The value could not be set.") from exc
+            _ELEMENTS.pop(bot_id or "", None)
+            return (
+                f"{prefix}Set element {wanted} to {len(value)} characters. verify_fresh_state: capture again before the next input.",
+                "",
+            )
         if action == "type":
             text = request.body or ""
             if not text:
                 raise ToolError("Type needs text.")
             type_text(text)
             _ELEMENTS.pop(bot_id or "", None)
-            return f"Typed {len(text)} characters. verify_fresh_state: capture again before the next input.", ""
+            return f"{prefix}Typed {len(text)} characters. verify_fresh_state: capture again before the next input.", ""
         if action == "key":
             try:
                 press_combo(request.command)
             except ValueError as exc:
                 raise ToolError(str(exc))
             _ELEMENTS.pop(bot_id or "", None)
-            return f"Pressed {request.command}. verify_fresh_state: capture again before the next input.", ""
+            return f"{prefix}Pressed {request.command}. verify_fresh_state: capture again before the next input.", ""
     return "That desktop action is not available yet.", ""
 
 
@@ -561,3 +699,64 @@ def judge_desktop(request, *, allow: list[str] | None = None, deny: list[str] | 
             fingerprint,
         )
     return _verdict(ALLOW, "desktop", "That only looks at the screen or waits. Nothing was clicked or typed.", detail, fingerprint)
+
+
+# -------------------------------------------------------------------- doctor
+
+def doctor_report() -> dict:
+    """Self-check rows for GET /api/desktop/doctor, modeled on Hermes' doctor.
+
+    Never raises: every check catches its own failure so the endpoint answers
+    even on a headless box."""
+    checks: list[dict] = []
+
+    def add(name: str, status: str, message: str, hint: str | None = None) -> None:
+        row = {"name": name, "status": status, "message": message}
+        if hint:
+            row["hint"] = hint
+        checks.append(row)
+
+    try:
+        _ensure_interactive()
+        add("session", "pass", "Someone is signed in to a visible desktop session.")
+    except Exception as exc:
+        add("session", "fail", str(exc) or "No one is signed in to this computer's screen.",
+            hint="EasyAgent is not signed into a visible desktop session.")
+    try:
+        width = int(user32.GetSystemMetrics(0)) if user32 else 0
+        height = int(user32.GetSystemMetrics(1)) if user32 else 0
+        if width > 0 and height > 0:
+            add("screen", "pass", f"A screen is attached ({width}x{height}).")
+        else:
+            add("screen", "fail", "No screen was found.", hint="No screen is attached.")
+    except Exception as exc:
+        add("screen", "fail", f"The screen could not be checked: {exc}", hint="No screen is attached.")
+    try:
+        image = _grab((0, 0, 64, 64))
+        add("capture", "pass", f"A test screenshot came back ({getattr(image, 'size', 'unknown size')}).")
+    except Exception as exc:
+        add("capture", "fail", f"The screen could not be captured: {exc}")
+    try:
+        from easyagent import desktop_uia
+
+        hwnd = int(user32.GetForegroundWindow() or 0) if user32 else 0
+        walked = desktop_uia.walk_window(hwnd)
+        count = len([e for e in walked if e.get("role") != "more"])
+        add("elements", "pass", f"Read {count} controls from the window in front.")
+    except ImportError:
+        add("elements", "skip", "comtypes is not installed, so window controls cannot be read.",
+            hint="Install comtypes to read window controls.")
+    except Exception as exc:
+        add("elements", "fail", f"Window controls could not be read: {exc}",
+            hint="Install comtypes to read window controls.")
+    try:
+        hwnd = int(user32.GetForegroundWindow() or 0) if user32 else 0
+        title = _window_title(hwnd) if hwnd else ""
+        if title:
+            add("foreground", "pass", f'The window in front is "{title}".')
+        else:
+            add("foreground", "skip", "No window is in front right now.")
+    except Exception:
+        add("foreground", "skip", "No window is in front right now.")
+    ok = not any(row["status"] == "fail" for row in checks)
+    return {"ok": ok, "checks": checks}

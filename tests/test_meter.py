@@ -98,7 +98,8 @@ def test_meter_warns_at_80_and_fills_at_90_without_a_fake_call():
     # (about 1,870 tokens) leaves only the 5656 context.
     assert gap["prompt_tokens"] == 5656 + tools
     # The desktop tool (Wave 1) pushed the schema past 3800.
-    assert 2000 <= tools <= 3900
+    # Desktop Wave 3 (scroll, drag, set_value fields) pushed it past 4000.
+    assert 2000 <= tools <= 4100
     refused = apply_meter({"context_tokens": 10, "context_overflow": 1}, 1000, 10)
     assert refused["context_level"] == 0
     assert refused["offer_compact"] == 1

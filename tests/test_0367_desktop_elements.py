@@ -275,5 +275,5 @@ def test_the_packer_maps_element_calls():
         _request_from_call({"name": "desktop", "arguments": {"action": "click", "element": "4", "coordinate": "1,2"}})
     assert "not both" in str(caught.value)
     with pytest.raises(ToolError) as caught:
-        _request_from_call({"name": "desktop", "arguments": {"action": "scroll"}})
-    assert "elements" in str(caught.value)  # the action list names the new action
+        _request_from_call({"name": "desktop", "arguments": {"action": "teleport"}})
+    assert "scroll" in str(caught.value)  # the action list names the wave 3 actions

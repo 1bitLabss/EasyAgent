@@ -170,7 +170,7 @@ def test_the_packer_maps_desktop_calls_onto_requests():
     call = _request_from_call({"name": "desktop", "arguments": {"action": "wait", "seconds": 3}})
     assert (call.kind, call.action, call.command) == ("desktop", "wait", "3")
     with pytest.raises(ToolError) as caught:
-        _request_from_call({"name": "desktop", "arguments": {"action": "scroll"}})
+        _request_from_call({"name": "desktop", "arguments": {"action": "teleport"}})
     assert "not available yet" in str(caught.value)
 
 

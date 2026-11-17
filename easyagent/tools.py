@@ -3397,13 +3397,34 @@ def _browser_request(raw: dict) -> ToolRequest:
     return ToolRequest(kind="browser", action=action, command=text or element, path=url)
 
 
-_DESKTOP_ACTIONS = {"capture", "elements", "list_windows", "wait", "click", "double_click", "type", "key"}
+_DESKTOP_ACTIONS = {
+    "capture", "elements", "list_windows", "wait", "click", "double_click",
+    "type", "key", "scroll", "drag", "set_value",
+}
+
+
+def _desktop_spot(raw: dict, prefix: str = "") -> str:
+    """One spot for a desktop action: '' , 'element:N', or 'x,y' — never both."""
+    element = str(raw.get(f"{prefix}element") or "").strip()
+    coordinate = str(raw.get(f"{prefix}coordinate") or "").strip()
+    if not coordinate and raw.get(f"{prefix}x") is not None and raw.get(f"{prefix}y") is not None:
+        coordinate = f"{raw.get(f'{prefix}x')},{raw.get(f'{prefix}y')}"
+    if element and coordinate:
+        raise ToolError("A spot takes a coordinate or an element number, not both.")
+    if element:
+        if not element.isdigit():
+            raise ToolError("An element click needs a number from the element list.")
+        return f"element:{int(element)}"
+    return coordinate
 
 
 def _desktop_request(raw: dict) -> ToolRequest:
     action = str(raw.get("action") or "capture").strip().lower()
     if action not in _DESKTOP_ACTIONS:
-        raise ToolError("That desktop action is not available yet. It is capture, elements, list_windows, click, double_click, type, key, or wait.")
+        raise ToolError(
+            "That desktop action is not available yet. It is capture, elements, list_windows, "
+            "click, double_click, type, key, scroll, drag, set_value, or wait."
+        )
     if action == "capture":
         return ToolRequest(kind="desktop", action="capture", path=str(raw.get("window") or "").strip())
     if action == "elements":
@@ -3431,6 +3452,33 @@ def _desktop_request(raw: dict) -> ToolRequest:
         if not text.strip():
             raise ToolError("Type needs the text to type.")
         return ToolRequest(kind="desktop", action="type", body=text)
+    if action == "scroll":
+        direction = str(raw.get("direction") or "").strip().lower()
+        if direction not in {"up", "down", "left", "right"}:
+            raise ToolError("Scroll needs a direction: up, down, left, or right.")
+        from easyagent.desktop import clamp_scroll_amount
+
+        spot = _desktop_spot(raw)
+        amount = raw.get("amount")
+        amount = 3 if amount is None or amount == "" else amount
+        return ToolRequest(
+            kind="desktop", action="scroll",
+            command=f"{direction}|{clamp_scroll_amount(amount)}|{spot}",
+        )
+    if action == "drag":
+        start = _desktop_spot(raw, "from_")
+        end = _desktop_spot(raw, "to_")
+        if not start or not end:
+            raise ToolError("A drag needs from/to elements or from/to coordinates.")
+        return ToolRequest(kind="desktop", action="drag", command=f"{start}|{end}")
+    if action == "set_value":
+        element = str(raw.get("element") or "").strip()
+        value = str(raw.get("value") or raw.get("text") or "")
+        if not element or not element.isdigit():
+            raise ToolError("set_value needs an element number from the element list.")
+        if not value:
+            raise ToolError("set_value needs the text to set.")
+        return ToolRequest(kind="desktop", action="set_value", command=f"element:{int(element)}", body=value)
     combo = str(raw.get("combo") or raw.get("key") or raw.get("text") or "").strip()
     if not combo:
         raise ToolError("A key action needs a combo like ctrl-alt-delete.")

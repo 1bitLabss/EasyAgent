@@ -987,6 +987,12 @@ def create_app(data_dir: str | Path | None = None) -> FastAPI:
 
         return public_status(store)
 
+    @app.get("/api/desktop/doctor")
+    def desktop_doctor():
+        from easyagent.desktop import doctor_report
+
+        return JSONResponse(doctor_report())
+
     def _phone_port() -> int:
         server = getattr(app.state, "uvicorn_server", None)
         if server is not None:

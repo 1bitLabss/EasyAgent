@@ -29,11 +29,13 @@ _CONTROL_TYPE_NAMES = {
 }
 
 _uia = None  # cached CUIAutomation instance; COM is apartment-threaded
+_uia_module = None  # the generated UIAutomationCore module, for pattern casts
+_VALUE_PATTERN_ID = 10002  # UIA_ValuePatternId
 
 
 def _get_uia():
     """Create (once) the UIAutomation client. Imports comtypes lazily."""
-    global _uia
+    global _uia, _uia_module
     if _uia is None:
         import ctypes
 
@@ -45,6 +47,7 @@ def _get_uia():
 
         module = comtypes.client.GetModule("UIAutomationCore.dll")
         _uia = comtypes.client.CreateObject(module.CUIAutomation, interface=module.IUIAutomation)
+        _uia_module = module
     return _uia
 
 
@@ -55,18 +58,28 @@ def _clip_label(name: str) -> str:
     return name
 
 
-def walk_window(hwnd: int) -> list[dict]:
-    """Interactable elements of a window, in tree order.
+def _surface_bounds(element):
+    """walk_window's surface rule for one element's geometry:
 
-    Each element: {index (1-based), role, label, bounds (x, y, w, h)}; bounds
-    (0, 0, 0, 0) means geometry unknown. If the walk hits the surface cap, the
-    last item is a spill marker: {role: 'more', count: N}.
-    """
+    (x, y, w, h) on-screen, (0, 0, 0, 0) when geometry is unknown, None to skip."""
+    try:
+        rect = element.CurrentBoundingRectangle
+        left, top = int(rect.left), int(rect.top)
+        width, height = int(rect.right) - left, int(rect.bottom) - top
+        if width > 0 and height > 0:
+            if int(rect.right) <= 0 or int(rect.bottom) <= 0:
+                return None  # fully off-screen: skip it
+            return (left, top, width, height)
+    except Exception:
+        pass
+    return (0, 0, 0, 0)  # empty or unreadable rect: geometry unknown, still clickable by index
+
+
+def _walk_nodes(hwnd: int):
+    """Shared tree walk: yield (element, control_type) in tree order, budgeted."""
     uia = _get_uia()
     root = uia.ElementFromHandle(hwnd) if hwnd else uia.GetRootElement()
     walker = uia.ControlViewWalker
-    elements: list[dict] = []
-    spill = 0
     visited = 0
     stack = [root]
     while stack and visited < _MAX_NODES_VISITED:
@@ -76,36 +89,7 @@ def walk_window(hwnd: int) -> list[dict]:
             control_type = element.CurrentControlType
         except Exception:
             control_type = None
-        if control_type in _CONTROL_TYPE_NAMES:
-            bounds = (0, 0, 0, 0)
-            try:
-                rect = element.CurrentBoundingRectangle
-                left, top = int(rect.left), int(rect.top)
-                width, height = int(rect.right) - left, int(rect.bottom) - top
-                if width > 0 and height > 0:
-                    if int(rect.right) <= 0 or int(rect.bottom) <= 0:
-                        bounds = None  # fully off-screen: skip it
-                    else:
-                        bounds = (left, top, width, height)
-                # else: empty rect stays (0, 0, 0, 0) — geometry unknown, still clickable by index
-            except Exception:
-                bounds = (0, 0, 0, 0)
-            if bounds is not None:
-                if len(elements) < _DEFAULT_MAX_ELEMENTS:
-                    try:
-                        label = _clip_label(element.CurrentName)
-                    except Exception:
-                        label = ""
-                    elements.append(
-                        {
-                            "index": len(elements) + 1,
-                            "role": _CONTROL_TYPE_NAMES[control_type],
-                            "label": label,
-                            "bounds": bounds,
-                        }
-                    )
-                else:
-                    spill += 1
+        yield element, control_type
         try:
             sibling = walker.GetNextSiblingElement(element)
             child = walker.GetFirstChildElement(element)
@@ -115,6 +99,77 @@ def walk_window(hwnd: int) -> list[dict]:
             stack.append(sibling)
         if child:
             stack.append(child)
+
+
+def walk_window(hwnd: int) -> list[dict]:
+    """Interactable elements of a window, in tree order.
+
+    Each element: {index (1-based), role, label, bounds (x, y, w, h)}; bounds
+    (0, 0, 0, 0) means geometry unknown. If the walk hits the surface cap, the
+    last item is a spill marker: {role: 'more', count: N}.
+    """
+    elements: list[dict] = []
+    spill = 0
+    for element, control_type in _walk_nodes(hwnd):
+        if control_type not in _CONTROL_TYPE_NAMES:
+            continue
+        bounds = _surface_bounds(element)
+        if bounds is None:
+            continue
+        if len(elements) >= _DEFAULT_MAX_ELEMENTS:
+            spill += 1
+            continue
+        try:
+            label = _clip_label(element.CurrentName)
+        except Exception:
+            label = ""
+        elements.append(
+            {
+                "index": len(elements) + 1,
+                "role": _CONTROL_TYPE_NAMES[control_type],
+                "label": label,
+                "bounds": bounds,
+            }
+        )
     if spill:
         elements.append({"role": "more", "count": spill})
     return elements
+
+
+def set_value_by_index(hwnd: int, wanted_index: int, value: str) -> None:
+    """Type a value into the element with that walk_window index, via UIA
+    ValuePattern — no mouse involved.
+
+    Re-walks the window so the index matches the last element list. Raises
+    ValueError with a plain message when the element is gone or cannot be
+    typed into; an ImportError from comtypes propagates to the caller."""
+    index = 0
+    for element, control_type in _walk_nodes(hwnd):
+        if control_type not in _CONTROL_TYPE_NAMES:
+            continue
+        if _surface_bounds(element) is None:
+            continue
+        index += 1
+        if index != wanted_index:
+            continue
+        try:
+            pattern = element.GetCurrentPattern(_VALUE_PATTERN_ID)
+        except Exception:
+            pattern = None
+        if pattern is None:
+            raise ValueError(f"Element {wanted_index} can't be typed into.")
+        if _uia_module is not None:
+            try:
+                pattern = pattern.QueryInterface(_uia_module.IUIAutomationValuePattern)
+            except Exception:
+                raise ValueError(f"Element {wanted_index} can't be typed into.")
+        try:
+            if pattern.CurrentIsReadOnly:
+                raise ValueError(f"Element {wanted_index} can't be typed into.")
+            pattern.SetValue(value)
+        except ValueError:
+            raise
+        except Exception as exc:
+            raise ValueError(f"The value could not be set on element {wanted_index}: {exc}") from exc
+        return
+    raise ValueError(f"Element {wanted_index} is not in this window right now — run desktop elements again.")

@@ -1008,13 +1008,28 @@ def pause_all(store: Store) -> int:
         for row in rows:
             if not row.get("paused"):
                 row["paused"] = True
+                row["next_run"] = None
                 changed = True
                 count += 1
         if changed:
             store.save_schedules(bot["id"], rows)
-    host = store.read_host()
-    host["paused_all"] = True
-    store.save_host(host)
+    return count
+
+
+def resume_all(store: Store) -> int:
+    now = datetime.now().astimezone()
+    count = 0
+    for bot in store.list_bots():
+        rows = store.list_schedules(bot["id"])
+        changed = False
+        for row in rows:
+            if row.get("paused"):
+                row["paused"] = False
+                stamp_next(row, now)
+                changed = True
+                count += 1
+        if changed:
+            store.save_schedules(bot["id"], rows)
     return count
 
 

@@ -64,6 +64,7 @@ from easyagent.schedule import (
     parse_cron,
     pause_all,
     preview,
+    resume_all,
     routine_views,
     run_routine_now,
     schedule_loop,
@@ -1862,6 +1863,10 @@ def create_app(data_dir: str | Path | None = None) -> FastAPI:
     @app.post("/api/routines/pause-all")
     def pause_all_routines():
         return {"paused": pause_all(store)}
+
+    @app.post("/api/routines/resume-all")
+    def resume_all_routines():
+        return {"resumed": resume_all(store)}
 
     @app.post("/api/bots/{bot_id}/schedules/{schedule_id}/pause")
     def pause_schedule(bot_id: str, schedule_id: str, body: SchedulePauseIn):

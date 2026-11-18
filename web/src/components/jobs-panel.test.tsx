@@ -1,7 +1,8 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { cleanup, render, screen } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import type { ReactNode } from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { api } from "@/api";
 import { JobsPanel } from "./JobsPanel";
 import { RoomPane } from "./RoomPane";
 import { useApp } from "@/store";
@@ -93,5 +94,44 @@ describe("jobs panel phone layout", () => {
     const panel = await screen.findByTestId("jobs-panel");
     expect(panel.className).toContain("w-[360px]");
     expect(panel.className).not.toContain("w-full");
+  });
+});
+
+describe("jobs panel footer resume all", () => {
+  afterEach(() => {
+    vi.mocked(api).mockReset();
+  });
+
+  function stubRoutines(rows: unknown[]) {
+    vi.mocked(api).mockImplementation(async (path: string) => {
+      if (path === "/api/routines") return rows;
+      if (path === "/api/usage/today") return { date: "2026-11-18", prompt_tokens: 0, completion_tokens: 0 };
+      return [];
+    });
+  }
+
+  it("shows Resume all when every routine is paused and clicking it posts resume-all", async () => {
+    stubRoutines([
+      { id: "r1", bot_id: "b1", bot_name: "Alpha", name: "Morning", state: "paused" },
+      { id: "r2", bot_id: "b2", bot_name: "Bravo", name: "Nightly", state: "paused" },
+    ]);
+    useApp.setState({ jobsOpen: true, highlightJob: "" });
+    render(wrap(<JobsPanel />));
+    const button = await screen.findByTestId("resume-all");
+    expect(button.textContent).toBe("Resume all");
+    expect(screen.queryByText("Pause all")).toBeNull();
+    fireEvent.click(button);
+    expect(vi.mocked(api)).toHaveBeenCalledWith("/api/routines/resume-all", { method: "POST" });
+  });
+
+  it("keeps Pause all when any routine is not paused", async () => {
+    stubRoutines([
+      { id: "r1", bot_id: "b1", bot_name: "Alpha", name: "Morning", state: "paused" },
+      { id: "r2", bot_id: "b2", bot_name: "Bravo", name: "Nightly", state: "ok" },
+    ]);
+    useApp.setState({ jobsOpen: true, highlightJob: "" });
+    render(wrap(<JobsPanel />));
+    expect(await screen.findByText("Pause all")).toBeTruthy();
+    expect(screen.queryByTestId("resume-all")).toBeNull();
   });
 });

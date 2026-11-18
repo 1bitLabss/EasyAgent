@@ -1463,7 +1463,6 @@ class Store:
             "background": False,
             "start_at_login": False,
             "explained": False,
-            "paused_all": False,
             "yolo": False,
         }
         if not path.is_file():
@@ -1475,7 +1474,7 @@ class Store:
 
     def save_host(self, host: dict) -> dict:
         current = self.read_host()
-        for key in ("background", "start_at_login", "explained", "paused_all", "yolo"):
+        for key in ("background", "start_at_login", "explained", "yolo"):
             if key in host:
                 current[key] = bool(host[key])
         with self._lock:
@@ -1487,7 +1486,7 @@ class Store:
         path = self.root / "host.json"
         if path.is_file():
             return self.read_host()
-        return self.save_host({"background": True, "start_at_login": False, "explained": False, "paused_all": False})
+        return self.save_host({"background": True, "start_at_login": False, "explained": False})
 
     def existing_ongoing(self, bot_id: str) -> dict | None:
         """The pinned conversation, or the newest chat. Does not create one and does not delete any."""

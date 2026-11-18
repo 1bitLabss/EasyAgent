@@ -212,13 +212,24 @@ export function JobsPanel() {
       <footer className="space-y-2 border-t border-border px-3 py-3 text-xs text-muted">
         <p>Runs only while EasyAgent is open.</p>
         {usageToday(usage.data) ? <p data-testid="usage-today">Today: {usageToday(usage.data)}</p> : null}
-        <button
-          type="button"
-          className="underline"
-          onClick={() => void api("/api/routines/pause-all", { method: "POST" }).then(() => queryClient.invalidateQueries({ queryKey: ["routines"] }))}
-        >
-          Pause all
-        </button>
+        {rows.length > 0 && rows.every((row) => row.state === "paused") ? (
+          <button
+            type="button"
+            data-testid="resume-all"
+            className="underline"
+            onClick={() => void api("/api/routines/resume-all", { method: "POST" }).then(() => queryClient.invalidateQueries({ queryKey: ["routines"] }))}
+          >
+            Resume all
+          </button>
+        ) : (
+          <button
+            type="button"
+            className="underline"
+            onClick={() => void api("/api/routines/pause-all", { method: "POST" }).then(() => queryClient.invalidateQueries({ queryKey: ["routines"] }))}
+          >
+            Pause all
+          </button>
+        )}
       </footer>
     </aside>
   );

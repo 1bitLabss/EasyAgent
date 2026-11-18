@@ -4413,6 +4413,12 @@ def _persist_room(room: dict) -> dict:
 
 _ROOM_RUNS: dict[str, dict] = {}
 _ROOM_LISTENERS: dict[str, list[asyncio.Queue]] = {}
+_ROOM_LOCKS: dict[str, asyncio.Lock] = {}
+
+
+def _room_lock(room_id: str) -> asyncio.Lock:
+    """One lock per room so a room's bot turns run one after another."""
+    return _ROOM_LOCKS.setdefault(room_id, asyncio.Lock())
 
 
 def _publish_room_event(room_id: str, item: str) -> None:
@@ -4492,7 +4498,6 @@ async def _stream_room_turn(store: Store, room_id: str, user_message: dict, targ
     cancel = asyncio.Event()
     listeners: list[asyncio.Queue] = []
     run = {"cancel": cancel, "listeners": listeners, "task": asyncio.current_task(), "statuses": {}}
-    _ROOM_RUNS[room_id] = run
 
     async def publish(item: str) -> None:
         for queue in list(listeners):
@@ -4510,129 +4515,138 @@ async def _stream_room_turn(store: Store, room_id: str, user_message: dict, targ
         yield _sse({"type": "user", "message": user_message})
         await publish(_sse({"type": "user", "message": user_message}))
 
-        async def one(bot_id: str, advance: asyncio.Event) -> None:
-            """One bot's turn. Bots answer one after another: each bot re-reads
-            the room when its turn starts, so it sees what earlier bots said."""
-            # The streaming task can inherit a stop flag left in the server
-            # thread's context by an unrelated earlier turn. A flag with no
-            # slot of ours bound is such an orphan: this new turn starts clean.
-            if turn_mod.cancel_is_orphaned():
-                turn_mod.renew_cancel()
-            name = bot_name(bot_id)
-            if cancel.is_set():
-                run["statuses"][bot_id] = {"state": "error", "label": f"{name} stopped", "name": name}
-                return
-            run["statuses"][bot_id] = {"state": "thinking", "label": f"{name} is thinking…", "name": name}
-            await publish(_room_status(bot_id, name, "thinking", f"{name} is thinking…"))
-            from easyagent.safety import list_pending
+        # A second message queues behind the running turn: the lock keeps
+        # _ROOM_RUNS pointed at the turn actually running, so Stop stops
+        # that turn, and each queued turn re-reads the transcript when it
+        # starts, so it sees everything that landed while it waited. The
+        # generator may be cancelled or closed on client disconnect; a
+        # plain async with releases the lock on GeneratorExit/CancelledError.
+        async with _room_lock(room_id):
+            _ROOM_RUNS[room_id] = run
 
-            snapshot = store.get_room(room_id)
-            task = asyncio.create_task(_complete_for_room_bot(store, snapshot, bot_id))
-            announced = False
-            while not task.done():
+            async def one(bot_id: str, advance: asyncio.Event) -> None:
+                """One bot's turn. Bots answer one after another: each bot re-reads
+                the room when its turn starts, so it sees what earlier bots said."""
+                # The streaming task can inherit a stop flag left in the server
+                # thread's context by an unrelated earlier turn. A flag with no
+                # slot of ours bound is such an orphan: this new turn starts clean.
+                if turn_mod.cancel_is_orphaned():
+                    turn_mod.renew_cancel()
+                name = bot_name(bot_id)
                 if cancel.is_set():
-                    task.cancel()
-                    break
-                cards = [card for card in list_pending(bot_id) if str(card.get("chat_id") or "") == room_id]
-                if cards and not announced:
-                    announced = True
-                    run["statuses"][bot_id] = {"state": "waiting_approval", "label": f"{name} waiting for approval", "name": name}
-                    note = _room_status(bot_id, name, "waiting_approval", f"{name} waiting for approval")
-                    card = cards[0]
-                    approval = _sse({"type": "approval", "bot_id": bot_id, "card": card})
-                    await publish(note)
-                    await publish(approval)
-                    # A waiting approval must not hold up the other bots.
-                    advance.set()
+                    run["statuses"][bot_id] = {"state": "error", "label": f"{name} stopped", "name": name}
+                    return
+                run["statuses"][bot_id] = {"state": "thinking", "label": f"{name} is thinking…", "name": name}
+                await publish(_room_status(bot_id, name, "thinking", f"{name} is thinking…"))
+                from easyagent.safety import list_pending
+
+                snapshot = store.get_room(room_id)
+                task = asyncio.create_task(_complete_for_room_bot(store, snapshot, bot_id))
+                announced = False
+                while not task.done():
+                    if cancel.is_set():
+                        task.cancel()
+                        break
+                    cards = [card for card in list_pending(bot_id) if str(card.get("chat_id") or "") == room_id]
+                    if cards and not announced:
+                        announced = True
+                        run["statuses"][bot_id] = {"state": "waiting_approval", "label": f"{name} waiting for approval", "name": name}
+                        note = _room_status(bot_id, name, "waiting_approval", f"{name} waiting for approval")
+                        card = cards[0]
+                        approval = _sse({"type": "approval", "bot_id": bot_id, "card": card})
+                        await publish(note)
+                        await publish(approval)
+                        # A waiting approval must not hold up the other bots.
+                        advance.set()
+                    try:
+                        await asyncio.wait_for(asyncio.shield(task), timeout=0.4)
+                    except asyncio.TimeoutError:
+                        continue
+                    except Exception:
+                        # The completion failed; task.result() below turns it into
+                        # an error message instead of ending this bot's turn silently.
+                        break
+                if cancel.is_set() and not task.done():
+                    run["statuses"][bot_id] = {"state": "error", "label": f"{name} stopped", "name": name}
+                    await publish(_room_status(bot_id, name, "error", f"{name} stopped"))
+                    return
                 try:
-                    await asyncio.wait_for(asyncio.shield(task), timeout=0.4)
-                except asyncio.TimeoutError:
-                    continue
-                except Exception:
-                    # The completion failed; task.result() below turns it into
-                    # an error message instead of ending this bot's turn silently.
-                    break
-            if cancel.is_set() and not task.done():
-                run["statuses"][bot_id] = {"state": "error", "label": f"{name} stopped", "name": name}
-                await publish(_room_status(bot_id, name, "error", f"{name} stopped"))
-                return
-            try:
-                visible, saved, error, choices, reacted = task.result()
-            except Exception as exc:
-                visible, saved, error, choices, reacted = "", [], str(exc), [], False
-            if not error and not (visible or "").strip() and not choices and reacted:
-                run["statuses"][bot_id] = {"state": "done", "label": f"{name} finished", "name": name}
-                await publish(_room_status(bot_id, name, "done", f"{name} finished"))
-                return
-            message = {
-                "id": new_id(),
-                "role": "assistant",
-                "speaker": bot_id,
-                "speaker_name": name,
-                "content": error or visible,
-                "created_at": now_iso(),
-            }
-            if error:
-                message["error"] = True
-            if choices and not error:
-                message["choices"] = choices
-            if saved:
-                message["skills_saved"] = saved
-            async with chat_lock(store, room_id):
-                room = store.get_room(room_id)
-                room["messages"].append(message)
-                _persist_room(room)
-                room["updated_at"] = now_iso()
-                store.save_room(room)
-            state = "error" if error else "done"
-            label = f"{name} could not reply" if error else f"{name} replied"
-            run["statuses"][bot_id] = {"state": state, "label": label, "name": name}
-            event = _sse({"type": "message", "message": message})
-            await publish(event)
-            await publish(_room_status(bot_id, name, state, label))
+                    visible, saved, error, choices, reacted = task.result()
+                except Exception as exc:
+                    visible, saved, error, choices, reacted = "", [], str(exc), [], False
+                if not error and not (visible or "").strip() and not choices and reacted:
+                    run["statuses"][bot_id] = {"state": "done", "label": f"{name} finished", "name": name}
+                    await publish(_room_status(bot_id, name, "done", f"{name} finished"))
+                    return
+                message = {
+                    "id": new_id(),
+                    "role": "assistant",
+                    "speaker": bot_id,
+                    "speaker_name": name,
+                    "content": error or visible,
+                    "created_at": now_iso(),
+                }
+                if error:
+                    message["error"] = True
+                if choices and not error:
+                    message["choices"] = choices
+                if saved:
+                    message["skills_saved"] = saved
+                async with chat_lock(store, room_id):
+                    room = store.get_room(room_id)
+                    room["messages"].append(message)
+                    _persist_room(room)
+                    room["updated_at"] = now_iso()
+                    store.save_room(room)
+                state = "error" if error else "done"
+                label = f"{name} could not reply" if error else f"{name} replied"
+                run["statuses"][bot_id] = {"state": state, "label": label, "name": name}
+                event = _sse({"type": "message", "message": message})
+                await publish(event)
+                await publish(_room_status(bot_id, name, state, label))
 
-        mine: asyncio.Queue = asyncio.Queue(maxsize=256)
-        listeners.append(mine)
-        for bot_id in targets:
-            name = bot_name(bot_id)
-            state = "thinking" if bot_id == targets[0] else "queued"
-            label = f"{name} is thinking…" if state == "thinking" else f"{name} queued"
-            run["statuses"][bot_id] = {"state": state, "label": label, "name": name}
-            note = _room_status(bot_id, name, state, label)
-            await publish(note)
-            yield note
-
-        async def chain() -> None:
-            started: list[asyncio.Task] = []
+            mine: asyncio.Queue = asyncio.Queue(maxsize=256)
+            listeners.append(mine)
             for bot_id in targets:
-                advance = asyncio.Event()
-                task = asyncio.create_task(one(bot_id, advance))
-                started.append(task)
-                # The next bot starts when this one has answered, failed, or
-                # gone waiting for an approval — never before.
-                waiter = asyncio.create_task(advance.wait())
-                await asyncio.wait({task, waiter}, return_when=asyncio.FIRST_COMPLETED)
-                waiter.cancel()
-            await asyncio.gather(*started, return_exceptions=True)
+                name = bot_name(bot_id)
+                state = "thinking" if bot_id == targets[0] else "queued"
+                label = f"{name} is thinking…" if state == "thinking" else f"{name} queued"
+                run["statuses"][bot_id] = {"state": state, "label": label, "name": name}
+                note = _room_status(bot_id, name, state, label)
+                await publish(note)
+                yield note
 
-        runner = asyncio.create_task(chain())
-        pending = {runner}
-        while pending or not mine.empty():
-            try:
-                item = await asyncio.wait_for(mine.get(), timeout=0.5)
-            except asyncio.TimeoutError:
+            async def chain() -> None:
+                started: list[asyncio.Task] = []
+                for bot_id in targets:
+                    advance = asyncio.Event()
+                    task = asyncio.create_task(one(bot_id, advance))
+                    started.append(task)
+                    # The next bot starts when this one has answered, failed, or
+                    # gone waiting for an approval — never before.
+                    waiter = asyncio.create_task(advance.wait())
+                    await asyncio.wait({task, waiter}, return_when=asyncio.FIRST_COMPLETED)
+                    waiter.cancel()
+                await asyncio.gather(*started, return_exceptions=True)
+
+            runner = asyncio.create_task(chain())
+            pending = {runner}
+            while pending or not mine.empty():
+                try:
+                    item = await asyncio.wait_for(mine.get(), timeout=0.5)
+                except asyncio.TimeoutError:
+                    pending = {task for task in pending if not task.done()}
+                    if not pending and mine.empty():
+                        break
+                    continue
+                if item:
+                    yield item
                 pending = {task for task in pending if not task.done()}
-                if not pending and mine.empty():
-                    break
-                continue
-            if item:
-                yield item
-            pending = {task for task in pending if not task.done()}
-        with suppress(Exception):
-            await runner
-        done = _sse({"type": "done", "room": _public_room(store, store.get_room(room_id))})
-        await publish(done)
-        yield done
+            with suppress(Exception):
+                await runner
+            done = _sse({"type": "done", "room": _public_room(store, store.get_room(room_id))})
+            await publish(done)
+            yield done
     finally:
         for queue in list(listeners):
             with suppress(Exception):

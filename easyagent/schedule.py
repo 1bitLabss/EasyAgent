@@ -78,22 +78,129 @@ def cron_matches(expression: str, when: datetime) -> bool:
     return day_ok or dow_ok
 
 
+def _day_ok(parsed, when: datetime) -> bool:
+    """Day/weekday match with cron's OR-semantics, using the already-parsed sets."""
+    _minute, _hour, day, _month, weekday, day_star, weekday_star = parsed
+    if day_star and weekday_star:
+        return True
+    day_hit = when.day in day
+    dow_hit = ((when.weekday() + 1) % 7) in weekday
+    if day_star:
+        return dow_hit
+    if weekday_star:
+        return day_hit
+    return day_hit or dow_hit
+
+
+def _next_month_start(y: int, m: int):
+    if m == 12:
+        return y + 1, 1
+    return y, m + 1
+
+
+def _aware_at(y: int, m: int, d: int, h: int, mi: int, tzinfo):
+    """The instants a wall minute names in tzinfo: [] in a gap, [first] normally, [first, second] when repeated."""
+    first = datetime(y, m, d, h, mi, tzinfo=tzinfo)
+    back = first.astimezone(timezone.utc).astimezone(tzinfo)
+    if (back.year, back.month, back.day, back.hour, back.minute) != (y, m, d, h, mi):
+        return []
+    second = first.replace(fold=1)
+    if second.utcoffset() != first.utcoffset():
+        return [first, second]
+    return [first]
+
+
+def _repeated_range(wall: datetime, tzinfo):
+    """The wall minutes around `wall` that name two instants (fall-back), or None if `wall` is not repeated."""
+    step = timedelta(minutes=1)
+
+    def repeated(w: datetime) -> bool:
+        return len(_aware_at(w.year, w.month, w.day, w.hour, w.minute, tzinfo)) == 2
+
+    if not repeated(wall):
+        return None
+    low = high = wall
+    while repeated(low - step):
+        low -= step
+    while repeated(high + step):
+        high += step
+    return low, high
+
+
+def _latest_cron_backward(parsed, cursor: datetime, lower: datetime, tzinfo) -> datetime | None:
+    """Jump-walk the wall clock backward from just below `cursor` for the newest matching instant."""
+    minute_set, hour_set, _day, month_set, _weekday, _day_star, _weekday_star = parsed
+    wall = cursor.replace(tzinfo=None) - timedelta(minutes=1)
+    while True:
+        if cursor < lower:
+            return None
+        if wall.month not in month_set:
+            month_start = datetime(wall.year, wall.month, 1)
+            wall = month_start - timedelta(minutes=1)
+            cursor = min(cursor, month_start.replace(tzinfo=tzinfo))
+            continue
+        if not _day_ok(parsed, wall):
+            day_start = datetime(wall.year, wall.month, wall.day)
+            wall = day_start - timedelta(minutes=1)
+            cursor = min(cursor, day_start.replace(tzinfo=tzinfo))
+            continue
+        if wall.hour not in hour_set:
+            hour_start = datetime(wall.year, wall.month, wall.day, wall.hour)
+            wall = hour_start - timedelta(minutes=1)
+            cursor = min(cursor, hour_start.replace(tzinfo=tzinfo))
+            continue
+        # Month, day and hour match: only the minutes inside this hour can match.
+        for mi in sorted((v for v in minute_set if v <= wall.minute), reverse=True):
+            instants = _aware_at(wall.year, wall.month, wall.day, wall.hour, mi, tzinfo)
+            if not instants:
+                continue  # A spring-forward minute is not an instant the old walk could land on.
+            hit = next((i for i in reversed(instants) if i <= cursor), instants[-1])
+            return hit if hit >= lower else None
+        hour_start = datetime(wall.year, wall.month, wall.day, wall.hour)
+        wall = hour_start - timedelta(minutes=1)
+        cursor = min(cursor, hour_start.replace(tzinfo=tzinfo))
+
+
 def latest_cron_slot(expression: str, now: datetime, created_at: datetime) -> datetime | None:
     """The latest local minute at or before `now` that matches and starts after the schedule was created."""
-    parse_cron(expression)
+    parsed = parse_cron(expression)
+    minute_set, hour_set, _day, month_set, _weekday, _day_star, _weekday_star = parsed
     cursor = now.replace(second=0, microsecond=0)
     created_minute = created_at.astimezone(cursor.tzinfo).replace(second=0, microsecond=0)
     earliest = created_minute + timedelta(minutes=1)
     if cursor < earliest:
         return None
     # A year of minutes is enough for any expression that fires at least yearly.
-    for _ in range(366 * 24 * 60):
-        if cursor < earliest:
-            return None
-        if cron_matches(expression, cursor):
-            return cursor
-        cursor -= timedelta(minutes=1)
-    return None
+    lower = max(earliest, cursor - timedelta(minutes=366 * 24 * 60 - 1))
+    # The old walk tested `now` itself first, even if that wall minute sits in a gap.
+    if (cursor.minute in minute_set and cursor.hour in hour_set
+            and cursor.month in month_set and _day_ok(parsed, cursor)):
+        return cursor
+    # Past `now` the old walk stepped by real minutes, so a gap-time `now`
+    # continues from its normalized wall clock, not from the gap wall fields.
+    cursor = cursor.astimezone(cursor.tzinfo)
+    best = _latest_cron_backward(parsed, cursor, lower, cursor.tzinfo)
+    # If `now` sits in the second occurrence of a fall-back hour, the old instant walk
+    # also revisited the first occurrence of that hour after finishing the second one.
+    first = cursor.replace(fold=0)
+    second = cursor.replace(fold=1)
+    if second.utcoffset() != first.utcoffset() and cursor == second:
+        span = _repeated_range(cursor.replace(tzinfo=None), cursor.tzinfo)
+        if span is not None:
+            low, high = span
+            step = timedelta(minutes=1)
+            probe = high
+            while True:
+                if (probe.minute in minute_set and probe.hour in hour_set
+                        and probe.month in month_set and _day_ok(parsed, probe)):
+                    instant = probe.replace(tzinfo=cursor.tzinfo, fold=0)
+                    if lower <= instant <= cursor and (best is None or instant > best):
+                        best = instant
+                    break
+                if probe == low:
+                    break
+                probe -= step
+    return best
 
 
 def interval_slot(every_minutes: int, now: datetime, created_at: datetime) -> str | None:
@@ -1099,21 +1206,34 @@ def _zone_ok(name: str) -> bool:
 
 def next_cron_time(expression: str, after: datetime, zone) -> datetime | None:
     """The next wall-clock match after `after`. A skipped hour is skipped. A repeated hour fires once."""
-    parse_cron(expression)
+    parsed = parse_cron(expression)
+    minute_set, hour_set, _day, month_set, _weekday, _day_star, _weekday_star = parsed
     local = after.astimezone(zone)
-    y, m, d, h, mi = _add_wall_minute(local.year, local.month, local.day, local.hour, local.minute)
-    for _ in range(366 * 24 * 60):
-        if _wall_exists(y, m, d, h, mi, zone):
-            aware = datetime(y, m, d, h, mi, tzinfo=zone)
-            if cron_matches(expression, aware):
-                return aware
-        y, m, d, h, mi = _add_wall_minute(y, m, d, h, mi)
+    wall = datetime(local.year, local.month, local.day, local.hour, local.minute) + timedelta(minutes=1)
+    # A year of minutes is enough for any expression that fires at least yearly.
+    deadline = wall + timedelta(minutes=366 * 24 * 60 - 1)
+    # Walk the wall clock forward with field-aware jumps. The old minute-by-minute
+    # walk re-parsed the expression every minute and burned seconds on rare crons.
+    while wall <= deadline:
+        if wall.month not in month_set:
+            y, m = _next_month_start(wall.year, wall.month)
+            wall = datetime(y, m, 1, 0, 0)
+            continue
+        if not _day_ok(parsed, wall):
+            wall = datetime(wall.year, wall.month, wall.day) + timedelta(days=1)
+            continue
+        if wall.hour not in hour_set:
+            wall = datetime(wall.year, wall.month, wall.day, wall.hour) + timedelta(hours=1)
+            continue
+        # Month, day and hour match: only the minutes inside this hour can match.
+        for mi in sorted(v for v in minute_set if v >= wall.minute):
+            candidate = datetime(wall.year, wall.month, wall.day, wall.hour, mi)
+            if candidate > deadline:
+                return None
+            if _wall_exists(candidate.year, candidate.month, candidate.day, candidate.hour, mi, zone):
+                return candidate.replace(tzinfo=zone)
+        wall = datetime(wall.year, wall.month, wall.day, wall.hour) + timedelta(hours=1)
     return None
-
-
-def _add_wall_minute(y: int, m: int, d: int, h: int, mi: int):
-    cursor = datetime(y, m, d, h, mi) + timedelta(minutes=1)
-    return cursor.year, cursor.month, cursor.day, cursor.hour, cursor.minute
 
 
 def _wall_exists(y: int, m: int, d: int, h: int, mi: int, zone) -> bool:

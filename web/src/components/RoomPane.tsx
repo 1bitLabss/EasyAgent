@@ -24,6 +24,7 @@ export function RoomPane() {
   const [statuses, setStatuses] = useState<Status[]>([]);
   const [approvals, setApprovals] = useState<{ bot_id: string; name: string }[]>([]);
   const [error, setError] = useState("");
+  const [liveDropped, setLiveDropped] = useState(false);
   const data = room.data;
   const messageCount = (data?.messages || []).length;
 
@@ -92,6 +93,7 @@ export function RoomPane() {
         try {
           const response = await fetch(`/api/rooms/${roomId}/live`, { headers: { Accept: "text/event-stream" }, signal: control.signal });
           if (!response.ok || !response.body) throw new Error("live closed");
+          setLiveDropped(false);
           const reader = response.body.getReader();
           const decoder = new TextDecoder();
           let buffer = "";
@@ -127,6 +129,7 @@ export function RoomPane() {
           /* the reconnect below attaches again */
         }
         if (control.signal.aborted) break;
+        setLiveDropped(true);
         await new Promise<void>((resolve) => {
           timer = window.setTimeout(resolve, 800);
           control.signal.addEventListener("abort", () => { window.clearTimeout(timer); resolve(); }, { once: true });
@@ -204,8 +207,8 @@ export function RoomPane() {
             const live = statuses.find((item) => item.bot_id === member.id);
             return (
               <span key={member.id} className="flex items-center gap-0.5">
-                <span data-testid="room-member-chip" data-state={live?.state || "idle"} className="rounded-full border border-border px-2 py-0.5 text-xs">
-                  {member.name}
+                <span data-testid="room-member-chip" data-state={live?.state || "idle"} data-missing={member.missing ? "true" : undefined} className={member.missing ? "rounded-full border border-border px-2 py-0.5 text-xs text-danger" : "rounded-full border border-border px-2 py-0.5 text-xs"}>
+                  {member.name}{member.missing ? " (no longer here)" : ""}
                 </span>
                 <button
                   type="button"
@@ -237,7 +240,7 @@ export function RoomPane() {
         {messages.map((message) => (
           <article key={message.id} className={message.role === "user" ? "ml-auto max-w-lg text-right" : "max-w-lg"}>
             {message.role !== "user" ? <p className="text-xs text-muted" data-testid="room-speaker">{message.speaker_name}</p> : <p className="text-xs text-muted">You</p>}
-            <p className="whitespace-pre-wrap text-sm">{message.content}</p>
+            <p className={message.error ? "whitespace-pre-wrap text-sm text-danger" : "whitespace-pre-wrap text-sm"} data-testid={message.error ? "room-error-row" : undefined}>{message.content}</p>
           </article>
         ))}
         {pending ? <article className="ml-auto max-w-lg text-right"><p className="text-xs text-muted">You</p><p className="text-sm" data-testid="room-optimistic">{pending}</p></article> : null}
@@ -255,6 +258,7 @@ export function RoomPane() {
             </div>
           );
         })}
+        {liveDropped ? <div className="sys-line" role="status" data-testid="room-reconnecting"><p className="text-muted">Reconnecting…</p></div> : null}
         {(data.pending_approvals || []).map((card) => (
           <div key={card.id} data-testid="room-approval">
             <p className="text-xs text-muted">{card.why}</p>

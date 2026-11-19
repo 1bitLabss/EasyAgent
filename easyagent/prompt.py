@@ -152,6 +152,12 @@ notes.txt
 what the file says
 ```
 
+To hand back a file already on the computer, put its full path alone in the fence. The person gets a card to open or download it.
+
+```file
+C:/work/report.pdf
+```
+
 # Memory
 Memory is files on this computer. Read the index, then only the topics this message needs. File a new line with the memory tool. If nothing lasting was learned, do not write a note.
 

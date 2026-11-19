@@ -6,6 +6,7 @@ import asyncio
 import base64
 import json
 import logging
+import mimetypes
 import os
 import re
 import threading
@@ -7649,6 +7650,38 @@ def _preview_attachment(store: Store, bot_id: str, chat_id: str, made: str, visi
     return _public_attachment({**meta, "excerpt": excerpt, "path": str(resolved)})
 
 
+def _handback_attachment(store: Store, bot_id: str, chat_id: str, handed: dict) -> dict | None:
+    """A ```file fence naming a real path hands back that file. Same gates as a turn-written preview."""
+    try:
+        resolved = Path(str(handed.get("path") or "")).resolve()
+        if not resolved.is_file():
+            return None
+        size = resolved.stat().st_size
+        if size <= 0 or size > 1_000_000:
+            return None
+        root = store.root.resolve()
+        if resolved == root or root in resolved.parents:
+            return None
+        data = resolved.read_bytes()
+    except OSError:
+        return None
+    if not data or contains_secret(store, data):
+        return None
+    media = mimetypes.guess_type(resolved.name)[0] or "application/octet-stream"
+    try:
+        meta = store.save_chat_file(
+            bot_id,
+            chat_id,
+            name=str(handed.get("name") or resolved.name),
+            media_type=media,
+            data=data,
+            source=str(resolved),
+        )
+    except StoreError:
+        return None
+    return _public_attachment(meta) if meta else None
+
+
 def _settle_chips(chat: dict) -> None:
     from easyagent.plan import mark_answered
 
@@ -7685,7 +7718,11 @@ def _finish_reply(
     visible = keep_lessons(store, bot_id, visible)
     visible, handed = take_file(visible)
     attachment = _preview_attachment(store, bot_id, chat_id, made, visible)
-    if attachment is None and handed:
+    if attachment is None and handed and handed.get("path"):
+        attachment = _handback_attachment(store, bot_id, chat_id, handed)
+        if attachment and not visible.strip():
+            visible = f"Attached {handed['name']}."
+    if attachment is None and handed and handed.get("body") is not None:
         body = redact(store, handed["body"])
         data = body.encode("utf-8")
         if body.strip() and not contains_secret(store, data):

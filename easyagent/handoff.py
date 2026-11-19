@@ -30,18 +30,24 @@ def take_memory(text: str) -> tuple[str, str | None]:
 
 
 def take_file(text: str) -> tuple[str, dict | None]:
-    """Pull one handed-back file. The first line is the name. The rest is the body."""
+    """Pull one handed-back file. The first line is the name. The rest is the body.
+
+    A fence with only a path line hands back a file already on the computer.
+    """
     match = _FILE.search(text or "")
     if not match:
         return text or "", None
     raw = match.group(1).strip("\n")
     lines = raw.splitlines()
-    if len(lines) < 2 or not lines[0].strip():
+    if not lines or not lines[0].strip():
         return text or "", None
-    name = Path(lines[0].strip()).name
+    path_line = lines[0].strip()
+    if len(lines) < 2:
+        return _strip_one(_FILE, text), {"name": Path(path_line).name, "path": path_line}
+    name = Path(path_line).name
     cleaned = "".join(ch for ch in name if ch.isalnum() or ch in "._- ").strip()
     name = (cleaned or "file.txt")[:80]
     body = "\n".join(lines[1:])
     if not body.strip():
-        return _strip_one(_FILE, text), None
+        return _strip_one(_FILE, text), {"name": name, "path": path_line}
     return _strip_one(_FILE, text), {"name": name, "body": body}

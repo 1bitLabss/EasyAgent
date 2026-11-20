@@ -133,7 +133,9 @@ def test_walk_budget_stops_at_two_hundred_nodes(monkeypatch):
     elements = desktop_uia.walk_window(0)
     assert FakeElement.touched <= 200
     assert FakeElement.touched == 200  # the hard cap, not an early stop
-    assert len([e for e in elements if e.get("role") != "more"]) == 100
+    # Wave 2: a walk that exhausts its node budget now also appends a
+    # {role: "truncated"} marker so callers can fall back to pixels.
+    assert len([e for e in elements if e.get("role") not in ("more", "truncated")]) == 100
 
 
 # ------------------------------------------------------------- click by index

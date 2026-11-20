@@ -183,7 +183,9 @@ def test_drag_element_pair_uses_bounds_centers_and_invalidates(monkeypatch, fake
         None, ToolRequest(kind="desktop", action="drag", command="element:1|element:2"), "bot"
     )
     assert fake.drags == [(150, 230, 350, 430)]
-    assert "Dragged from 150,230 to 350,430" in text and "verify_fresh_state" in text
+    # Wave 2 verdict ladder: an element drag on an unchanged fake tree now reads
+    # escalate (suspected no-op), not verify_fresh_state.
+    assert "Dragged from 150,230 to 350,430" in text and "escalate" in text
     with pytest.raises(ToolError) as caught:
         perform(None, ToolRequest(kind="desktop", action="click", command="element:1"), "bot")
     assert "no element list yet" in str(caught.value)
@@ -229,7 +231,8 @@ def test_set_value_types_through_the_value_pattern(monkeypatch, fake):
         None, ToolRequest(kind="desktop", action="set_value", command="element:2", body="hello"), "bot"
     )
     assert target.set_values == ["hello"]
-    assert "Set element 2 to 5 characters" in text and "verify_fresh_state" in text
+    # Wave 2 verdict ladder: element set_value on an unchanged fake tree reads escalate.
+    assert "Set element 2 to 5 characters" in text and "escalate" in text
     with pytest.raises(ToolError) as caught:
         perform(None, ToolRequest(kind="desktop", action="click", command="element:1"), "bot")
     assert "no element list yet" in str(caught.value)  # snapshot invalidated

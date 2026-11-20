@@ -106,11 +106,15 @@ def walk_window(hwnd: int) -> list[dict]:
 
     Each element: {index (1-based), role, label, bounds (x, y, w, h)}; bounds
     (0, 0, 0, 0) means geometry unknown. If the walk hits the surface cap, the
-    last item is a spill marker: {role: 'more', count: N}.
+    last items carry a spill marker: {role: 'more', count: N}. If the walk ran
+    out of its node budget (a hung or enormous tree), a {role: 'truncated'}
+    marker is appended so callers can fall back to pixels.
     """
     elements: list[dict] = []
     spill = 0
+    visited = 0
     for element, control_type in _walk_nodes(hwnd):
+        visited += 1
         if control_type not in _CONTROL_TYPE_NAMES:
             continue
         bounds = _surface_bounds(element)
@@ -133,6 +137,8 @@ def walk_window(hwnd: int) -> list[dict]:
         )
     if spill:
         elements.append({"role": "more", "count": spill})
+    if visited >= _MAX_NODES_VISITED:
+        elements.append({"role": "truncated"})
     return elements
 
 

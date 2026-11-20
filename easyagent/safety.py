@@ -379,7 +379,7 @@ def wrap_output(request, text: str, store: Store | None = None) -> str:
         return mark_untrusted(cleaned)
     if kind == "browser" and action in {"read", "open", "tabs"}:
         return mark_untrusted(cleaned)
-    if kind == "desktop" and action in {"capture", "list_windows"}:
+    if kind == "desktop" and action in {"capture", "elements", "list_windows"}:
         return mark_untrusted(cleaned)
     return cleaned
 
@@ -4533,6 +4533,22 @@ async def guard(store: Store, request, bot_id: str | None):
                 },
             )
             raise ToolError(FLOOR_MESSAGE + " It was not run.")
+        if verdict.tier == BLOCK and verdict.rule == "desktop-blocked":
+            # Desktop hard blocks (ctrl-alt-delete spellings, curl|bash text)
+            # sit before any approval and YOLO does not lift them.
+            _audit(
+                store,
+                bot_id,
+                {
+                    "at": now_iso(),
+                    "decision": "block",
+                    "tag": "yolo",
+                    "rule": verdict.rule,
+                    "why": verdict.why,
+                    "detail": verdict.detail,
+                },
+            )
+            raise ToolError(_not_run(verdict.why))
         if verdict.tier in {BLOCK, ASK}:
             _audit(
                 store,

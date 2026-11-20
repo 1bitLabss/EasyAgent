@@ -633,22 +633,24 @@ NATIVE_TOOLS = [
         ["action"],
     ),
     _tool(
-        "desktop",
+        "computer",
         "Look at and use this computer's own screen on Windows. "
-        "action is capture, elements, list_windows, click, double_click, type, key, scroll, drag, set_value, or wait. "
-        "Capture first, then act on what you saw, then capture again to check. "
-        "elements lists the window's numbered controls; click or double_click takes element=N from that list "
-        "or a coordinate like 640,480. key takes a combo like ctrl-alt-delete. "
-        "scroll takes direction (up, down, left, or right) and an optional amount of 1 to 50, default 3, "
-        "optionally at element=N or a coordinate. "
-        "drag takes from_element and to_element, or from_coordinate and to_coordinate like 640,480. "
-        "set_value types straight into element=N from the element list without moving the mouse. "
+        "action is capture, list_windows, click, double_click, right_click, type, key, scroll, or wait. "
+        "capture mode is vision (plain picture), som (picture with numbered controls), or ax (control tree as text); "
+        "som gives element numbers for click element=N. Coordinates are screen pixels. "
+        "Capture first, then act, then follow the verdict on every result: done means the change was confirmed — "
+        "never repeat that input; verify_fresh_state means capture again before the next input; "
+        "escalate means the action likely did not land — follow the recommendation. "
+        "capture_after re-captures the same target in the same result. "
+        "key takes a combo like ctrl-alt-delete. scroll takes direction (up, down, left, right) and an optional "
+        "amount of 1 to 50, default 3. wait takes seconds, up to 30. "
         "Do not type a password, a card number, or a 2FA code.",
         {
-            "action": _STRING, "window": _STRING, "coordinate": _STRING, "element": _STRING,
+            "action": _STRING, "mode": _STRING, "window": _STRING, "coordinate": _STRING, "element": _STRING,
             "text": _STRING, "combo": _STRING, "seconds": _STRING, "direction": _STRING,
             "amount": _STRING, "from_element": _STRING, "to_element": _STRING,
             "from_coordinate": _STRING, "to_coordinate": _STRING, "value": _STRING,
+            "capture_after": _STRING,
         },
         ["action"],
     ),

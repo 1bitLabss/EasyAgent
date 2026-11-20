@@ -399,6 +399,10 @@ class ToolRequest:
     workdir: str = ""
     schema_json: str = ""
     background: bool = False
+    # Desktop (computer) extras: capture mode (vision|som|ax) and whether an
+    # action should re-capture the same target in the same result.
+    mode: str = ""
+    capture_after: bool = False
     # A batch of questions asked in one stop. Each item is
     # {"question": str, "choices": tuple[str, ...]}. body/choices still hold the
     # first question so old readers keep working; questions is set only for >=2.
@@ -3483,7 +3487,7 @@ def _browser_request(raw: dict) -> ToolRequest:
 
 _DESKTOP_ACTIONS = {
     "capture", "elements", "list_windows", "wait", "click", "double_click",
-    "type", "key", "scroll", "drag", "set_value",
+    "right_click", "type", "key", "scroll", "drag", "set_value",
 }
 
 
@@ -3507,17 +3511,25 @@ def _desktop_request(raw: dict) -> ToolRequest:
     if action not in _DESKTOP_ACTIONS:
         raise ToolError(
             "That desktop action is not available yet. It is capture, elements, list_windows, "
-            "click, double_click, type, key, scroll, drag, set_value, or wait."
+            "click, double_click, right_click, type, key, scroll, drag, set_value, or wait."
         )
+    capture_after = bool(raw.get("capture_after"))
     if action == "capture":
-        return ToolRequest(kind="desktop", action="capture", path=str(raw.get("window") or "").strip())
+        mode = str(raw.get("mode") or "vision").strip().lower()
+        if mode not in ("vision", "som", "ax"):
+            raise ToolError(
+                "capture mode must be vision, som, or ax — did you mean mode=som for the marked-up picture?"
+            )
+        return ToolRequest(
+            kind="desktop", action="capture", path=str(raw.get("window") or "").strip(), mode=mode
+        )
     if action == "elements":
         return ToolRequest(kind="desktop", action="elements", path=str(raw.get("window") or "").strip())
     if action == "list_windows":
         return ToolRequest(kind="desktop", action="list_windows")
     if action == "wait":
         return ToolRequest(kind="desktop", action="wait", command=str(raw.get("seconds") or "1").strip())
-    if action in {"click", "double_click"}:
+    if action in {"click", "double_click", "right_click"}:
         coordinate = str(raw.get("coordinate") or raw.get("command") or "").strip()
         if not coordinate and raw.get("x") is not None and raw.get("y") is not None:
             coordinate = f"{raw.get('x')},{raw.get('y')}"
@@ -3527,15 +3539,15 @@ def _desktop_request(raw: dict) -> ToolRequest:
         if element:
             if not element.isdigit():
                 raise ToolError("An element click needs a number from the element list.")
-            return ToolRequest(kind="desktop", action=action, command=f"element:{int(element)}")
+            return ToolRequest(kind="desktop", action=action, command=f"element:{int(element)}", capture_after=capture_after)
         if not coordinate:
             raise ToolError("A click needs a coordinate like 640,480, or an element number from the element list.")
-        return ToolRequest(kind="desktop", action=action, command=coordinate)
+        return ToolRequest(kind="desktop", action=action, command=coordinate, capture_after=capture_after)
     if action == "type":
         text = str(raw.get("text") or raw.get("value") or "")
         if not text.strip():
             raise ToolError("Type needs the text to type.")
-        return ToolRequest(kind="desktop", action="type", body=text)
+        return ToolRequest(kind="desktop", action="type", body=text, capture_after=capture_after)
     if action == "scroll":
         direction = str(raw.get("direction") or "").strip().lower()
         if direction not in {"up", "down", "left", "right"}:
@@ -3547,14 +3559,14 @@ def _desktop_request(raw: dict) -> ToolRequest:
         amount = 3 if amount is None or amount == "" else amount
         return ToolRequest(
             kind="desktop", action="scroll",
-            command=f"{direction}|{clamp_scroll_amount(amount)}|{spot}",
+            command=f"{direction}|{clamp_scroll_amount(amount)}|{spot}", capture_after=capture_after,
         )
     if action == "drag":
         start = _desktop_spot(raw, "from_")
         end = _desktop_spot(raw, "to_")
         if not start or not end:
             raise ToolError("A drag needs from/to elements or from/to coordinates.")
-        return ToolRequest(kind="desktop", action="drag", command=f"{start}|{end}")
+        return ToolRequest(kind="desktop", action="drag", command=f"{start}|{end}", capture_after=capture_after)
     if action == "set_value":
         element = str(raw.get("element") or "").strip()
         value = str(raw.get("value") or raw.get("text") or "")
@@ -3562,11 +3574,11 @@ def _desktop_request(raw: dict) -> ToolRequest:
             raise ToolError("set_value needs an element number from the element list.")
         if not value:
             raise ToolError("set_value needs the text to set.")
-        return ToolRequest(kind="desktop", action="set_value", command=f"element:{int(element)}", body=value)
+        return ToolRequest(kind="desktop", action="set_value", command=f"element:{int(element)}", body=value, capture_after=capture_after)
     combo = str(raw.get("combo") or raw.get("key") or raw.get("text") or "").strip()
     if not combo:
         raise ToolError("A key action needs a combo like ctrl-alt-delete.")
-    return ToolRequest(kind="desktop", action="key", command=combo)
+    return ToolRequest(kind="desktop", action="key", command=combo, capture_after=capture_after)
 
 
 def _browser_from_body(body: str) -> ToolRequest | None:

@@ -27,6 +27,9 @@ def fake(monkeypatch):
     reset_for_tests()
     monkeypatch.setattr(desktop, "_ensure_interactive", lambda: None)
     monkeypatch.setattr(desktop, "_grab", lambda bbox: Image.new("RGB", (40, 30)))
+    # Wave 2: a picture-blind capture now tries the ax tree first. Keep this
+    # file hermetic — no real UIAutomation walk, degrade to the window list.
+    monkeypatch.setattr(desktop, "_ax_tree_text", lambda bbox, bot_id: "")
     monkeypatch.setattr(desktop, "list_windows_text", lambda: 'Windows on this computer, frontmost first (1):\n[123] "Notepad" at 0,0 size 800x600')
     clicks: list = []
     typed: list = []

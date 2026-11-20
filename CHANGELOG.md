@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.3.60
+- **A judge can decide when the goal is done.** A chat can arm its keep-going run with a judge: after each turn a second look at the work decides — done, stuck, keep going, or wait — and the judge's one-sentence reason shows in the chat. "Done" needs the deliverable to actually exist; "stuck" pauses with the reason instead of pretending; waiting for a background worker costs nothing. If the judge itself keeps failing to answer, the run pauses honestly and says so. The plain counter keeps working as the default — nothing changes until you arm the judge.
+- **Bots can drive the desktop.** A bot can look at the screen, read the controls on it, click them by number, type, scroll, and drag — and after each action it checks whether the screen actually changed instead of guessing. Risky key combos are blocked even in YOLO mode, and each kind of action asks for its own permission the first time.
+- **Phones keep working.** The home-screen install now gets an encrypted address, so it survives networks that block plain traffic; when the Wi-Fi is wrong the app says so plainly and keeps trying, and a reconnecting banner tells you why a room looks frozen.
+- **A bot asks its questions in one go.** Up to five questions in one stop, answered in one reply, instead of a ping-pong chain.
+- Fixes: a single failed call no longer reads as a blockage (bots retry before they report one); a second room message queues behind the running turn instead of stealing its stop handle; rare schedules stop burning seconds every tick; Pause all has a matching Resume all; a file already on the computer can be handed over by naming its path.
+
 ## 0.3.59
 - Keep-going now runs until the work is done or it truly stalls. The old budget counted continuations; now a continuation that changes the plan at all — finishing a step, reopening one, adding a subtask — counts as progress and buys another turn. Only two continuations in a row that change nothing close the run, and the run says what is left. When the cap is reached, the chat says "Send continue" instead of going quiet.
 - Keep-going arms itself. A bot that makes a multi-step plan starts keeping going on its own — nothing to declare. The chip still lets you stop it, and your stop sticks.

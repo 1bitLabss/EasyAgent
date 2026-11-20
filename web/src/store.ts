@@ -20,6 +20,21 @@ export type ConfirmRequest = {
   run: () => Promise<void>;
 };
 
+/** Curated accent presets. "default" means no class on <html> and keeps the
+ * monochrome look the app shipped with. The colors themselves live in
+ * index.css as html.accent-<id> rules; the swatch is only a preview. */
+export const ACCENTS = [
+  { id: "default", label: "Default", swatch: "#171717" },
+  { id: "blue", label: "Blue", swatch: "hsl(221 83% 45%)" },
+  { id: "green", label: "Green", swatch: "hsl(142 66% 32%)" },
+  { id: "violet", label: "Violet", swatch: "hsl(263 70% 45%)" },
+  { id: "amber", label: "Amber", swatch: "hsl(32 90% 38%)" },
+  { id: "rose", label: "Rose", swatch: "hsl(347 77% 44%)" },
+] as const;
+
+export type AccentId = (typeof ACCENTS)[number]["id"];
+export type TextSize = "normal" | "large";
+
 type AppState = {
   screen: Screen;
   botId: string | null;
@@ -29,6 +44,8 @@ type AppState = {
   infoOpen: boolean;
   railOpen: boolean;
   theme: "light" | "dark";
+  accent: AccentId;
+  textSize: TextSize;
   switcher: boolean;
   offline: string;
   tokenNeeded: boolean;
@@ -54,6 +71,8 @@ type AppState = {
   setInfo: (open: boolean) => void;
   setRail: (open: boolean) => void;
   toggleTheme: () => void;
+  setAccent: (accent: AccentId) => void;
+  setTextSize: (size: TextSize) => void;
   setSwitcher: (open: boolean) => void;
   setOffline: (message: string) => void;
   setTokenNeeded: (needed: boolean) => void;
@@ -69,6 +88,52 @@ function savedTheme(): "light" | "dark" {
     return localStorage.getItem("easyagent.theme") === "dark" ? "dark" : "light";
   } catch {
     return "light";
+  }
+}
+
+function savedAccent(): AccentId {
+  try {
+    const stored = localStorage.getItem("easyagent.accent");
+    return ACCENTS.some((accent) => accent.id === stored) ? (stored as AccentId) : "default";
+  } catch {
+    return "default";
+  }
+}
+
+function savedTextSize(): TextSize {
+  try {
+    return localStorage.getItem("easyagent.textSize") === "large" ? "large" : "normal";
+  } catch {
+    return "normal";
+  }
+}
+
+/** The classes ride <html> so every CSS rule can see them. Only one accent
+ * class is ever present; removing it restores the default look exactly. */
+function applyAccent(accent: AccentId) {
+  try {
+    for (const item of ACCENTS) {
+      if (item.id === "default") continue;
+      document.documentElement.classList.toggle(`accent-${item.id}`, item.id === accent);
+    }
+  } catch {
+    /* no document in this environment; the choice still persists */
+  }
+}
+
+function applyTextSize(size: TextSize) {
+  try {
+    document.documentElement.classList.toggle("text-large", size === "large");
+  } catch {
+    /* same */
+  }
+}
+
+function applyTheme(theme: "light" | "dark") {
+  try {
+    document.documentElement.classList.toggle("dark", theme === "dark");
+  } catch {
+    /* same */
   }
 }
 
@@ -97,6 +162,8 @@ export const useApp = create<AppState>((set) => ({
   infoOpen: true,
   railOpen: false,
   theme: savedTheme(),
+  accent: savedAccent(),
+  textSize: savedTextSize(),
   switcher: false,
   offline: "",
   tokenNeeded: false,
@@ -135,8 +202,27 @@ export const useApp = create<AppState>((set) => ({
       } catch {
         /* the choice still applies for this visit */
       }
+      applyTheme(theme);
       return { theme };
     }),
+  setAccent: (accent) => {
+    try {
+      localStorage.setItem("easyagent.accent", accent);
+    } catch {
+      /* the choice still applies for this visit */
+    }
+    applyAccent(accent);
+    set({ accent });
+  },
+  setTextSize: (textSize) => {
+    try {
+      localStorage.setItem("easyagent.textSize", textSize);
+    } catch {
+      /* the choice still applies for this visit */
+    }
+    applyTextSize(textSize);
+    set({ textSize });
+  },
   setSwitcher: (switcher) => set({ switcher }),
   setOffline: (offline) => set({ offline }),
   setTokenNeeded: (tokenNeeded) => set({ tokenNeeded }),
@@ -146,3 +232,8 @@ export const useApp = create<AppState>((set) => ({
   askConfirm: (confirm) => set({ confirm }),
   closeConfirm: () => set({ confirm: null }),
 }));
+
+// A reload restores the saved look before the first paint, not after a mount.
+applyTheme(useApp.getState().theme);
+applyAccent(useApp.getState().accent);
+applyTextSize(useApp.getState().textSize);

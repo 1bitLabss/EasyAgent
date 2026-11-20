@@ -33,6 +33,7 @@
   --muted: 0 0% 45%;
   --border: 0 0% 92%;
   --accent: 0 0% 9%;
+  --accent-foreground: 0 0% 100%;
   --danger: 0 72% 42%;
   --sidebar: 0 0% 98%;
   --rail: #fafafa;
@@ -46,10 +47,66 @@
   --muted: 0 0% 64%;
   --border: 0 0% 18%;
   --accent: 0 0% 96%;
+  --accent-foreground: 0 0% 7%;
   --danger: 0 70% 68%;
   --sidebar: 0 0% 10%;
   --rail: #111111;
   color-scheme: dark;
+}
+
+/* Accent presets. Each id overrides --accent and --accent-foreground on
+   <html> for both modes: light picks a deep color with white text, dark keeps
+   the same hue light enough to carry near-black text. Removing the class
+   restores the default monochrome look exactly. */
+html.accent-blue {
+  --accent: 221 83% 45%;
+  --accent-foreground: 0 0% 100%;
+}
+html.dark.accent-blue {
+  --accent: 217 91% 60%;
+  --accent-foreground: 0 0% 7%;
+}
+
+html.accent-green {
+  --accent: 142 66% 32%;
+  --accent-foreground: 0 0% 100%;
+}
+html.dark.accent-green {
+  --accent: 142 60% 55%;
+  --accent-foreground: 0 0% 7%;
+}
+
+html.accent-violet {
+  --accent: 263 70% 45%;
+  --accent-foreground: 0 0% 100%;
+}
+html.dark.accent-violet {
+  --accent: 263 83% 70%;
+  --accent-foreground: 0 0% 7%;
+}
+
+html.accent-amber {
+  --accent: 32 90% 38%;
+  --accent-foreground: 0 0% 100%;
+}
+html.dark.accent-amber {
+  --accent: 38 92% 55%;
+  --accent-foreground: 0 0% 7%;
+}
+
+html.accent-rose {
+  --accent: 347 77% 44%;
+  --accent-foreground: 0 0% 100%;
+}
+html.dark.accent-rose {
+  --accent: 350 89% 65%;
+  --accent-foreground: 0 0% 7%;
+}
+
+/* Large text raises the root size; Tailwind's rem-based text scales with it.
+   Fixed-px rules (inputs, bubbles) keep their sizes on purpose. */
+html.text-large {
+  font-size: 115%;
 }
 
 html,
@@ -428,6 +485,15 @@ body {
 .dark .composer .send-btn {
   background: #f5f5f5;
   color: #111111;
+}
+
+/* With a colored accent the send button follows it. The default accent has
+   no class on <html>, so the plain black/white pair above stays in force and
+   the default look is unchanged. Size, shape, disabled opacity and the 44px
+   phone rule are untouched. */
+html[class*="accent-"] .composer .send-btn {
+  background: hsl(var(--accent));
+  color: hsl(var(--accent-foreground));
 }
 
 .face-ring {

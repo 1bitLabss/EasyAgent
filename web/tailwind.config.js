@@ -17,6 +17,7 @@ export default {
         card: "hsl(var(--card))",
         muted: "hsl(var(--muted))",
         accent: "hsl(var(--accent))",
+        "accent-foreground": "hsl(var(--accent-foreground))",
         danger: "hsl(var(--danger))",
         sidebar: "hsl(var(--sidebar))",
       },

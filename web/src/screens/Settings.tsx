@@ -13,7 +13,7 @@ import { readAloudEnabled, setReadAloudEnabled, stopSpeaking, useVoiceAvailable 
 import { localWhen } from "@/lib/time";
 import { windowChat } from "@/lib/window";
 import { PhoneAccess } from "@/screens/Phone";
-import { useApp } from "@/store";
+import { ACCENTS, useApp } from "@/store";
 import type { Bot, Chat, ChatSummary, Endpoint, Job, Learning, MemoryLine, MemoryTopic, Project, Schedule, Skill } from "@/types";
 
 function GlobalYolo() {
@@ -248,6 +248,56 @@ export function SttBlock() {
       <Button type="button" data-testid="stt-save" onClick={() => void save()}>Save voice settings</Button>
       {saved ? <p className="text-sm" role="status">{saved}</p> : null}
       {error ? <p className="text-sm text-danger" role="alert">{error}</p> : null}
+    </section>
+  );
+}
+
+/** The look lives on this device, not on the bot: light or dark, a small set
+ * of accent colors, and text size. Everything is saved in this browser. */
+export function AppearanceBlock() {
+  const theme = useApp((state) => state.theme);
+  const toggleTheme = useApp((state) => state.toggleTheme);
+  const accent = useApp((state) => state.accent);
+  const setAccent = useApp((state) => state.setAccent);
+  const textSize = useApp((state) => state.textSize);
+  const setTextSize = useApp((state) => state.setTextSize);
+
+  return (
+    <section id="appearance" className="space-y-3 rounded-lg border border-border bg-card p-4">
+      <h2 className="text-sm font-medium">Appearance</h2>
+      <p className="text-xs text-muted">How EasyAgent looks on this device. The choices are saved in this browser, not on the bot.</p>
+      <div className="flex items-center justify-between gap-3 text-sm" data-testid="mode-row">
+        <span>Mode</span>
+        <span className="flex gap-2">
+          <Button type="button" size="sm" variant={theme === "light" ? "default" : "outline"} data-testid="mode-light" onClick={() => { if (theme !== "light") toggleTheme(); }}>Light</Button>
+          <Button type="button" size="sm" variant={theme === "dark" ? "default" : "outline"} data-testid="mode-dark" onClick={() => { if (theme !== "dark") toggleTheme(); }}>Dark</Button>
+        </span>
+      </div>
+      <div className="flex items-center justify-between gap-3 text-sm" data-testid="accent-row">
+        <span>Accent</span>
+        <span className="flex flex-wrap gap-2">
+          {ACCENTS.map((item) => (
+            <button
+              key={item.id}
+              type="button"
+              title={item.label}
+              aria-label={item.label}
+              aria-pressed={accent === item.id}
+              data-testid={`accent-swatch-${item.id}`}
+              onClick={() => setAccent(item.id)}
+              className={`h-7 w-7 rounded-full border border-border ${accent === item.id ? "ring-2 ring-foreground" : ""}`}
+              style={{ background: item.swatch }}
+            />
+          ))}
+        </span>
+      </div>
+      <div className="flex items-center justify-between gap-3 text-sm" data-testid="text-size-row">
+        <span>Text size</span>
+        <span className="flex gap-2">
+          <Button type="button" size="sm" variant={textSize === "normal" ? "default" : "outline"} data-testid="text-size-normal" onClick={() => setTextSize("normal")}>Normal</Button>
+          <Button type="button" size="sm" variant={textSize === "large" ? "default" : "outline"} data-testid="text-size-large" onClick={() => setTextSize("large")}>Large</Button>
+        </span>
+      </div>
     </section>
   );
 }
@@ -789,6 +839,7 @@ export function SettingsScreen() {
         <VoiceBlock />
         <ImageGenBlock />
         <SttBlock />
+        <AppearanceBlock />
         <section>
           <h1 className="text-2xl font-semibold">Pick a bot first.</h1>
           <p className="mt-2 text-sm text-muted">The rest of Settings belongs to one bot. Chats are not changed here.</p>
@@ -830,6 +881,7 @@ export function SettingsScreen() {
         <VoiceBlock />
         <ImageGenBlock />
         <SttBlock />
+        <AppearanceBlock />
       </div>
       <header className="px-6 py-5">
         <p className="text-xs uppercase tracking-wide text-muted">Bot settings</p>

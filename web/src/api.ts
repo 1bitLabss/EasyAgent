@@ -176,3 +176,14 @@ export async function streamPost(path: string, json: unknown, signal: AbortSigna
   }
   return response;
 }
+
+/** Send one recording to the server's transcription service and get the words
+ * back. The browser had no speech of its own; this is its microphone. */
+export async function transcribeAudio(blob: Blob): Promise<string> {
+  const form = new FormData();
+  form.append("file", blob, "voice-note.webm");
+  const data = await api<{ text?: string }>("/api/stt", { method: "POST", body: form });
+  const text = String(data?.text || "").trim();
+  if (!text) throw new Error("The transcription service answered without any words.");
+  return text;
+}

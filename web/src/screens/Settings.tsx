@@ -181,6 +181,77 @@ export function ImageGenBlock() {
   );
 }
 
+type SttSettings = { enabled: boolean; base_url: string; model: string; has_key: boolean };
+
+/** Voice notes talk to one transcription service the person runs or subscribes
+ * to, for browsers with no microphone of their own. The key never comes back
+ * from the server, so the form only shows whether one is saved; leaving the
+ * box blank keeps the key already there. */
+export function SttBlock() {
+  const settings = useQuery({ queryKey: ["stt"], queryFn: () => api<SttSettings>("/api/stt") });
+  const [enabled, setEnabled] = useState(false);
+  const [baseUrl, setBaseUrl] = useState("");
+  const [model, setModel] = useState("");
+  const [key, setKey] = useState("");
+  const [error, setError] = useState("");
+  const [saved, setSaved] = useState("");
+
+  useEffect(() => {
+    if (!settings.data) return;
+    setEnabled(settings.data.enabled);
+    setBaseUrl(settings.data.base_url);
+    setModel(settings.data.model);
+    setKey("");
+    setError("");
+    setSaved("");
+  }, [settings.data]);
+
+  async function save() {
+    setError("");
+    setSaved("");
+    const body: Record<string, unknown> = { enabled, base_url: baseUrl, model };
+    if (key.trim()) body.api_key = key.trim();
+    try {
+      await api("/api/stt", { method: "PUT", json: body });
+      await queryClient.invalidateQueries({ queryKey: ["stt"] });
+      setSaved("Voice settings saved.");
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "The voice settings were not saved.");
+    }
+  }
+
+  return (
+    <section id="stt" className="space-y-3 rounded-lg border border-border bg-card p-4">
+      <h2 className="text-sm font-medium">Understand voice notes</h2>
+      <p className="text-xs text-muted">For browsers with no speech of their own (Safari, Firefox). Tap the microphone, speak, tap again: the recording goes to the transcription service you use and the words land in the message box. The key stays on this computer.</p>
+      <label className="flex items-center justify-between gap-3 text-sm" data-testid="stt-enabled-row">
+        <span>Understand voice notes</span>
+        <Switch checked={enabled} aria-label="Understand voice notes" onCheckedChange={setEnabled} />
+      </label>
+      <label className="block text-sm">Transcription address
+        <Input className="mt-1" data-testid="stt-base-url" value={baseUrl} placeholder="http://127.0.0.1:8000/v1" onChange={(event) => setBaseUrl(event.target.value)} />
+      </label>
+      <label className="block text-sm">Model name
+        <Input className="mt-1" data-testid="stt-model" value={model} placeholder="whisper-1" onChange={(event) => setModel(event.target.value)} />
+      </label>
+      <label className="block text-sm">Key
+        <Input
+          className="mt-1"
+          type="password"
+          autoComplete="off"
+          data-testid="stt-key"
+          value={key}
+          placeholder={settings.data?.has_key ? "Saved — type to replace" : "only if the service asks"}
+          onChange={(event) => setKey(event.target.value)}
+        />
+      </label>
+      <Button type="button" data-testid="stt-save" onClick={() => void save()}>Save voice settings</Button>
+      {saved ? <p className="text-sm" role="status">{saved}</p> : null}
+      {error ? <p className="text-sm text-danger" role="alert">{error}</p> : null}
+    </section>
+  );
+}
+
 function Block({ id, title, children }: { id?: string; title: string; children: ReactNode }) {
   return (
     <section id={id} className="space-y-3 rounded-lg border border-border bg-card p-4">
@@ -717,6 +788,7 @@ export function SettingsScreen() {
         <CopyDiagnostics />
         <VoiceBlock />
         <ImageGenBlock />
+        <SttBlock />
         <section>
           <h1 className="text-2xl font-semibold">Pick a bot first.</h1>
           <p className="mt-2 text-sm text-muted">The rest of Settings belongs to one bot. Chats are not changed here.</p>
@@ -757,6 +829,7 @@ export function SettingsScreen() {
         <CopyDiagnostics />
         <VoiceBlock />
         <ImageGenBlock />
+        <SttBlock />
       </div>
       <header className="px-6 py-5">
         <p className="text-xs uppercase tracking-wide text-muted">Bot settings</p>

@@ -1,8 +1,23 @@
 import { ArrowUp, Mic, Plus } from "lucide-react";
 import { forwardRef, memo, useEffect, useImperativeHandle, useRef, useState, type ReactNode } from "react";
+import { transcribeAudio } from "@/api";
 import { browseBackward, browseForward, DRAFT_PERSIST_MS, isBrowsing, readDraft, resetBrowse, writeDraft } from "@/lib/composer-history";
 import { noteComposerInput, resetComposer } from "@/lib/composer";
 import { cn } from "@/lib/utils";
+
+/** Whether the server has transcription set up. Asked once per page, the way
+ * the speak control probes for server voices: only browsers with no speech
+ * recognition of their own ever spend the request. */
+let sttProbe: Promise<boolean> | null = null;
+function probeServerStt(): Promise<boolean> {
+  if (!sttProbe) {
+    sttProbe = fetch("/api/stt")
+      .then((response) => (response.ok ? response.json() : null))
+      .then((data) => Boolean(data && data.enabled && data.base_url && data.model))
+      .catch(() => false);
+  }
+  return sttProbe;
+}
 
 export type ComposerHandle = {
   focus: () => void;
@@ -54,6 +69,8 @@ export const Composer = memo(forwardRef<ComposerHandle, ComposerProps>(function 
   const [filled, setFilled] = useState(false);
   const [fileName, setFileName] = useState("");
   const [listening, setListening] = useState(false);
+  const [serverStt, setServerStt] = useState(false);
+  const recorderRef = useRef<MediaRecorder | null>(null);
   const composing = useRef(false);
   const saveTimer = useRef(0);
   const stopRef = useRef(onStop);
@@ -117,6 +134,32 @@ export const Composer = memo(forwardRef<ComposerHandle, ComposerProps>(function 
       flush();
     };
   }, [botId, chatId]);
+
+  useEffect(() => {
+    const Speech = (window as Window & {
+      SpeechRecognition?: unknown;
+      webkitSpeechRecognition?: unknown;
+    }).SpeechRecognition
+      || (window as Window & { webkitSpeechRecognition?: unknown }).webkitSpeechRecognition;
+    if (Speech) return;
+    let live = true;
+    void probeServerStt().then((ok) => {
+      if (ok && live) setServerStt(true);
+    });
+    return () => {
+      live = false;
+    };
+  }, []);
+
+  useEffect(() => {
+    return () => {
+      const recorder = recorderRef.current;
+      if (recorder) {
+        recorder.stream.getTracks().forEach((track) => track.stop());
+        recorderRef.current = null;
+      }
+    };
+  }, []);
 
   useEffect(() => {
     if (!running) return;
@@ -195,6 +238,10 @@ export const Composer = memo(forwardRef<ComposerHandle, ComposerProps>(function 
     }).SpeechRecognition
       || (window as Window & { webkitSpeechRecognition?: new () => SpeechEar }).webkitSpeechRecognition;
     if (!Speech) {
+      if (serverStt) {
+        void recordToggle();
+        return;
+      }
       onError("This browser cannot use the microphone.");
       return;
     }
@@ -204,6 +251,56 @@ export const Composer = memo(forwardRef<ComposerHandle, ComposerProps>(function 
     ear.onend = () => setListening(false);
     setListening(true);
     ear.start();
+  }
+
+  /** Safari and Firefox have no speech recognition; the server's transcription
+   * service is their microphone. One tap records, the next tap stops. */
+  async function recordToggle() {
+    const active = recorderRef.current;
+    if (active) {
+      active.stop();
+      return;
+    }
+    let stream: MediaStream;
+    try {
+      stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    } catch {
+      onError("The microphone could not be opened.");
+      return;
+    }
+    const recorder = new MediaRecorder(stream);
+    recorderRef.current = recorder;
+    const chunks: Blob[] = [];
+    recorder.ondataavailable = (event) => {
+      if (event.data.size) chunks.push(event.data);
+    };
+    recorder.onstop = () => {
+      recorderRef.current = null;
+      setListening(false);
+      stream.getTracks().forEach((track) => track.stop());
+      void transcribeRecording(new Blob(chunks));
+    };
+    recorder.onerror = () => {
+      recorderRef.current = null;
+      setListening(false);
+      stream.getTracks().forEach((track) => track.stop());
+      onError("The recording failed.");
+    };
+    setListening(true);
+    recorder.start();
+  }
+
+  async function transcribeRecording(blob: Blob) {
+    if (!blob.size) return;
+    try {
+      const words = await transcribeAudio(blob);
+      const before = readText();
+      writeText(before ? `${before} ${words}` : words);
+      persistDraft(readText());
+      focusSoon();
+    } catch (reason) {
+      onError(reason instanceof Error ? reason.message : "The recording was not transcribed.");
+    }
   }
 
   const placeholder = listening ? "Listening" : running ? "Add to the current job" : asking ? "Or type an answer" : "Message";

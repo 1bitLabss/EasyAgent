@@ -536,6 +536,14 @@ class ImageGenIn(BaseModel):
     size: str | None = None
 
 
+class SttIn(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+    enabled: bool | None = None
+    base_url: str | None = None
+    api_key: str | None = None
+    model: str | None = None
+
+
 class TtsVoiceIn(BaseModel):
     model_config = ConfigDict(extra="ignore")
     voice: str = ""
@@ -1702,6 +1710,43 @@ def create_app(data_dir: str | Path | None = None) -> FastAPI:
         except ValueError as exc:
             raise HTTPException(400, str(exc))
         return public_config(load_config(store))
+
+    @app.get("/api/stt")
+    def get_stt():
+        from easyagent.stt import load_config, public_config
+
+        return public_config(load_config(store))
+
+    @app.put("/api/stt")
+    def put_stt(body: SttIn):
+        from easyagent.stt import load_config, public_config, save_config
+
+        try:
+            save_config(
+                store,
+                enabled=body.enabled,
+                base_url=body.base_url,
+                api_key=body.api_key,
+                model=body.model,
+            )
+        except ValueError as exc:
+            raise HTTPException(400, str(exc))
+        return public_config(load_config(store))
+
+    @app.post("/api/stt")
+    async def post_stt(file: UploadFile = File(...)):
+        from easyagent.stt import MAX_AUDIO_BYTES, SttError, transcribe
+
+        data = await file.read()
+        if not data:
+            raise HTTPException(400, "The recording was empty. Nothing to transcribe.")
+        if len(data) > MAX_AUDIO_BYTES:
+            raise HTTPException(400, "The recording was too large to send. Keep it under 25 MB.")
+        try:
+            text = await transcribe(store, data, filename=_safe_filename(file.filename or "voice-note.webm"))
+        except SttError as exc:
+            raise HTTPException(400, str(exc)) from exc
+        return {"text": text}
 
     @app.post("/api/bots/{bot_id}/tts")
     def post_tts(bot_id: str, body: TtsIn):

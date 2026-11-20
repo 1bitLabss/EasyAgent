@@ -1015,7 +1015,10 @@ def create_app(data_dir: str | Path | None = None) -> FastAPI:
             app.state.lan.apply(server, _phone_port(), app.state.phone.enabled),
             loop,
         )
-        future.result(timeout=5)
+        # Turning phone access on can issue the LAN certificate for the first
+        # time. That work is bounded (see phonetls) but slow machines exist, so
+        # this wait outlasts any client budget rather than answering 500 first.
+        future.result(timeout=15)
 
     @app.get("/manifest.webmanifest")
     def manifest(pair: str = ""):

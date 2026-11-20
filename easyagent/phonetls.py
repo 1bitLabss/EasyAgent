@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import ipaddress
 import os
+import queue
 import socket
 import ssl
 import threading
@@ -34,19 +35,42 @@ def _chmod(path: Path) -> None:
         return
 
 
+def _hostname_ips() -> list[str]:
+    found = []
+    for info in socket.getaddrinfo(socket.gethostname(), None, socket.AF_INET):
+        found.append(str(info[4][0]))
+    return found
+
+
 def _addresses() -> list[str]:
-    """Loopback, the address other phones use, and anything else this machine has."""
+    """Loopback, the address other phones use, and anything else this machine has.
+
+    Resolving this machine's hostname can stall for seconds — macOS walks DNS
+    and mDNS before giving up when the name is not in /etc/hosts — and this
+    runs on the request path the first time Phone access is turned on. The
+    probe gets a short budget; the certificate keeps the addresses that answer.
+    """
     ips = ["127.0.0.1"]
     primary = lan_ip()
     if primary and primary not in ips:
         ips.append(primary)
+    box: queue.Queue = queue.Queue(maxsize=1)
+
+    def probe() -> None:
+        try:
+            box.put(_hostname_ips())
+        except Exception:
+            pass
+
+    worker = threading.Thread(target=probe, daemon=True)
+    worker.start()
     try:
-        for info in socket.getaddrinfo(socket.gethostname(), None, socket.AF_INET):
-            ip = str(info[4][0])
-            if not ip.startswith("127.") and ip not in ips:
-                ips.append(ip)
-    except OSError:
-        pass
+        extra = box.get(timeout=2.0)
+    except queue.Empty:
+        extra = []
+    for ip in extra:
+        if not ip.startswith("127.") and ip not in ips:
+            ips.append(ip)
     return ips
 
 

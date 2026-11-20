@@ -7,7 +7,20 @@ A skill fence is not memory.
 from __future__ import annotations
 
 import re
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
+
+
+def _bare_name(path_line: str) -> str:
+    """The file name at the end of a path, whatever separator the path uses.
+
+    ``Path`` only strips the host platform's separator, so a Windows path on
+    macOS or Linux keeps its backslash components. A path with any backslash
+    is read as a Windows path; ``PureWindowsPath`` treats ``/`` as a
+    separator too, so mixed paths come out right on every platform.
+    """
+    if "\\" in path_line:
+        return PureWindowsPath(path_line).name
+    return Path(path_line).name
 
 _MEMORY = re.compile(r"```memory[ \t]*\r?\n(.*?)```", re.DOTALL | re.IGNORECASE)
 _FILE = re.compile(r"```file[ \t]*\r?\n(.*?)```", re.DOTALL | re.IGNORECASE)
@@ -43,8 +56,8 @@ def take_file(text: str) -> tuple[str, dict | None]:
         return text or "", None
     path_line = lines[0].strip()
     if len(lines) < 2:
-        return _strip_one(_FILE, text), {"name": Path(path_line).name, "path": path_line}
-    name = Path(path_line).name
+        return _strip_one(_FILE, text), {"name": _bare_name(path_line), "path": path_line}
+    name = _bare_name(path_line)
     cleaned = "".join(ch for ch in name if ch.isalnum() or ch in "._- ").strip()
     name = (cleaned or "file.txt")[:80]
     body = "\n".join(lines[1:])

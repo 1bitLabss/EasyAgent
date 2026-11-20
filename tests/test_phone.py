@@ -235,7 +235,10 @@ def test_phone_access_opens_and_closes_the_lan_socket(tmp_path, monkeypatch):
             probe.settimeout(1)
             refused = probe.connect_ex((address, port))
         assert refused != 0
-        turned = httpx.post(f"http://127.0.0.1:{port}/api/phone", json={"enabled": True}, timeout=5)
+        # The first enable issues the self-signed LAN certificate. The work is
+        # bounded (phonetls caps its hostname probe at 2s) but a cold runner
+        # pays it once here, so give the request a realistic budget.
+        turned = httpx.post(f"http://127.0.0.1:{port}/api/phone", json={"enabled": True}, timeout=10)
         assert turned.status_code == 200
         assert turned.json()["listening"] is True
         assert turned.json()["pair_url"].startswith("https://")

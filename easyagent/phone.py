@@ -270,9 +270,14 @@ class LanPort:
         context = None
         if self.root is not None:
             try:
+                import asyncio
+
                 from easyagent.phonetls import ssl_context
 
-                context = ssl_context(self.root)
+                # First-time certificate issuance is blocking work (key
+                # generation, a bounded hostname probe, file writes). Keep it
+                # off the event loop so the enable request cannot stall it.
+                context = await asyncio.to_thread(ssl_context, self.root)
             except Exception:
                 context = None
         self.listener = await _listen_beside(server, host, int(port), context)

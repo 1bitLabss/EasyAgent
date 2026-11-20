@@ -78,6 +78,11 @@ export type Receipt = {
   output: string;
 };
 
+export type QuestionCard = {
+  question: string;
+  choices: string[];
+};
+
 export type ChatMessage = {
   id?: string;
   role: string;
@@ -89,6 +94,7 @@ export type ChatMessage = {
   completion_tokens?: number;
   error?: boolean;
   choices?: string[];
+  questions?: QuestionCard[];
   reaction?: string;
   reaction_by?: string;
   live?: boolean;

@@ -10,11 +10,12 @@ export function shownThinking(text?: string): string {
   return kept.join("\n").trim();
 }
 
-export function messageHasBubble(message: Pick<ChatMessage, "content" | "attachment" | "choices" | "error">): boolean {
+export function messageHasBubble(message: Pick<ChatMessage, "content" | "attachment" | "choices" | "questions" | "error">): boolean {
   if (message.error) return true;
   if ((message.content || "").trim()) return true;
   if (message.attachment) return true;
   if ((message.choices || []).length) return true;
+  if ((message.questions || []).length) return true;
   return false;
 }
 

@@ -4345,7 +4345,7 @@ def _memory_prompt(store: Store, bot_id: str) -> str:
     return "Index:\n" + "\n".join(f"- {slug}" for slug in slugs[:24])
 
 
-async def _complete_for_chat(store: Store, bot_id: str, chat: dict) -> tuple[str, list[str], list[str], str, str, bool, str, str]:
+async def _complete_for_chat(store: Store, bot_id: str, chat: dict) -> tuple:
     bot = store.get_bot(bot_id)
     endpoint = _require_endpoint(store, bot_id)
     await _refresh_window(store, bot, endpoint)
@@ -4383,6 +4383,10 @@ async def _complete_for_chat(store: Store, bot_id: str, chat: dict) -> tuple[str
         settled.reacted,
         settled.check or "",
         settled.lesson or "",
+        [
+            {"question": item["question"], "choices": list(item["choices"])}
+            for item in settled.questions
+        ],
     )
 
 
@@ -4470,7 +4474,9 @@ def _room_status(bot_id: str, name: str, state: str, label: str) -> str:
 
 
 async def _save_room_bot_reply(store: Store, room_id: str, snapshot: dict, bot_id: str) -> dict | None:
-    visible, saved, error, choices, reacted = await _complete_for_room_bot(store, snapshot, bot_id)
+    result = await _complete_for_room_bot(store, snapshot, bot_id)
+    visible, saved, error, choices, reacted = result[:5]
+    questions = list(result[5]) if len(result) > 5 else []
     if not error and not (visible or "").strip() and not choices and reacted:
         return None
     try:
@@ -4489,6 +4495,8 @@ async def _save_room_bot_reply(store: Store, room_id: str, snapshot: dict, bot_i
         message["error"] = True
     if choices and not error:
         message["choices"] = choices
+    if len(questions) >= 2 and not error:
+        message["questions"] = questions
     if saved:
         message["skills_saved"] = saved
     async with chat_lock(store, room_id):
@@ -4577,9 +4585,12 @@ async def _stream_room_turn(store: Store, room_id: str, user_message: dict, targ
                     await publish(_room_status(bot_id, name, "error", f"{name} stopped"))
                     return
                 try:
-                    visible, saved, error, choices, reacted = task.result()
+                    result = task.result()
+                    visible, saved, error, choices, reacted = result[:5]
+                    questions = list(result[5]) if len(result) > 5 else []
                 except Exception as exc:
                     visible, saved, error, choices, reacted = "", [], str(exc), [], False
+                    questions = []
                 if not error and not (visible or "").strip() and not choices and reacted:
                     run["statuses"][bot_id] = {"state": "done", "label": f"{name} finished", "name": name}
                     await publish(_room_status(bot_id, name, "done", f"{name} finished"))
@@ -4596,6 +4607,8 @@ async def _stream_room_turn(store: Store, room_id: str, user_message: dict, targ
                     message["error"] = True
                 if choices and not error:
                     message["choices"] = choices
+                if len(questions) >= 2 and not error:
+                    message["questions"] = questions
                 if saved:
                     message["skills_saved"] = saved
                 async with chat_lock(store, room_id):
@@ -4705,18 +4718,19 @@ def _room_tail_item(bot: dict, message: dict, clip_limit: int | None = None) -> 
     return {"role": "user", "content": clip_message(text, clip_limit)}
 
 
-async def _complete_for_room_bot(store: Store, room: dict, bot_id: str) -> tuple[str, list[str], str | None]:
-    """One bot's reply in a room. Returns (visible, skills, error). Never writes a private chat."""
+async def _complete_for_room_bot(store: Store, room: dict, bot_id: str) -> tuple:
+    """One bot's reply in a room. Returns (visible, skills, error, choices, reacted, questions).
+    Never writes a private chat."""
     try:
         bot = store.get_bot(bot_id)
     except StoreError:
-        return "", [], "This bot is no longer on disk. The room transcript was kept.", [], False
+        return "", [], "This bot is no longer on disk. The room transcript was kept.", [], False, []
     try:
         endpoint = store.get_endpoint(bot["endpoint_id"])
     except StoreError:
         endpoint = None
     if endpoint is None:
-        return "", [], f"{bot['name']}'s endpoint is missing. The room transcript was kept.", [], False
+        return "", [], f"{bot['name']}'s endpoint is missing. The room transcript was kept.", [], False, []
     budget = bot_context_chars(bot)
     prepared = prepare_context(
         _labeled_room_messages(room.get("messages") or []),
@@ -4778,11 +4792,11 @@ async def _complete_for_room_bot(store: Store, room: dict, bot_id: str) -> tuple
                 chat_id=room.get("id"),
             )
         except llm.ProviderError as exc:
-            return "", [], llm.connection_error_text(str(exc), endpoint, chosen_model(bot, endpoint), bot["name"]), [], False
+            return "", [], llm.connection_error_text(str(exc), endpoint, chosen_model(bot, endpoint), bot["name"]), [], False, []
         except SearchError as exc:
-            return "", [], str(exc), [], False
+            return "", [], str(exc), [], False, []
         except ToolError as exc:
-            return "", [], str(exc), [], False
+            return "", [], str(exc), [], False, []
         visible, skills = extract_skills(settled.text)
         saved: list[str] = []
         for skill in skills:
@@ -4790,7 +4804,10 @@ async def _complete_for_room_bot(store: Store, room: dict, bot_id: str) -> tuple
             saved.append(stored["name"])
         if not visible.strip() and not settled.choices and not settled.reacted:
             visible = "Saved skill: " + ", ".join(saved) if saved else "(empty reply)"
-        return visible, saved, None, list(settled.choices), settled.reacted
+        return visible, saved, None, list(settled.choices), settled.reacted, [
+            {"question": item["question"], "choices": list(item["choices"])}
+            for item in settled.questions
+        ]
     finally:
         turn_mod.reset_room_chat(room_token)
         gate.reset_connection(conn)
@@ -5230,6 +5247,8 @@ def _assistant_has_body(message: dict) -> bool:
     if message.get("attachment"):
         return True
     if message.get("choices"):
+        return True
+    if message.get("questions"):
         return True
     return False
 
@@ -6590,6 +6609,7 @@ def _pause_for_resume(store: Store, bot_id: str, chat_id: str) -> None:
                 not content.strip()
                 and not message.get("attachment")
                 and not (message.get("choices") or [])
+                and not (message.get("questions") or [])
                 and kind not in {"status", "pickup", "resume-note", "resume-offer"}
             ):
                 if not _auto_resume_on(bot):
@@ -7237,6 +7257,7 @@ async def _finish_and_maybe_ask(
     check: str = "",
     lesson: str = "",
     thought_seconds: int = 0,
+    questions: list[dict] | None = None,
 ) -> dict:
     """Save the parent reply, then run helpers, then at most one child ask found in it."""
     from easyagent.features import steer_reply
@@ -7282,6 +7303,7 @@ async def _finish_and_maybe_ask(
         check=check,
         lesson=lesson,
         thought_seconds=thought_seconds,
+        questions=questions,
     )
     if helpers:
         rows = await run_helpers(store, bot_id, helpers)
@@ -7707,6 +7729,7 @@ def _finish_reply(
     check: str = "",
     lesson: str = "",
     thought_seconds: int = 0,
+    questions: list[dict] | None = None,
 ) -> dict:
     chat = store.get_chat(bot_id, chat_id)
     _drop_activity(chat)
@@ -7745,7 +7768,19 @@ def _finish_reply(
         cleaned = " ".join(redact(store, choice).split())
         if cleaned and cleaned not in kept:
             kept.append(cleaned)
-    if not visible.strip() and not kept and not saved and quiet:
+    kept_questions: list[dict] = []
+    for item in questions or []:
+        if not isinstance(item, dict):
+            continue
+        prompt = " ".join(redact(store, str(item.get("question") or "")).split())
+        options: list[str] = []
+        for choice in item.get("choices") or []:
+            cleaned = " ".join(redact(store, str(choice)).split())
+            if cleaned and cleaned not in options:
+                options.append(cleaned)
+        if prompt and len(options) >= 2:
+            kept_questions.append({"question": prompt, "choices": options})
+    if not visible.strip() and not kept and not kept_questions and not saved and quiet:
         from easyagent.features import take_routine_offer
 
         take_routine_offer()
@@ -7779,7 +7814,7 @@ def _finish_reply(
         return {"reply": "", "skills_saved": saved, "chat": public, "context": public["context"]}
     had_words = bool(visible.strip())
     blank_reply = False
-    if not had_words and not kept:
+    if not had_words and not kept and not kept_questions:
         visible = "(empty reply)"
         blank_reply = True
     # Read again. A stop can save the reply while this turn is still finishing.
@@ -7808,14 +7843,14 @@ def _finish_reply(
         message.pop("interrupted", None)
         message["created_at"] = now_iso()
     else:
-        message = {
+        message: dict = {
             "id": new_id(),
             "role": "assistant",
             "content": visible,
             "created_at": now_iso(),
         }
         messages.append(message)
-    if not (message.get("content") or "").strip() and not kept:
+    if not (message.get("content") or "").strip() and not kept and not kept_questions:
         message["content"] = _stopped_text("the model returned nothing")
         visible = message["content"]
         blank_reply = True
@@ -7883,6 +7918,10 @@ def _finish_reply(
         message["choices"] = kept
     elif "choices" in message:
         message.pop("choices", None)
+    if len(kept_questions) >= 2:
+        message["questions"] = kept_questions
+    elif "questions" in message:
+        message.pop("questions", None)
     from easyagent.features import take_routine_offer
 
     offer = take_routine_offer()
@@ -7971,7 +8010,9 @@ async def _reply_json(store: Store, bot_id: str, chat_id: str, *, continue_run: 
     await _propose_if_corrected(store, bot_id, chat)
     _write_live(store, bot_id, chat_id, step="Waiting on model", start=not continue_run, force=True)
     try:
-        visible, saved, choices, made, thinking, reacted, checked, lesson = await _complete_for_chat(store, bot_id, chat)
+        visible, saved, choices, made, thinking, reacted, checked, lesson, questions = await _complete_for_chat(
+            store, bot_id, chat
+        )
         if retry.saw_unreachable() and retry.model_explained_harness_failure(visible):
             endpoint = _require_endpoint(store, bot_id)
             raise llm.ProviderError(retry.unreachable_text(endpoint.get("base_url") or ""))
@@ -8003,6 +8044,7 @@ async def _reply_json(store: Store, bot_id: str, chat_id: str, *, continue_run: 
         quiet=bool(reacted) and not (visible or "").strip(),
         check=checked,
         lesson=lesson,
+        questions=questions,
     )
 
 
@@ -8046,6 +8088,7 @@ async def _stream_reply(
     try:
         final = None
         choices: list[str] = []
+        questions: list[dict] = []
         made = ""
         sent = ""
         saved_chars = 0
@@ -8211,6 +8254,17 @@ async def _stream_reply(
                     parsed = []
                 if isinstance(parsed, list):
                     choices = [item for item in parsed if isinstance(item, str)]
+            elif kind == "questions":
+                try:
+                    parsed = json.loads(text)
+                except json.JSONDecodeError:
+                    parsed = []
+                if isinstance(parsed, list):
+                    questions = [
+                        item
+                        for item in parsed
+                        if isinstance(item, dict) and item.get("question") and isinstance(item.get("choices"), list)
+                    ]
             elif kind == "made":
                 made = text
             elif kind == "reacted":
@@ -8282,7 +8336,7 @@ async def _stream_reply(
         for skill in skills:
             stored = _save_user_skill(store, skill)
             saved.append(stored["name"])
-        if not visible.strip() and not choices and not reacted:
+        if not visible.strip() and not choices and not questions and not reacted:
             visible = "Saved skill: " + ", ".join(saved) if saved else "(empty reply)"
         finish_task = asyncio.create_task(
             _finish_and_maybe_ask(
@@ -8297,6 +8351,7 @@ async def _stream_reply(
                 quiet=reacted and not visible.strip(),
                 check=checked,
                 lesson=lesson,
+                questions=questions,
                 thought_seconds=thought_seconds or (max(1, int(round(time.monotonic() - thought_started))) if thought_started is not None else 0),
             )
         )

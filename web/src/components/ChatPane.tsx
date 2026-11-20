@@ -301,6 +301,7 @@ const MessageRow = memo(function MessageRow({
   freeze = false,
   pauseNote = false,
   onChoose,
+  onChooseBatch,
 }: {
   message: ChatMessage;
   last: boolean;
@@ -310,12 +311,14 @@ const MessageRow = memo(function MessageRow({
   freeze?: boolean;
   pauseNote?: boolean;
   onChoose: (choice: string) => void;
+  onChooseBatch: (text: string) => void;
 }) {
   const botId = useApp((state) => state.botId);
   const chatId = useApp((state) => state.chatId);
   const setScreen = useApp((state) => state.setScreen);
   const speakKey = message.id || message.client_id || "";
   const [speaking, setSpeaking] = useState(() => speakingKeyOf() === speakKey);
+  const [picked, setPicked] = useState<Record<number, string>>({});
   useEffect(() => onSpeakingChange((key) => setSpeaking(key === speakKey)), [speakKey]);
   const voiceReady = useVoiceAvailable(botId);
   // An empty live placeholder can wait. A reply that already has words stays put
@@ -356,8 +359,19 @@ const MessageRow = memo(function MessageRow({
   ) {
     return null;
   }
-  const choices = last && message.role === "assistant" && !failed && (message.choices || []).length > 1 ? message.choices || [] : [];
+  const batch = last && message.role === "assistant" && !failed && (message.questions || []).length > 1 ? message.questions || [] : [];
+  const choices = batch.length || !last || message.role !== "assistant" || failed || (message.choices || []).length <= 1 ? [] : message.choices || [];
   const who = reactionWho(message.reaction_by, botName);
+  function pickAnswer(index: number, choice: string) {
+    if (picked[index]) return;
+    const next = { ...picked, [index]: choice };
+    setPicked(next);
+    // One combined reply once every question has an answer, so the bot can
+    // map each answer to its question without guessing.
+    if (batch.every((_, i) => next[i])) {
+      onChooseBatch(batch.map((item, i) => `${item.question}\n${next[i]}`).join("\n\n"));
+    }
+  }
   async function react(emoji: string) {
     if (!message.id || !botId || !chatId) return;
     const removing = message.reaction === emoji;
@@ -433,6 +447,27 @@ const MessageRow = memo(function MessageRow({
           <div className="mt-3 flex flex-wrap gap-2">
             {choices.map((choice) => (
               <button key={choice} type="button" className="rounded-full bg-white px-3 py-1 text-sm text-foreground" onClick={() => onChoose(choice)}>{choice}</button>
+            ))}
+          </div>
+        ) : null}
+        {batch.length ? (
+          <div className="mt-3 flex flex-col gap-3" data-testid="question-card">
+            {batch.map((item, index) => (
+              <div key={`${index}-${item.question}`}>
+                <p className="mb-1 text-sm font-medium">{item.question}</p>
+                <div className="flex flex-wrap gap-2">
+                  {(item.choices || []).map((choice) => (
+                    <button
+                      key={choice}
+                      type="button"
+                      className={cn("rounded-full bg-white px-3 py-1 text-sm text-foreground", picked[index] === choice ? "ring-2 ring-foreground" : picked[index] ? "opacity-50" : "")}
+                      data-testid={`question-choice-${index}`}
+                      aria-pressed={picked[index] === choice}
+                      onClick={() => pickAnswer(index, choice)}
+                    >{choice}</button>
+                  ))}
+                </div>
+              </div>
             ))}
           </div>
         ) : null}
@@ -597,6 +632,7 @@ const Transcript = memo(function Transcript({
   liveKey,
   frozen,
   onChoose,
+  onChooseBatch,
 }: {
   rows: ChatMessage[];
   botName: string;
@@ -604,6 +640,7 @@ const Transcript = memo(function Transcript({
   liveKey: string;
   frozen?: FrozenReply;
   onChoose: (choice: string) => void;
+  onChooseBatch: (text: string) => void;
 }) {
   return (
     <ol className="flex flex-col gap-4" data-testid="transcript">
@@ -622,6 +659,7 @@ const Transcript = memo(function Transcript({
             freeze={freeze}
             pauseNote={pauseOnUser}
             onChoose={onChoose}
+            onChooseBatch={onChooseBatch}
           />
         );
       })}
@@ -767,6 +805,8 @@ export function ChatPane() {
   const readSent = useRef("");
   const chooseRef = useRef<(choice: string) => void>(() => undefined);
   const onChoose = useCallback((choice: string) => chooseRef.current(choice), []);
+  const chooseBatchRef = useRef<(text: string) => void>(() => undefined);
+  const onChooseBatch = useCallback((text: string) => chooseBatchRef.current(text), []);
 
   useEffect(() => {
     const id = ongoing.data?.id;
@@ -973,7 +1013,8 @@ export function ChatPane() {
   const view = open ? describeRun(step, open.run?.status || (flight?.sending ? "running" : "idle"), live?.run?.started_at || open.run?.started_at, live?.run?.last_activity_at || open.run?.last_activity_at, live?.heardAt, now) : null;
   const tone = view ? runTone(view.words, running ? "running" : open?.run?.status || "idle") : "thinking";
   const face = faceFor(Boolean(flight?.sending), live?.phase, view?.words, live?.text, running ? "running" : open?.run?.status, view?.words);
-  const asking = (open?.messages || []).slice(-1)[0]?.choices;
+  const lastRow = (open?.messages || []).slice(-1)[0];
+  const asking = Boolean(lastRow && ((lastRow.choices || []).length > 1 || (lastRow.questions || []).length > 1));
   const rows = open?.messages || [];
   historyRef.current = rows;
   const runId = live?.run?.id || flight?.runId || "";
@@ -1035,6 +1076,12 @@ export function ChatPane() {
 
   chooseRef.current = (choice) => {
     void submit(choice).catch((reason: unknown) => {
+      setError(reason instanceof Error ? reason.message : "The reply failed.");
+    });
+    composerRef.current?.focus();
+  };
+  chooseBatchRef.current = (text) => {
+    void submit(text).catch((reason: unknown) => {
       setError(reason instanceof Error ? reason.message : "The reply failed.");
     });
     composerRef.current?.focus();
@@ -1223,6 +1270,7 @@ export function ChatPane() {
                 liveKey={streamingReply ? stamp : ""}
                 frozen={frozen}
                 onChoose={onChoose}
+                onChooseBatch={onChooseBatch}
               />
               {liveTurn && steps.length && !shown.some((row) => row.kind === "status" && row.content === "Paused, you sent a message") ? finishedSteps.map((item) => (
                 <div key={item.id} data-testid="activity-step" data-state={item.state} data-step-id={item.id}>
@@ -1284,7 +1332,7 @@ export function ChatPane() {
         ref={composerRef}
         focusKey={`${botId || ""}:${chatId || ""}`}
         running={running}
-        asking={Boolean(asking && asking.length > 1)}
+        asking={asking}
         error={error || (live?.phase === "error" ? live.text : "")}
         resumeRetry={resume.retry}
         resumeCont={resume.cont}

@@ -399,6 +399,10 @@ class ToolRequest:
     workdir: str = ""
     schema_json: str = ""
     background: bool = False
+    # A batch of questions asked in one stop. Each item is
+    # {"question": str, "choices": tuple[str, ...]}. body/choices still hold the
+    # first question so old readers keep working; questions is set only for >=2.
+    questions: tuple = ()
 
 
 @dataclass(frozen=True)
@@ -414,6 +418,10 @@ class Settled:
     lesson: str = ""
     receipts: tuple = ()
     unverified: bool = False
+    # Several questions in one stop. Each item is
+    # {"question": str, "choices": tuple[str, ...]}. text/choices carry the
+    # first question for old readers; questions is set only for a batch of >=2.
+    questions: tuple = ()
 
 
 _PNG_MARK = "[[easyagent-png]]"
@@ -717,6 +725,57 @@ def _choice_items(values: list[str]) -> list[str]:
     return items
 
 
+MAX_QUESTIONS = 5  # independent questions in one ask, same cap as Hermes' clarify
+
+
+def _batch_question_request(items: list) -> ToolRequest:
+    """A questions array -> one ask. Each entry needs a prompt and >=2 choices
+    (the tap UI is the point). A one-entry array is the plain single question."""
+    if not isinstance(items, list) or not items:
+        raise ToolError("questions needs 1 to 5 questions, each with its choices.")
+    if len(items) > MAX_QUESTIONS:
+        raise ToolError(f"Ask at most {MAX_QUESTIONS} questions at once. Split the rest into a later ask.")
+    batch: list[dict] = []
+    for index, item in enumerate(items):
+        if not isinstance(item, dict):
+            raise ToolError(f"Question {index + 1} needs a prompt and at least two choices.")
+        prompt = str(item.get("question") or item.get("prompt") or "").strip()
+        raw = item.get("choices") or item.get("options") or []
+        if isinstance(raw, str):
+            raw = [raw]
+        if not isinstance(raw, list):
+            raw = []
+        choices = _choice_items([str(choice) for choice in raw])
+        if not prompt or len(choices) < 2:
+            raise ToolError("A question needs a short prompt and at least two choices.")
+        batch.append({"question": prompt, "choices": tuple(choices)})
+    first = batch[0]
+    if len(batch) == 1:
+        return ToolRequest(kind="question", body=first["question"], choices=first["choices"])
+    return ToolRequest(
+        kind="question",
+        body=first["question"],
+        choices=first["choices"],
+        questions=tuple(batch),
+    )
+
+
+def _questions_json(text: str) -> list | None:
+    """Parse a questions array written as JSON (a bare array or a {"questions": [...]} object)."""
+    cleaned = (text or "").strip()
+    if not cleaned:
+        return None
+    try:
+        data = json.loads(cleaned)
+    except json.JSONDecodeError:
+        return None
+    if isinstance(data, list):
+        return data
+    if isinstance(data, dict) and isinstance(data.get("questions"), list):
+        return data["questions"]
+    return None
+
+
 def _ignored_path(path: str) -> bool:
     return " ".join((path or "").split()).lower() in _IGNORED_PATHS
 
@@ -886,6 +945,9 @@ def _from_invoke(name: str, body: str) -> ToolRequest | None:
         return ToolRequest(kind="research", body=question.strip()[:300])
     if kind in {"clarify", "question"}:
         lists = _param_lists(body)
+        batched = _questions_json((lists.get("questions") or [""])[0])
+        if batched is not None:
+            return _batch_question_request(batched)
         prompt = (lists.get("question") or lists.get("prompt") or [""])[0]
         raw_choices = lists.get("choices") or lists.get("options") or lists.get("choice") or []
         choices = _choice_items(raw_choices)
@@ -1441,10 +1503,10 @@ def parse_tool(text: str) -> ToolRequest | None:
             return request
     question = _fence_request(_QUESTION_FENCE, text)
     if question is not None:
-        lines = [line.strip() for line in question.splitlines() if line.strip()]
-        if len(lines) < 3:
+        request = _question_from_body(question)
+        if request is None:
             raise ToolError("A question needs a short prompt and at least two choices.")
-        return ToolRequest(kind="question", body=lines[0], choices=tuple(lines[1:]))
+        return request
     if _FUNCTION_BLOCK.search(text or "") or _INVOKE.search(text or ""):
         raise ToolError(
             "That printed tool call was not run. EasyAgent can list, read, and write files on this computer, "
@@ -1596,6 +1658,12 @@ def _history_from_body(body: str) -> ToolRequest | None:
 
 
 def _question_from_body(body: str) -> ToolRequest | None:
+    text = (body or "").strip()
+    if text.startswith("{") or text.startswith("["):
+        # A questions array inside the fence: {"questions": [...]} or a bare array.
+        batched = _questions_json(text)
+        if batched is not None:
+            return _batch_question_request(batched)
     lines = [line.strip() for line in (body or "").splitlines() if line.strip()]
     if not lines:
         return None
@@ -2110,19 +2178,35 @@ def contains_secret(store: Store, data: bytes) -> bool:
 
 def _ask(store: Store, request: ToolRequest) -> Settled:
     hidden = secret_strings(store)
-    prompt = " ".join(_scrub(request.body, *hidden).split())
-    if len(prompt) > 240:
-        prompt = prompt[:237].rstrip() + "…"
-    choices: list[str] = []
-    for choice in request.choices:
-        cleaned = " ".join(_scrub(choice, *hidden).split())
-        if cleaned and cleaned not in choices and len(cleaned) <= 120:
-            choices.append(cleaned)
-        if len(choices) == 6:
-            break
-    if not prompt or len(choices) < 2:
-        raise ToolError("That question was not shown.")
-    return Settled(prompt, tuple(choices))
+
+    def one(prompt: str, raw_choices) -> tuple[str, tuple[str, ...]]:
+        cleaned_prompt = " ".join(_scrub(prompt, *hidden).split())
+        if len(cleaned_prompt) > 240:
+            cleaned_prompt = cleaned_prompt[:237].rstrip() + "…"
+        choices: list[str] = []
+        for choice in raw_choices:
+            cleaned = " ".join(_scrub(choice, *hidden).split())
+            if cleaned and cleaned not in choices and len(cleaned) <= 120:
+                choices.append(cleaned)
+            if len(choices) == 6:
+                break
+        if not cleaned_prompt or len(choices) < 2:
+            raise ToolError("That question was not shown.")
+        return cleaned_prompt, tuple(choices)
+
+    if request.questions:
+        batch = [one(str(item.get("question") or ""), item.get("choices") or ())
+                 for item in request.questions[:MAX_QUESTIONS]]
+        first_prompt, first_choices = batch[0]
+        return Settled(
+            first_prompt,
+            first_choices,
+            questions=tuple(
+                {"question": prompt, "choices": choices} for prompt, choices in batch
+            ),
+        )
+    prompt, choices = one(request.body, request.choices)
+    return Settled(prompt, choices)
 
 
 def _clip(text: str) -> str:
@@ -7102,6 +7186,11 @@ def _function_arguments(request: ToolRequest) -> str:
         payload = {"status": request.action or "proven", "note": request.body}
     elif request.kind == "question":
         payload = {"question": request.body, "choices": list(request.choices)}
+        if request.questions:
+            payload["questions"] = [
+                {"question": item["question"], "choices": list(item["choices"])}
+                for item in request.questions
+            ]
     else:
         payload = {"action": request.action, "path": request.path, "command": request.command, "body": request.body}
     return json.dumps(payload)
@@ -9651,6 +9740,13 @@ async def run_turn(
             settled = _ask(store, request)
             yield "status", "Asking"
             yield "choices", json.dumps(list(settled.choices))
+            if settled.questions:
+                yield "questions", json.dumps(
+                    [
+                        {"question": item["question"], "choices": list(item["choices"])}
+                        for item in settled.questions
+                    ]
+                )
             final = _show(_with_status(_drop_known_logs(settled.text, lines)))
             payload = _made_payload(lines)
             if payload and not _answer_is_failure(final):
@@ -10486,6 +10582,7 @@ async def complete_with_tools(
     )
     final = ""
     choices: tuple[str, ...] = ()
+    questions: tuple = ()
     made = ""
     thought = ""
     reacted = False
@@ -10531,6 +10628,20 @@ async def complete_with_tools(
                 parsed = []
             if isinstance(parsed, list):
                 choices = tuple(item for item in parsed if isinstance(item, str))
+        elif kind == "questions":
+            try:
+                parsed = json.loads(text)
+            except json.JSONDecodeError:
+                parsed = []
+            if isinstance(parsed, list):
+                questions = tuple(
+                    {
+                        "question": str(item.get("question") or ""),
+                        "choices": tuple(c for c in item.get("choices") or () if isinstance(c, str)),
+                    }
+                    for item in parsed
+                    if isinstance(item, dict)
+                )
     final = await finish_honesty(
         final,
         base_url=base_url,
@@ -10546,7 +10657,7 @@ async def complete_with_tools(
     outcome = trace.outcome if trace is not None else None
     receipts = tuple(outcome.receipts) if outcome else ()
     unverified = bool(outcome.unverified) if outcome else False
-    return Settled(final, choices, made, thought.strip(), reacted, checked, lesson, receipts, unverified)
+    return Settled(final, choices, made, thought.strip(), reacted, checked, lesson, receipts, unverified, questions)
 
 
 async def stream_with_tools(

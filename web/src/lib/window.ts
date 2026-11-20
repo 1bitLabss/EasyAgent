@@ -57,6 +57,7 @@ export function sameMessage(left: ChatMessage, right: ChatMessage): boolean {
     (left.client_id || "") === (right.client_id || "") &&
     Boolean(left.interrupted) === Boolean(right.interrupted) &&
     sameList(left.choices, right.choices) &&
+    JSON.stringify(left.questions || []) === JSON.stringify(right.questions || []) &&
     sameList(left.skills_saved, right.skills_saved) &&
     (left.attachment?.id || "") === (right.attachment?.id || "") &&
     (left.attachment?.excerpt || "") === (right.attachment?.excerpt || "")

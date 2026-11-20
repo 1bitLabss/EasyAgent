@@ -473,7 +473,9 @@ function finish(flight: Flight, chat?: Chat) {
 function notifyFinished(flight: Flight, chat?: Chat) {
   if (inDesktop()) return;
   const last = chat?.messages?.slice(-1)[0];
-  const asking = Boolean(last && last.role === "assistant" && (last.choices || []).length > 1);
+  const asking = Boolean(
+    last && last.role === "assistant" && ((last.choices || []).length > 1 || (last.questions || []).length > 1),
+  );
   const body = asking ? "A bot has a question." : "A bot finished a reply.";
   if (typeof Notification === "undefined" || Notification.permission !== "granted") return;
   if (visible(flight) && document.visibilityState === "visible") return;

@@ -685,9 +685,24 @@ NATIVE_TOOLS = [
     ),
     _tool(
         "question",
-        "Ask the person to pick one of the choices.",
-        {"question": _STRING, "choices": {"type": "array", "items": _STRING}},
-        ["question", "choices"],
+        "Ask the person to pick one of the choices. When several things are unknown, pass them "
+        "together in questions (1 to 5), each with its own choices; one question is a one-entry array.",
+        {
+            "question": _STRING,
+            "choices": {"type": "array", "items": _STRING},
+            "questions": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "question": _STRING,
+                        "choices": {"type": "array", "items": _STRING},
+                    },
+                    "required": ["question", "choices"],
+                },
+            },
+        },
+        [],
     ),
     _tool(
         "finish",
@@ -934,6 +949,9 @@ def _fence_for_call(call: dict) -> str:
             return ""
         rows = [act] + ([target] if target else [])
         return "```history\n" + "\n".join(rows) + "\n```"
+    if name in {"question", "ask", "clarify"} and isinstance(args.get("questions"), list):
+        # A batch rides the question fence as JSON; tools.py validates the shape.
+        return "```question\n" + json.dumps({"questions": args["questions"]}) + "\n```"
     question = _string_arg(args, "question", "prompt")
     choices = args.get("choices") if isinstance(args.get("choices"), list) else args.get("options")
     if name in {"question", "ask"} and question and isinstance(choices, list):

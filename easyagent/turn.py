@@ -51,6 +51,12 @@ class Slot:
         self.claimed_at = 0.0
         self.child_tasks: list = []
         self.child_procs: list = []
+        # Keep-going engine: the nudge line a finish left for the harness, and
+        # the goal judge's parked-wait timer and its pending-decision flag.
+        self.keep_going_nudge = ""
+        self.keep_going_turn = False
+        self.judge_pending = False
+        self.judge_wait_task: asyncio.Task | None = None
         # Live per-child progress for the chat stream. The turn pump sets
         # child_events; delegate and helpers publish into it as children start
         # and finish, so a fan-out shows each child instead of one generic line.

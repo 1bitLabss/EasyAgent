@@ -230,6 +230,10 @@ def set_keep_going(
         plan["stuck"] = 0
         plan["keep_going_mark"] = 0
         plan["keep_off_by_user"] = False
+        # A resume after a judge pause starts the judge's health fresh too.
+        plan["judge_parse_fails"] = 0
+        plan["judge_transport_fails"] = 0
+        capture_goal(store, bot_id, chat_id, plan)
     else:
         plan["keep_going"] = False
         if by_user:
@@ -589,7 +593,7 @@ def apply_plan(store: Store, bot_id: str, request) -> str:
         raise PlanError("This turn has no chat, so the checklist was not saved.")
     store.get_chat(bot_id, chat_id)
     action = (getattr(request, "action", "") or "read").strip().lower()
-    if action not in {"read", "set", "step", "clear", "keep"}:
+    if action not in {"read", "set", "step", "clear", "keep", "judge"}:
         action = "read"
     if action == "read":
         return describe(load_plan(store, bot_id, chat_id))
@@ -598,6 +602,8 @@ def apply_plan(store: Store, bot_id: str, request) -> str:
         return "The checklist was cleared. The job was not restarted."
     if action == "keep":
         return _apply_keep(store, bot_id, chat_id, request)
+    if action == "judge":
+        return _apply_judge(store, bot_id, chat_id, request)
     if action == "step":
         return _apply_step(store, bot_id, chat_id, request)
     plan = _parse_set_body(store, getattr(request, "body", "") or "")
@@ -678,6 +684,57 @@ def _apply_keep(store: Store, bot_id: str, chat_id: str, request) -> str:
     )
 
 
+def capture_goal(store: Store, bot_id: str, chat_id: str, plan: dict) -> dict:
+    """Record what the run is aiming at, once. The plan's own goal wins; else the
+    person's task line. Continuation nudges are not a goal."""
+    if not plan or plan.get("goal"):
+        return plan
+    try:
+        chat = store.get_chat(bot_id, chat_id)
+    except Exception:
+        return plan
+    for message in reversed(chat.get("messages") or []):
+        if not isinstance(message, dict) or message.get("role") != "user":
+            continue
+        text = str(message.get("content") or "").strip()
+        if not text or text.startswith("Keep going") or text.startswith("The wait is over"):
+            continue
+        plan["goal"] = text
+        plan["updated_at"] = now_iso()
+        _write_plan(store, bot_id, chat_id, plan)
+        break
+    return plan
+
+
+def _apply_judge(store: Store, bot_id: str, chat_id: str, request) -> str:
+    """Turn the goal judge on or off. On, it replaces the stall witness at each
+    continuation: a second model reads the goal and the last answer and decides
+    done, stuck, keep going, or wait."""
+    choice = " ".join(str(getattr(request, "command", "") or getattr(request, "body", "") or "").split()).lower()
+    plan = load_plan(store, bot_id, chat_id)
+    if not plan or not plan.get("steps"):
+        raise PlanError("There is no checklist for the judge to watch. Nothing was changed.")
+    if choice in {"off", "no", "stop", "false"}:
+        plan["judge"] = False
+        plan["updated_at"] = now_iso()
+        _write_plan(store, bot_id, chat_id, plan)
+        return "The judge is off. Keep-going watches the plan itself again."
+    if choice and choice not in {"on", "yes", "true"}:
+        raise PlanError("The judge takes on or off. Nothing was changed.")
+    plan["judge"] = True
+    plan["judge_parse_fails"] = 0
+    plan["judge_transport_fails"] = 0
+    plan["updated_at"] = now_iso()
+    _write_plan(store, bot_id, chat_id, plan)
+    capture_goal(store, bot_id, chat_id, plan)
+    if not plan.get("keep_going"):
+        set_keep_going(store, bot_id, chat_id, on=True)
+    return (
+        "The judge is on. After each try it reads the goal and the answer and "
+        "says done, stuck, keep going, or wait."
+    )
+
+
 def request_from_fence(body: str):
     from easyagent.tools import ToolRequest
 
@@ -690,6 +747,11 @@ def request_from_fence(body: str):
         if not rest:
             rest = next((line.strip().lower() for line in lines[1:] if line.strip()), "")
         return ToolRequest(kind="plan", action="keep", command=rest)
+    if first == "judge" or first.startswith("judge "):
+        rest = first[6:].strip()
+        if not rest:
+            rest = next((line.strip().lower() for line in lines[1:] if line.strip()), "")
+        return ToolRequest(kind="plan", action="judge", command=rest)
     if first == "step":
         parts = [line.strip() for line in lines[1:] if line.strip()]
         return ToolRequest(

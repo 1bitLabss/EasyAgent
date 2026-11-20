@@ -6323,10 +6323,21 @@ async def _finish_turn(store: Store, bot_id: str, chat_id: str) -> None:
         gate.release_bot(str(bot.get("name") or ""))
     except Exception:
         pass
+    # The goal judge runs before the boundary: its call can take half a minute,
+    # and the boundary must stay free for the next handoff. The answer is saved
+    # by now; the judge reads the chat, not the slot.
+    slot_now = turn_mod.slot_for(store, chat_id)
+    judge_nudge = ""
+    if getattr(slot_now, "judge_pending", False):
+        slot_now.judge_pending = False
+        if not slot_now.user_stop and not _run_paused(store, bot_id, chat_id):
+            judge_nudge = await _judge_continuation(store, bot_id, chat_id)
     async with turn_mod.boundary(store, chat_id):
         slot = turn_mod.slot_for(store, chat_id)
         nudge = str(getattr(slot, "keep_going_nudge", "") or "")
         slot.keep_going_nudge = ""
+        if judge_nudge and not nudge:
+            nudge = judge_nudge
         was_continuation = bool(getattr(slot, "keep_going_turn", False))
         slot.keep_going_turn = False
         if slot.user_stop:
@@ -6902,6 +6913,113 @@ async def _keep_going_turn(store: Store, bot_id: str, chat_id: str, nudge: str) 
         _log.warning("Keep-going continuation failed: %s", exc)
     finally:
         await _finish_turn(store, bot_id, chat_id)
+
+
+async def _judge_continuation(store: Store, bot_id: str, chat_id: str) -> str:
+    """Goal judge at the continuation decision: it replaces the digest witness.
+
+    Reads the goal, the agent's last answer, the checklist, and the running
+    background children, and returns one verdict: done closes the run, blocked
+    pauses it (not done), wait parks it without spending a go, continue runs one
+    more continuation with the judge's reason on the line. Returns the line to
+    run the continuation with, or "" when the run stops or parks.
+    """
+    from easyagent import delegate as delegate_mod
+    from easyagent import goaljudge
+    from easyagent import plan as plan_mod
+
+    try:
+        plan = plan_mod.load_plan(store, bot_id, chat_id)
+        if not plan or plan.get("dismissed") or not plan.get("keep_going") or not plan.get("judge"):
+            return ""
+        left = plan_mod.unfinished(plan)
+        if not left:
+            plan_mod.set_keep_going(store, bot_id, chat_id, on=False)
+            return ""
+        if not plan.get("goal"):
+            # Armed before the task line existed (or by an older plan): the
+            # goal is whatever the person last asked for, not a nudge.
+            plan = plan_mod.capture_goal(store, bot_id, chat_id, plan)
+        answer = ""
+        try:
+            for message in reversed(store.get_chat(bot_id, chat_id).get("messages") or []):
+                if isinstance(message, dict) and message.get("role") == "assistant":
+                    if str(message.get("content") or "").strip():
+                        answer = str(message.get("content") or "")
+                        break
+        except StoreError:
+            pass
+        children = delegate_mod.running_children(store, bot_id, chat_id)
+        verdict, reason, parse_failed, wait, transport_failed = await goaljudge.call_judge(
+            store, bot_id, goal=str(plan.get("goal") or ""), answer=answer, plan=plan, children=children
+        )
+        pause = goaljudge.apply_health(plan, parse_failed, transport_failed)
+        plan_mod._write_plan(store, bot_id, chat_id, plan)
+        if pause:
+            plan_mod.set_keep_going(store, bot_id, chat_id, on=False)
+            _finish_reply(store, bot_id, chat_id, pause, [])
+            return ""
+        if verdict == "done":
+            plan_mod.set_keep_going(store, bot_id, chat_id, on=False)
+            _finish_reply(store, bot_id, chat_id, f"Goal done: {reason}", [])
+            return ""
+        if verdict == "blocked":
+            plan_mod.set_keep_going(store, bot_id, chat_id, on=False)
+            _finish_reply(store, bot_id, chat_id, f"Stuck: {reason}", [])
+            return ""
+        if verdict == "wait":
+            seconds = int((wait or {}).get("seconds") or goaljudge.DEFAULT_WAIT_SECONDS)
+            seconds = max(1, min(seconds, goaljudge.MAX_WAIT_SECONDS))
+            slot = turn_mod.slot_for(store, chat_id)
+            parked = getattr(slot, "judge_wait_task", None)
+            if parked is not None:
+                parked.cancel()
+            slot.judge_wait_task = asyncio.create_task(
+                _judge_wait_wake(store, bot_id, chat_id, seconds)
+            )
+            return ""
+        # continue (or a skipped/failed check, which fails open): one more go.
+        cap = int(plan.get("budget") or plan_mod.KEEP_GOING_HARD_CAP)
+        n = int(plan.get("continued") or 0) + 1
+        plan_mod.note_continuation(store, bot_id, chat_id, mark=plan_mod.plan_digest(plan), stuck=0)
+        return f"Keep going {n}/{cap}: {reason}"
+    except turn_mod.TurnCancelled:
+        return ""
+    except Exception as exc:
+        _log.warning("Goal judge failed: %s", exc)
+        return ""
+
+
+async def _judge_wait_wake(store: Store, bot_id: str, chat_id: str, seconds: int) -> None:
+    """The judge parked the run on the clock. Wake it when the time passes.
+
+    A background child that lands earlier wakes this chat through the queue on
+    its own; when this timer fires and the run already resumed, it says nothing.
+    """
+    try:
+        await asyncio.sleep(seconds)
+    except asyncio.CancelledError:
+        return
+    try:
+        from easyagent import plan as plan_mod
+
+        slot = turn_mod.slot_for(store, chat_id)
+        if slot.busy or slot.user_stop or _queue_waiting(store, bot_id, chat_id):
+            return
+        if _run_paused(store, bot_id, chat_id):
+            return
+        plan = plan_mod.load_plan(store, bot_id, chat_id)
+        if not plan or not plan.get("keep_going") or plan.get("dismissed"):
+            return
+        if not turn_mod.try_begin(store, chat_id):
+            return
+        task = asyncio.create_task(
+            _keep_going_turn(store, bot_id, chat_id, "The wait is over: keep going toward the goal.")
+        )
+        slot.worker = task
+        turn_mod.track_worker(task)
+    except Exception as exc:
+        _log.warning("Goal judge wait wake failed: %s", exc)
 
 
 def _settle_abandoned_runs(store: Store) -> None:

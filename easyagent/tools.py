@@ -1311,7 +1311,7 @@ def _request_from_call(data: dict) -> ToolRequest:
         title = str(raw_args.get("title") or "").strip()
         steps = raw_args.get("steps")
         plan_body = content
-        if action not in {"read", "set", "step", "clear", "keep"}:
+        if action not in {"read", "set", "step", "clear", "keep", "judge"}:
             action = "set" if (plan_body.strip() or title or isinstance(steps, list)) else "read"
         if action == "keep" and not state.strip() and plan_body.strip():
             state = plan_body.strip()
@@ -8791,6 +8791,13 @@ async def run_turn(
                 return f"Stopped after {cap} goes: {left} steps left. Say continue."
             seam = turn_mod.current_slot()
             if seam is None:
+                return ""
+            # Judge mode: a second model reads the goal and this answer at the
+            # continuation decision, so the digest witness steps aside. The
+            # harness runs the judge when the turn closes; the cap above stays
+            # as the backstop either way.
+            if plan.get("judge"):
+                seam.judge_pending = True
                 return ""
             # Progress is a smaller open count or any change to the plan:
             # reopening a step, adding a subtask, or reordering is productive

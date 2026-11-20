@@ -1620,6 +1620,8 @@ async def _complete_once(
     grammar: str | None = None,
     tools: bool = True,
     yield_to_chats: bool = False,
+    temperature: float | None = None,
+    max_tokens: int | None = None,
 ) -> str:
     """One non-streaming completion. A tool-call parse 500 is tried again here.
 
@@ -1645,6 +1647,8 @@ async def _complete_once(
                 yield_to_chats=yield_to_chats,
                 parallel_tool_calls=False if single and not flag_off else None,
                 attempt=attempt,
+                temperature=temperature,
+                max_tokens=max_tokens,
             )
         except _ToolParseAgain as exc:
             last_excerpt = exc.excerpt or last_excerpt
@@ -1674,6 +1678,8 @@ async def _complete_attempt(
     yield_to_chats: bool = False,
     parallel_tool_calls: bool | None = None,
     attempt: int = 0,
+    temperature: float | None = None,
+    max_tokens: int | None = None,
 ) -> str:
     """One POST. A tool-call parse failure raises `_ToolParseAgain`."""
     started = time.perf_counter()
@@ -1690,8 +1696,12 @@ async def _complete_attempt(
         grammar=grammar,
         tools=tools,
         parallel_tool_calls=parallel_tool_calls,
-        max_tokens=current_limits().max_tokens,
-        temperature=_tool_temperature(tools, response_schema, grammar, attempt),
+        max_tokens=current_limits().max_tokens if max_tokens is None else max_tokens,
+        temperature=(
+            _tool_temperature(tools, response_schema, grammar, attempt)
+            if temperature is None
+            else temperature
+        ),
     )
     headers = _auth_headers(base_url, api_key)
     client = httpx.AsyncClient(timeout=_http_timeout(timeout, stream=False))
@@ -1770,6 +1780,8 @@ async def _dispatch_complete(
     tools: bool,
     yield_to_chats: bool,
     long_wait: bool = False,
+    temperature: float | None = None,
+    max_tokens: int | None = None,
 ) -> str:
     if not gate.inner_retry_allowed():
         try:
@@ -1788,6 +1800,8 @@ async def _dispatch_complete(
                 grammar=grammar,
                 tools=tools,
                 yield_to_chats=yield_to_chats,
+                temperature=temperature,
+                max_tokens=max_tokens,
             )
         finally:
             await permit.release()
@@ -1802,6 +1816,8 @@ async def _dispatch_complete(
         tools=tools,
         yield_to_chats=yield_to_chats,
         long_wait=long_wait,
+        temperature=temperature,
+        max_tokens=max_tokens,
     )
 
 
@@ -1817,6 +1833,8 @@ async def _complete_window(
     tools: bool = True,
     yield_to_chats: bool = False,
     long_wait: bool = False,
+    temperature: float | None = None,
+    max_tokens: int | None = None,
 ) -> str:
     """Retry a completion that never returned, and free the slot during the pause."""
     window = retry.Window(base_url=base_url, long_wait=long_wait)
@@ -1843,6 +1861,8 @@ async def _complete_window(
                     grammar=grammar,
                     tools=tools,
                     yield_to_chats=yield_to_chats,
+                    temperature=temperature,
+                    max_tokens=max_tokens,
                 )
                 retry.charge_unreachable()
                 return text
@@ -1878,6 +1898,8 @@ async def _complete_current(
     tools: bool | None,
     yield_to_chats: bool,
     long_wait: bool,
+    temperature: float | None = None,
+    max_tokens: int | None = None,
 ) -> str:
     """One provider. A grammar rejection is retried here, still with this key."""
     structured = bool(response_schema or grammar)
@@ -1902,6 +1924,8 @@ async def _complete_current(
             tools=send_tools,
             yield_to_chats=yield_to_chats,
             long_wait=long_wait,
+            temperature=temperature,
+            max_tokens=max_tokens,
         )
     except ProviderError as exc:
         if structured and grammar_rejected(str(exc)):
@@ -1917,6 +1941,8 @@ async def _complete_current(
                 tools=False,
                 yield_to_chats=yield_to_chats,
                 long_wait=long_wait,
+                temperature=temperature,
+                max_tokens=max_tokens,
             )
         raise
 
@@ -1934,6 +1960,8 @@ async def complete(
     yield_to_chats: bool = False,
     long_wait: bool = False,
     fallbacks: list[dict] | None = None,
+    temperature: float | None = None,
+    max_tokens: int | None = None,
 ) -> str:
     """One completion. A rate limit or a dropped connection tries the next saved provider.
 
@@ -1961,6 +1989,8 @@ async def complete(
                 tools=tools,
                 yield_to_chats=yield_to_chats,
                 long_wait=long_wait,
+                temperature=temperature,
+                max_tokens=max_tokens,
             )
         except YieldLater:
             raise

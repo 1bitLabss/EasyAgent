@@ -1367,6 +1367,13 @@ def create_app(data_dir: str | Path | None = None) -> FastAPI:
 
         return [public_record(row) for row in list_records(store, bot_id)]
 
+    @app.get("/api/bots/{bot_id}/connectors/export")
+    def get_connectors_export(bot_id: str):
+        store.get_bot(bot_id)
+        from easyagent.connectors import export_mcp_json
+
+        return export_mcp_json(store, bot_id)
+
     @app.get("/api/bots/{bot_id}/connector-starters")
     def get_connector_starters(bot_id: str):
         store.get_bot(bot_id)

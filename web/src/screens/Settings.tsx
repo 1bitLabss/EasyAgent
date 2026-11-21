@@ -355,7 +355,7 @@ type ConnectorRow = {
   version: string;
 };
 
-function ConnectorsBlock({ botId, onError }: { botId: string; onError: (text: string) => void }) {
+export function ConnectorsBlock({ botId, onError }: { botId: string; onError: (text: string) => void }) {
   const rows = useQuery({
     queryKey: ["connectors", botId],
     queryFn: () => api<ConnectorRow[]>(`/api/bots/${botId}/connectors`),
@@ -418,9 +418,31 @@ function ConnectorsBlock({ botId, onError }: { botId: string; onError: (text: st
     await queryClient.invalidateQueries({ queryKey: ["connectors", botId] });
   }
 
+  async function exportMcp() {
+    try {
+      const doc = await api<Record<string, unknown>>(`/api/bots/${botId}/connectors/export`);
+      const blob = new Blob([JSON.stringify(doc, null, 2)], { type: "application/json" });
+      const href = URL.createObjectURL(blob);
+      const anchor = document.createElement("a");
+      anchor.href = href;
+      anchor.download = "mcp.json";
+      anchor.click();
+      URL.revokeObjectURL(href);
+    } catch (reason) {
+      onError(reason instanceof Error ? reason.message : "The export did not work.");
+    }
+  }
+
+  const hasConnectors = (rows.data || []).length > 0;
+
   return (
     <Block id="connectors" title="Connectors">
       <Note>Each bot has its own MCP servers. A write, delete, or send waits for you. Secrets stay in the secrets database and are handed only to that server. Nothing is installed until you approve the review card.</Note>
+      {hasConnectors ? (
+        <div>
+          <Button type="button" variant="outline" data-testid="connectors-export" onClick={() => void exportMcp()}>Export</Button>
+        </div>
+      ) : null}
       <div className="flex flex-wrap gap-2">
         <Button type="button" variant="outline" onClick={() => void addStarter("filesystem")}>Filesystem</Button>
         <Button type="button" variant="outline" onClick={() => void addStarter("fetch")}>Fetch</Button>

@@ -612,6 +612,41 @@ def invoke(store: Store, request, bot_id: str | None) -> str:
     return _scrub(text, secrets)
 
 
+def export_mcp_json(store: Store, bot_id: str) -> dict:
+    """The bot's enabled connectors as a standard mcp.json document.
+
+    Shape is the agent-plugins.org v1 schema that Hermes reads. Secret values
+    never leave the secrets database: each secret name becomes a ${NAME}
+    placeholder in the env map for the caller to fill in.
+    """
+    servers: dict[str, dict] = {}
+    for row in list_records(store, bot_id):
+        if row.get("enabled") is False:
+            continue
+        argv = [str(part) for part in (row.get("command") or []) if str(part).strip()]
+        address = str(row.get("url") or "").strip()
+        if row.get("transport") == "http":
+            if not address:
+                continue
+            entry: dict = {"type": "streamable-http", "url": address}
+        else:
+            if not argv:
+                continue
+            env = {str(name): "${%s}" % name for name in row.get("secret_names") or []}
+            entry = {"type": "stdio", "command": argv[0], "args": argv[1:], "env": env}
+        base = str(row.get("name") or "Connector").strip() or "Connector"
+        key = base
+        seen = 2
+        while key in servers:
+            key = f"{base}-{seen}"
+            seen += 1
+        servers[key] = entry
+    return {
+        "$schema": "https://agent-plugins.org/schemas/1.0.0/mcp.schema.json",
+        "mcpServers": servers,
+    }
+
+
 def prompt_block(store: Store, bot_id: str | None) -> str:
     if not bot_id:
         return "No connector is set up. Do not invent a server."

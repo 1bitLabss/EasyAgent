@@ -478,17 +478,77 @@ function SignIn({ open, kind, editing, onClose, onSave }: { open: boolean; kind:
 
 export function DirectionScreen() {
   const direction = useQuery({ queryKey: ["direction"], queryFn: () => api<{ text: string }>("/api/direction") });
+  const bots = useQuery({ queryKey: ["bots"], queryFn: () => api<Bot[]>("/api/bots") });
+  const [botId, setBotId] = useState("");
   const [note, setNote] = useState("");
   const [error, setError] = useState("");
+  const [botNote, setBotNote] = useState("");
+  const [botError, setBotError] = useState("");
+  const botDirection = useQuery({
+    queryKey: ["direction", botId],
+    queryFn: () => api<{ text: string; own?: boolean }>(`/api/direction?bot_id=${encodeURIComponent(botId)}`),
+    enabled: !!botId,
+  });
   return (
     <Page kicker="Direction" title="What every bot is told" lede="This note is included in every request. Saving it does not change stored chats.">
-      <Textarea key={direction.data?.text || ""} id="direction-text" rows={16} defaultValue={direction.data?.text || ""} />
-      <Button onClick={() => {
+      <Textarea key={direction.data?.text || ""} id="direction-text" data-testid="direction-text" rows={16} defaultValue={direction.data?.text || ""} />
+      <Button data-testid="direction-save" onClick={() => {
         const text = (document.getElementById("direction-text") as HTMLTextAreaElement | null)?.value || "";
         void api("/api/direction", { method: "PUT", json: { text } }).then(() => setNote("Saved. Chats were not changed.")).catch((reason: Error) => setError(reason.message));
       }}>Save direction</Button>
       {note ? <p className="text-sm">{note}</p> : null}
       {error ? <p className="text-sm text-danger">{error}</p> : null}
+      <div className="mt-8 border-t border-border pt-5" data-testid="bot-direction-section">
+        <h2 className="text-lg font-semibold">One bot</h2>
+        <p className="mt-1 max-w-2xl text-sm text-muted">
+          A bot can carry its own note. When a bot has its own note, that note replaces the shared note for that
+          bot only. Saving here does not touch the shared note or any other bot.
+        </p>
+        <label className="block text-sm">
+          Bot
+          <select
+            data-testid="bot-direction-select"
+            className="mt-1 w-full max-w-sm rounded-md border border-border bg-card px-2 py-1.5"
+            value={botId}
+            onChange={(event) => { setBotId(event.target.value); setBotNote(""); setBotError(""); }}
+          >
+            <option value="">Pick a bot</option>
+            {(bots.data || []).map((bot) => <option key={bot.id} value={bot.id}>{bot.name}</option>)}
+          </select>
+        </label>
+        {botId && botDirection.data ? (
+          <p className="text-sm text-muted" data-testid="bot-direction-state">
+            {botDirection.data.own
+              ? "This bot has its own note. It replaces the shared note for this bot."
+              : "This bot has no note of its own yet. It follows the shared note above."}
+          </p>
+        ) : null}
+        {botId ? (
+          <>
+            <Textarea
+              key={`${botId}:${botDirection.data?.text || ""}`}
+              id="bot-direction-text"
+              data-testid="bot-direction-text"
+              rows={12}
+              defaultValue={botDirection.data?.text || ""}
+            />
+            <Button
+              data-testid="bot-direction-save"
+              onClick={() => {
+                const text = (document.getElementById("bot-direction-text") as HTMLTextAreaElement | null)?.value || "";
+                void api(`/api/direction?bot_id=${encodeURIComponent(botId)}`, { method: "PUT", json: { text } })
+                  .then(() => {
+                    setBotNote("Saved for this bot. The shared note was not changed.");
+                    void queryClient.invalidateQueries({ queryKey: ["direction", botId] });
+                  })
+                  .catch((reason: Error) => setBotError(reason.message));
+              }}
+            >Save for this bot</Button>
+            {botNote ? <p className="text-sm">{botNote}</p> : null}
+            {botError ? <p className="text-sm text-danger">{botError}</p> : null}
+          </>
+        ) : null}
+      </div>
     </Page>
   );
 }

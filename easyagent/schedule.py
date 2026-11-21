@@ -408,7 +408,7 @@ async def _run_one(store: Store, bot: dict, schedule: dict, slot: str) -> dict:
         entry = {**base, "status": "error", "output": "", "result": "", "error": "This bot's endpoint is missing.", "finished_at": now_iso()}
         await _deliver(store, bot, schedule, entry)
         return entry
-    direction = direction_body(store.read_direction() or "")
+    direction = direction_body(store.read_direction(bot.get("id")) or "")
     if len(direction) > DIRECTION_CAP:
         direction = direction[: DIRECTION_CAP - 40].rstrip() + "\n[direction truncated]"
     name = bot.get("name") or "EasyAgent"

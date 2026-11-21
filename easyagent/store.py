@@ -2565,16 +2565,27 @@ class Store:
             return
         self.save_skill(EXAMPLE_SKILL)
 
-    def read_direction(self) -> str:
+    def bot_direction_path(self, bot_id: str) -> Path:
+        """A bot's own direction file. When it exists it replaces the shared note for that bot."""
+        return self._bot_dir(bot_id) / "DIRECTION.md"
+
+    def read_direction(self, bot_id: str | None = None) -> str:
+        if bot_id:
+            bot_file = self.bot_direction_path(bot_id)
+            if bot_file.is_file():
+                return bot_file.read_text(encoding="utf-8")
         if not self.direction_path.is_file():
             return DEFAULT_DIRECTION
         return self.direction_path.read_text(encoding="utf-8")
 
-    def write_direction(self, text: str) -> str:
+    def write_direction(self, text: str, bot_id: str | None = None) -> str:
         if not text.strip():
             raise StoreError("Direction cannot be empty. Chats were not changed.", 400)
-        atomic_write_text(self.direction_path, text if text.endswith("\n") else text + "\n")
-        return self.read_direction()
+        path = self.bot_direction_path(bot_id) if bot_id else self.direction_path
+        if bot_id:
+            path.parent.mkdir(parents=True, exist_ok=True)
+        atomic_write_text(path, text if text.endswith("\n") else text + "\n")
+        return self.read_direction(bot_id)
 
     def list_skills(self) -> list[dict]:
         skills = []

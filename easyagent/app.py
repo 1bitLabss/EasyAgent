@@ -3097,13 +3097,20 @@ def create_app(data_dir: str | Path | None = None) -> FastAPI:
         return await sleep_once(store, mock=False, runs=3, bot_id=bot["id"])
 
     @app.get("/api/direction")
-    def get_direction():
+    def get_direction(bot_id: str | None = None):
+        if bot_id:
+            store.get_bot(bot_id)
+            payload = {"text": store.read_direction(bot_id)}
+            payload["own"] = store.bot_direction_path(bot_id).is_file()
+            return payload
         return {"text": store.read_direction()}
 
     @app.put("/api/direction")
-    def put_direction(body: DirectionIn):
+    def put_direction(body: DirectionIn, bot_id: str | None = None):
         bots_before = _snapshot_bots(store)
-        text = store.write_direction(body.text)
+        if bot_id:
+            store.get_bot(bot_id)
+        text = store.write_direction(body.text, bot_id)
         if _snapshot_bots(store) != bots_before:
             raise HTTPException(500, "Saving direction changed bot data.")
         return {"text": text}
@@ -4092,7 +4099,7 @@ def _turn_messages(store: Store, bot_id: str, chat: dict) -> tuple[dict, list[di
     ensure_own_files(store, bot_id)
     system = build_system(
         bot_name=bot["name"],
-        direction=store.read_direction(),
+        direction=store.read_direction(bot["id"]),
         summary=view.summary,
         skills_text=_skills_for_prompt(store, bot_id, _last_user_text(chat.get("messages") or [])),
         other_bots=others,
@@ -4809,7 +4816,7 @@ async def _complete_for_room_bot(store: Store, room: dict, bot_id: str) -> tuple
     )
     system = build_system(
         bot_name=bot["name"],
-        direction=store.read_direction(),
+        direction=store.read_direction(bot["id"]),
         summary=prepared.summary,
         skills_text=_skills_for_prompt(store, bot["id"], _last_user_text(room.get("messages") or [])),
         room_note=note,
@@ -4952,7 +4959,7 @@ async def _ack_room_reaction(store: Store, room_id: str, message: dict) -> None:
     )
     system = build_system(
         bot_name=bot["name"],
-        direction=store.read_direction(),
+        direction=store.read_direction(bot["id"]),
         summary=prepared.summary,
         skills_text=_skills_for_prompt(store, bot["id"], _last_user_text(room.get("messages") or [])),
         room_note=(
@@ -7713,7 +7720,7 @@ async def _run_child(store: Store, parent_id: str, parent_chat_id: str, child: d
                     base_url=endpoint["base_url"],
                     api_key=endpoint.get("api_key") or None,
                     model=chosen_model(child, endpoint),
-                    messages=child_messages(child["name"], store.read_direction(), task),
+                    messages=child_messages(child["name"], store.read_direction(child["id"]), task),
                     timeout=_quiet_model_wait(endpoint["base_url"]),
                 )
             except llm.ProviderError as exc:

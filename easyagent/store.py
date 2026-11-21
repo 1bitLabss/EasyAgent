@@ -1327,8 +1327,11 @@ class Store:
     def usage_today_path(self) -> Path:
         return self.root / "usage_today.json"
 
-    def note_usage_today(self, prompt: int, completion: int) -> None:
-        """Add one reply's token counts to today's rollup file."""
+    def note_usage_today(self, prompt: int, completion: int, bot_id: str | None = None) -> None:
+        """Add one reply's token counts to today's rollup file.
+
+        When bot_id is a real string the same amounts also land in that bot's
+        sub-counter. A missing or malformed bot_id still counts the total."""
         today = datetime.now().date().isoformat()
         data: dict = {}
         try:
@@ -1346,26 +1349,62 @@ class Store:
             return
         data["prompt"] = int(data.get("prompt") or 0) + prompt
         data["completion"] = int(data.get("completion") or 0) + completion
+        if isinstance(bot_id, str) and bot_id:
+            bots = data.get("bots")
+            if not isinstance(bots, dict):
+                bots = {}
+            entry = bots.get(bot_id)
+            if not isinstance(entry, dict):
+                entry = {}
+            try:
+                entry_prompt = max(0, int(entry.get("prompt") or 0)) + prompt
+                entry_completion = max(0, int(entry.get("completion") or 0)) + completion
+            except (TypeError, ValueError):
+                entry_prompt = prompt
+                entry_completion = completion
+            bots[bot_id] = {"prompt": entry_prompt, "completion": entry_completion}
+            data["bots"] = bots
         try:
             atomic_write_json(self.usage_today_path(), data)
         except OSError:
             pass
 
     def usage_today(self) -> dict:
-        """Tokens stamped today across every chat. Zeros on a new day."""
+        """Tokens stamped today across every chat. Zeros on a new day.
+
+        ``bots`` maps each bot id to its own pair for today. A broken bots
+        section degrades to an empty map instead of raising."""
         today = datetime.now().date().isoformat()
         try:
             data = json.loads(self.usage_today_path().read_text(encoding="utf-8"))
         except (OSError, ValueError):
             data = {}
         if not isinstance(data, dict) or data.get("date") != today:
-            return {"date": today, "prompt_tokens": 0, "completion_tokens": 0}
+            return {"date": today, "prompt_tokens": 0, "completion_tokens": 0, "bots": {}}
         try:
             prompt = int(data.get("prompt") or 0)
             completion = int(data.get("completion") or 0)
         except (TypeError, ValueError):
             prompt = completion = 0
-        return {"date": today, "prompt_tokens": max(0, prompt), "completion_tokens": max(0, completion)}
+        bots: dict = {}
+        raw_bots = data.get("bots")
+        if isinstance(raw_bots, dict):
+            for key, entry in raw_bots.items():
+                if not isinstance(key, str) or not isinstance(entry, dict):
+                    continue
+                try:
+                    bots[key] = {
+                        "prompt_tokens": max(0, int(entry.get("prompt") or 0)),
+                        "completion_tokens": max(0, int(entry.get("completion") or 0)),
+                    }
+                except (TypeError, ValueError):
+                    continue
+        return {
+            "date": today,
+            "prompt_tokens": max(0, prompt),
+            "completion_tokens": max(0, completion),
+            "bots": bots,
+        }
 
     def save_chat(self, chat: dict) -> dict:
         """Write the full chat document. Callers must pass every stored message."""

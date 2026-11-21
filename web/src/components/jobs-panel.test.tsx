@@ -135,3 +135,90 @@ describe("jobs panel footer resume all", () => {
     expect(screen.queryByTestId("resume-all")).toBeNull();
   });
 });
+
+describe("jobs panel per-bot usage lines", () => {
+  afterEach(() => {
+    vi.mocked(api).mockReset();
+  });
+
+  it("renders one compact line per bot when the payload carries a bots map", async () => {
+    vi.mocked(api).mockImplementation(async (path: string) => {
+      if (path === "/api/routines") return [];
+      if (path === "/api/bots") {
+        return [
+          { id: "b1", name: "Alpha" },
+          { id: "b2", name: "Bravo" },
+        ];
+      }
+      if (path === "/api/usage/today") {
+        return {
+          date: "2026-11-21",
+          prompt_tokens: 1534,
+          completion_tokens: 343,
+          bots: {
+            b1: { prompt_tokens: 1200, completion_tokens: 300 },
+            b2: { prompt_tokens: 334, completion_tokens: 43 },
+          },
+        };
+      }
+      return [];
+    });
+    useApp.setState({ jobsOpen: true, highlightJob: "" });
+    render(wrap(<JobsPanel />));
+    const lines = await screen.findAllByTestId("usage-bot");
+    expect(lines.map((node) => node.textContent)).toEqual([
+      "Alpha: 1.2k in / 300 out",
+      "Bravo: 334 in / 43 out",
+    ]);
+    // The rollup line keeps its exact old shape.
+    expect((await screen.findByTestId("usage-today")).textContent).toBe("Today: 1.5k in / 343 out");
+  });
+
+  it("falls back to the bot id when the bot list does not know it", async () => {
+    vi.mocked(api).mockImplementation(async (path: string) => {
+      if (path === "/api/routines") return [];
+      if (path === "/api/bots") return [];
+      if (path === "/api/usage/today") {
+        return {
+          date: "2026-11-21",
+          prompt_tokens: 5,
+          completion_tokens: 2,
+          bots: { ghost: { prompt_tokens: 5, completion_tokens: 2 } },
+        };
+      }
+      return [];
+    });
+    useApp.setState({ jobsOpen: true, highlightJob: "" });
+    render(wrap(<JobsPanel />));
+    const lines = await screen.findAllByTestId("usage-bot");
+    expect(lines.map((node) => node.textContent)).toEqual(["ghost: 5 in / 2 out"]);
+  });
+
+  it("shows no per-bot lines when the payload has no bots map (older server)", async () => {
+    vi.mocked(api).mockImplementation(async (path: string) => {
+      if (path === "/api/routines") return [];
+      if (path === "/api/usage/today") {
+        return { date: "2026-11-21", prompt_tokens: 10, completion_tokens: 2 };
+      }
+      return [];
+    });
+    useApp.setState({ jobsOpen: true, highlightJob: "" });
+    render(wrap(<JobsPanel />));
+    expect(await screen.findByTestId("usage-today")).toBeTruthy();
+    expect(screen.queryAllByTestId("usage-bot")).toHaveLength(0);
+  });
+
+  it("shows no per-bot lines when the bots map is empty", async () => {
+    vi.mocked(api).mockImplementation(async (path: string) => {
+      if (path === "/api/routines") return [];
+      if (path === "/api/usage/today") {
+        return { date: "2026-11-21", prompt_tokens: 10, completion_tokens: 2, bots: {} };
+      }
+      return [];
+    });
+    useApp.setState({ jobsOpen: true, highlightJob: "" });
+    render(wrap(<JobsPanel />));
+    expect(await screen.findByTestId("usage-today")).toBeTruthy();
+    expect(screen.queryAllByTestId("usage-bot")).toHaveLength(0);
+  });
+});

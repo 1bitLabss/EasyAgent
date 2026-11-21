@@ -4,6 +4,7 @@ import { api } from "@/api";
 import { formatElapsed, formatTokenCount } from "@/lib/run";
 import { cn } from "@/lib/utils";
 import { useApp } from "@/store";
+import type { Bot } from "@/types";
 import { Elapsed } from "./Elapsed";
 
 /** Same breakpoint as the mobile layout rules in index.css. */
@@ -53,6 +54,8 @@ export type UsageToday = {
   date: string;
   prompt_tokens: number;
   completion_tokens: number;
+  /** Per-bot split. Absent on older servers. */
+  bots?: Record<string, { prompt_tokens: number; completion_tokens: number }>;
 };
 
 /** "1.2k in / 340 out" from the rollup. Empty when nothing is known yet. */
@@ -62,6 +65,27 @@ export function usageToday(data?: UsageToday | null): string {
   const completion = Number(data.completion_tokens) || 0;
   if (prompt <= 0 && completion <= 0) return "";
   return `${formatTokenCount(prompt)} in / ${formatTokenCount(completion)} out`;
+}
+
+/** One "Alpha: 1.2k in / 340 out" line per bot. Nothing when the map is
+ * missing (older server) or every bot is at zero. */
+export function usageBotLines(
+  data: UsageToday | null | undefined,
+  nameFor: (botId: string) => string,
+): { botId: string; label: string }[] {
+  const bots = data?.bots;
+  if (!bots) return [];
+  const lines: { botId: string; label: string }[] = [];
+  for (const [botId, entry] of Object.entries(bots)) {
+    const prompt = Number(entry?.prompt_tokens) || 0;
+    const completion = Number(entry?.completion_tokens) || 0;
+    if (prompt <= 0 && completion <= 0) continue;
+    lines.push({
+      botId,
+      label: `${nameFor(botId)}: ${formatTokenCount(prompt)} in / ${formatTokenCount(completion)} out`,
+    });
+  }
+  return lines;
 }
 
 function when(value?: string | null): string {
@@ -92,9 +116,17 @@ export function JobsPanel() {
     queryFn: () => api<UsageToday>("/api/usage/today"),
     refetchInterval: 30000,
   });
+  // Same cached list the app shell keeps, so this usually costs nothing.
+  const bots = useQuery({
+    queryKey: ["bots"],
+    queryFn: () => api<Bot[]>("/api/bots"),
+  });
   const rows = jobs.data || [];
   const working = children.data || [];
   const busy = rows.filter((row) => row.state === "running" || row.state === "queued").length;
+  const botLines = usageBotLines(usage.data, (botId) =>
+    (bots.data || []).find((bot) => bot.id === botId)?.name || botId,
+  );
 
   async function pause(row: JobRow) {
     const pausing = row.state !== "paused" && row.state !== "done";
@@ -212,6 +244,9 @@ export function JobsPanel() {
       <footer className="space-y-2 border-t border-border px-3 py-3 text-xs text-muted">
         <p>Runs only while EasyAgent is open.</p>
         {usageToday(usage.data) ? <p data-testid="usage-today">Today: {usageToday(usage.data)}</p> : null}
+        {botLines.map((line) => (
+          <p key={line.botId} data-testid="usage-bot">{line.label}</p>
+        ))}
         {rows.length > 0 && rows.every((row) => row.state === "paused") ? (
           <button
             type="button"

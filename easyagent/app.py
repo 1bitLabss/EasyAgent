@@ -2131,9 +2131,19 @@ def create_app(data_dir: str | Path | None = None) -> FastAPI:
         return _public_chat(store, store.start_fresh(bot_id, chat_id))
 
     @app.get("/api/usage/today")
-    def usage_today():
-        """Tokens stamped today across every chat. For the jobs panel rollup."""
-        return store.usage_today()
+    def usage_today(bot_id: str | None = None):
+        """Tokens stamped today across every chat. For the jobs panel rollup.
+
+        With bot_id, return just that bot's pair. An unknown id reads zeros."""
+        usage = store.usage_today()
+        if bot_id is not None:
+            entry = (usage.get("bots") or {}).get(bot_id) or {}
+            return {
+                "date": usage["date"],
+                "prompt_tokens": int(entry.get("prompt_tokens") or 0),
+                "completion_tokens": int(entry.get("completion_tokens") or 0),
+            }
+        return usage
 
     @app.post("/api/bots/{bot_id}/chats/{chat_id}/compact")
     def compact_chat(bot_id: str, chat_id: str):
@@ -8136,7 +8146,7 @@ def _finish_reply(
             # synthesis call runs after this save in the same turn.
             usage["prompt"] = 0
             usage["completion"] = 0
-            store.note_usage_today(prompt_tokens, completion_tokens)
+            store.note_usage_today(prompt_tokens, completion_tokens, bot_id)
     _record_turn_meter(chat, clear_overflow=True)
     stats = _persist_context(store, chat)
     chat["updated_at"] = now_iso()

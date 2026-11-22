@@ -161,6 +161,20 @@ def _shared_file(store, name: str) -> Path | None:
     return path
 
 
+def _hidden_keys(store, bot_id: str) -> set:
+    """Names this bot hides from the shared skills, in both spellings. Nothing hidden if the file is bad."""
+    try:
+        hidden = store.read_skills_hidden(bot_id)
+    except Exception:
+        return set()
+    keys = set(hidden)
+    for name in hidden:
+        slug = slugify(name)
+        if slug:
+            keys.add(slug)
+    return keys
+
+
 def visible_skills(store, bot_id: str) -> list[dict]:
     """Bot skills plus skills saved from a reply. The prompt and the skill tool share this list."""
     rows = list_skills(store, bot_id)
@@ -169,9 +183,10 @@ def visible_skills(store, bot_id: str) -> list[dict]:
         shared = store.list_skills()
     except Exception:
         shared = []
+    hidden = _hidden_keys(store, bot_id)
     for skill in shared:
         name = str(skill.get("name") or "")
-        if not name or name in seen:
+        if not name or name in seen or name in hidden:
             continue
         rows.append({"name": name, "description": skill.get("description") or ""})
         seen.add(name)
@@ -206,6 +221,9 @@ def read_skill(store, bot_id: str, name: str) -> str:
     if not path.is_file() or path.is_symlink():
         shared = _shared_file(store, name)
         if shared is None or not shared.is_file() or shared.is_symlink():
+            raise SkillError("That skill is not saved.")
+        hidden = _hidden_keys(store, bot_id)
+        if shared.stem in hidden or name in hidden:
             raise SkillError("That skill is not saved.")
         path = shared
     text = path.read_text(encoding="utf-8")

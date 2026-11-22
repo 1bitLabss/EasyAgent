@@ -2612,6 +2612,31 @@ class Store:
         """A bot's own MCP allow list. When it exists its grants are added to the shared list for that bot."""
         return self._bot_dir(bot_id) / "mcp-allow.json"
 
+    def bot_skills_hidden_path(self, bot_id: str) -> Path:
+        """A bot's own list of shared skills it does not want to see. Its local skills are never hidden."""
+        return self._bot_dir(bot_id) / "skills-hidden.json"
+
+    def read_skills_hidden(self, bot_id: str) -> set:
+        """The shared-skill names this bot hides. No file, a bad file, or a non-list means nothing is hidden."""
+        path = self.bot_skills_hidden_path(bot_id)
+        if not path.is_file():
+            return set()
+        try:
+            data = read_json(path)
+        except (StoreError, OSError):
+            return set()
+        if not isinstance(data, list):
+            return set()
+        return {str(name).strip() for name in data if isinstance(name, str) and str(name).strip()}
+
+    def write_skills_hidden(self, bot_id: str, names: list) -> list:
+        """Save the shared-skill names this bot hides. Returns the list as stored."""
+        clean = sorted({str(name).strip() for name in names if str(name).strip()})
+        path = self.bot_skills_hidden_path(bot_id)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        atomic_write_json(path, clean)
+        return clean
+
     def read_direction(self, bot_id: str | None = None) -> str:
         if bot_id:
             bot_file = self.bot_direction_path(bot_id)

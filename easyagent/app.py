@@ -3039,6 +3039,19 @@ def create_app(data_dir: str | Path | None = None) -> FastAPI:
             raise HTTPException(500, "Saving a skill changed a bot or a chat.")
         return {"name": record["name"], "description": record.get("description") or "", "body": record.get("body") or ""}
 
+    @app.get("/api/bots/{bot_id}/skills/hidden")
+    def get_skills_hidden(bot_id: str):
+        store.get_bot(bot_id)
+        return {"names": sorted(store.read_skills_hidden(bot_id))}
+
+    @app.put("/api/bots/{bot_id}/skills/hidden")
+    def put_skills_hidden(bot_id: str, body: dict):
+        store.get_bot(bot_id)
+        names = body.get("names") if isinstance(body, dict) else None
+        if not isinstance(names, list) or not all(isinstance(name, str) for name in names):
+            raise HTTPException(400, "The hidden skills must be a list of names.")
+        return {"names": store.write_skills_hidden(bot_id, names)}
+
     @app.get("/api/bots/{bot_id}/learning")
     def get_learning(bot_id: str):
         return learning_panel(store, store.get_bot(bot_id))

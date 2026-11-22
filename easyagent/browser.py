@@ -968,7 +968,7 @@ def _pick(elements: list[dict], command: str) -> dict:
     raise ToolError(f"There is no element {number} on this page. Read the page again.")
 
 
-def _signin_hint(store: Store, page_url: str, elements: list[dict]) -> str:
+def _signin_hint(store: Store, page_url: str, elements: list[dict], bot_id: str | None = None) -> str:
     """One line naming the saved sign-ins for this host. Names only, never values.
 
     A login form with saved names steers the model to ``vault:<name>`` instead of
@@ -982,7 +982,11 @@ def _signin_hint(store: Store, page_url: str, elements: list[dict]) -> str:
     try:
         from easyagent.secrets import list_web_credentials
 
-        names = [row["name"] for row in list_web_credentials(store) if row.get("host") == host]
+        names = [
+            row["name"]
+            for row in list_web_credentials(store, bot_id)
+            if row.get("host") == host
+        ]
     except Exception:
         return ""
     if not names:
@@ -1222,7 +1226,7 @@ def perform(store: Store, request, bot_id: str | None) -> tuple[str, str]:
                     from easyagent.secrets import get_web_credential
 
                     cred_host = (urlparse(page.url or "").hostname or "").lower()
-                    value = get_web_credential(cred_host, cred, store)
+                    value = get_web_credential(cred_host, cred, store, bot_id)
                     if not value:
                         raise ToolError(
                             f'No saved credential named "{cred}" for {cred_host or "this page"}. Nothing was typed.'
@@ -1262,7 +1266,7 @@ def perform(store: Store, request, bot_id: str | None) -> tuple[str, str]:
         if action == "read":
             elements = _elements(page)
             text = prefix + _snapshot_text(page, elements, session)
-            hint = _signin_hint(store, page.url or "", elements)
+            hint = _signin_hint(store, page.url or "", elements, bot_id)
             return (text + "\n" + hint if hint else text), shot
         if action == "open":
             return prefix + f"Opened {title or 'a page'} — {page.url}", shot

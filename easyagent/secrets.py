@@ -244,30 +244,53 @@ def delete_secret(account: str, store=None) -> None:
 
 
 WEB_CRED_PREFIX = "web|"
+WEB_CRED_BOT_PREFIX = "web|bot|"
 
 
-def web_credential_key(host: str, name: str) -> str:
-    """Account key for a saved web credential: ``web|<host>|<name>``. The host is the
-    exact hostname, lowercased. The name is what the model types after ``vault:``."""
+def web_credential_key(host: str, name: str, bot_id: str | None = None) -> str:
+    """Account key for a saved web credential.
+
+    Global: ``web|<host>|<name>``. Bot-scoped: ``web|bot|<bot_id>|<host>|<name>``.
+    A real hostname is never the literal ``bot`` and hostnames never contain a bar,
+    so the two shapes are unambiguous. The host is the exact hostname, lowercased.
+    The name is what the model types after ``vault:``."""
+    if bot_id is not None and str(bot_id).strip():
+        return (
+            WEB_CRED_BOT_PREFIX
+            + str(bot_id).strip()
+            + "|"
+            + (host or "").strip().lower()
+            + "|"
+            + (name or "").strip()
+        )
     return f"{WEB_CRED_PREFIX}{(host or '').strip().lower()}|{(name or '').strip()}"
 
 
-def put_web_credential(host: str, name: str, value: str, store=None) -> None:
+def put_web_credential(host: str, name: str, value: str, store=None, bot_id: str | None = None) -> None:
     if not (name or "").strip():
         raise RuntimeError("The credential needs a name.")
-    put_secret(web_credential_key(host, name), value, store)
+    put_secret(web_credential_key(host, name, bot_id), value, store)
 
 
-def get_web_credential(host: str, name: str, store=None) -> str:
+def get_web_credential(host: str, name: str, store=None, bot_id: str | None = None) -> str:
+    """With a bot_id, the bot's own credential wins and the global one is the fallback."""
+    if bot_id is not None and str(bot_id).strip():
+        value = get_secret(web_credential_key(host, name, bot_id), store)
+        if value:
+            return value
     return get_secret(web_credential_key(host, name), store)
 
 
-def remove_web_credential(host: str, name: str, store=None) -> None:
-    delete_secret(web_credential_key(host, name), store)
+def remove_web_credential(host: str, name: str, store=None, bot_id: str | None = None) -> None:
+    delete_secret(web_credential_key(host, name, bot_id), store)
 
 
-def list_web_credentials(store) -> list[dict]:
+def list_web_credentials(store, bot_id: str | None = None) -> list[dict]:
     """Saved web credentials as ``{host, name}`` rows. Values are never returned.
+
+    With a bot_id, the bot's own rows come first and global rows follow as the
+    fallback, deduped by host+name (the bot row wins). Without a bot_id, only
+    global rows are listed — a bot-scoped row never leaks into a no-bot listing.
 
     Scrubbing needs no key parsing: ``secret_values`` below opens every account, so a
     ``web|<host>|<name>`` value is already in what ``secret_strings`` scrubs with.
@@ -284,12 +307,31 @@ def list_web_credentials(store) -> list[dict]:
             ).fetchall()
         finally:
             conn.close()
-    found: list[dict] = []
+    wanted = str(bot_id).strip() if bot_id is not None and str(bot_id).strip() else None
+    bot_rows: list[dict] = []
+    global_rows: list[dict] = []
     for row in rows:
-        parts = str(row[0]).split("|", 2)
-        if len(parts) != 3 or not parts[1] or not parts[2]:
-            continue
-        item = {"host": parts[1], "name": parts[2]}
+        account = str(row[0])
+        if account.startswith(WEB_CRED_BOT_PREFIX):
+            parts = account.split("|", 4)
+            if len(parts) != 5 or not parts[3] or not parts[4]:
+                continue
+            if wanted and parts[2] != wanted:
+                continue
+            item = {"host": parts[3], "name": parts[4]}
+            if item not in bot_rows:
+                bot_rows.append(item)
+        else:
+            parts = account.split("|", 2)
+            if len(parts) != 3 or not parts[1] or not parts[2]:
+                continue
+            item = {"host": parts[1], "name": parts[2]}
+            if item not in global_rows:
+                global_rows.append(item)
+    if not wanted:
+        return global_rows
+    found = list(bot_rows)
+    for item in global_rows:
         if item not in found:
             found.append(item)
     return found

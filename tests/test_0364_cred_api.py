@@ -67,8 +67,8 @@ def test_credential_round_trip_never_echoes_the_value(tmp_path, monkeypatch):
     assert SECRET not in listed.text  # names and hosts only
     assert all("value" not in row for row in rows)
 
-    # the value really landed where the fill path reads it
-    assert get_web_credential("github.com", "ada", Store(tmp_path)) == SECRET
+    # the value really landed where the fill path reads it (the bot's own scope)
+    assert get_web_credential("github.com", "ada", Store(tmp_path), bot["id"]) == SECRET
 
     deleted = client.delete(_base(bot), params={"host": "github.com", "name": "ada"})
     assert deleted.status_code == 200, deleted.text

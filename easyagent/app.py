@@ -1640,7 +1640,8 @@ def create_app(data_dir: str | Path | None = None) -> FastAPI:
         from easyagent.secrets import list_web_credentials
 
         # Names and hosts only. A saved value never leaves the vault in a response.
-        return {"credentials": list_web_credentials(store)}
+        # The bot's own credentials come first; global ones stay as the fallback.
+        return {"credentials": list_web_credentials(store, bot_id)}
 
     @app.post("/api/bots/{bot_id}/browser/credentials")
     def post_browser_credentials(bot_id: str, body: WebCredentialIn):
@@ -1660,7 +1661,7 @@ def create_app(data_dir: str | Path | None = None) -> FastAPI:
             raise HTTPException(400, "The credential needs a name.")
         if not value:
             raise HTTPException(400, "The credential needs a value.")
-        put_web_credential(host, name, value, store)
+        put_web_credential(host, name, value, store, bot_id)
         return {"ok": True}
 
     @app.delete("/api/bots/{bot_id}/browser/credentials")
@@ -1670,7 +1671,7 @@ def create_app(data_dir: str | Path | None = None) -> FastAPI:
 
         if not (host or "").strip() or not (name or "").strip():
             raise HTTPException(400, "Name the host and the name of the sign-in to remove.")
-        remove_web_credential(host, name, store)
+        remove_web_credential(host, name, store, bot_id)
         return {"ok": True}
 
     @app.get("/api/bots/{bot_id}/tts/voices")

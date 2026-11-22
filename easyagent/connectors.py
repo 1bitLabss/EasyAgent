@@ -148,15 +148,29 @@ def allow_path(store: Store) -> Path:
     return store.root / "mcp-allow.json"
 
 
-def list_grants(store: Store) -> list[dict]:
-    path = allow_path(store)
+def _read_grants(path: Path) -> list[dict]:
+    """Rows from one allow file. A broken or missing file reads as empty."""
     if not path.is_file():
         return []
-    data = read_json(path)
+    try:
+        data = read_json(path)
+    except (StoreError, OSError):
+        return []
     return [row for row in data if isinstance(row, dict)] if isinstance(data, list) else []
 
 
-def grant_server(store: Store, *, command: list[str] | None = None, url: str = "") -> dict:
+def list_grants(store: Store, bot_id: str | None = None) -> list[dict]:
+    """Granted servers. With a bot, its own list first, then the shared list as a fallback."""
+    if not bot_id:
+        return _read_grants(allow_path(store))
+    rows = _read_grants(store.bot_mcp_allow_path(bot_id))
+    for row in _read_grants(allow_path(store)):
+        if row not in rows:
+            rows.append(row)
+    return rows
+
+
+def grant_server(store: Store, *, command: list[str] | None = None, url: str = "", bot_id: str | None = None) -> dict:
     """Remember one server the person allowed. A tool result cannot call this."""
     argv = [str(part) for part in (command or []) if str(part).strip()]
     address = (url or "").strip()
@@ -165,20 +179,23 @@ def grant_server(store: Store, *, command: list[str] | None = None, url: str = "
     if not argv and not address:
         raise StoreError("Name the command or the address to allow.", 400)
     row = {"command": argv, "url": address}
-    rows = list_grants(store)
+    path = store.bot_mcp_allow_path(bot_id) if bot_id else allow_path(store)
+    if bot_id:
+        path.parent.mkdir(parents=True, exist_ok=True)
+    rows = _read_grants(path)
     if row not in rows:
         rows.append(row)
-        atomic_write_json(allow_path(store), rows)
+        atomic_write_json(path, rows)
     return row
 
 
-def server_allowed(store: Store, record: dict) -> bool:
+def server_allowed(store: Store, record: dict, bot_id: str | None = None) -> bool:
     """True for this product's own server, or a command or address that was granted."""
     command = [str(part) for part in (record.get("command") or []) if str(part).strip()]
     if _is_builtin(command):
         return True
     address = str(record.get("url") or "").strip()
-    for row in list_grants(store):
+    for row in list_grants(store, bot_id):
         granted_url = str(row.get("url") or "").strip()
         granted_cmd = [str(part) for part in (row.get("command") or []) if str(part).strip()]
         if address and granted_url and address == granted_url:
@@ -188,9 +205,9 @@ def server_allowed(store: Store, record: dict) -> bool:
     return False
 
 
-def require_allowed(store: Store, *, command: list[str] | None, url: str) -> None:
+def require_allowed(store: Store, *, command: list[str] | None, url: str, bot_id: str | None = None) -> None:
     record = {"command": command or [], "url": url or ""}
-    if not server_allowed(store, record):
+    if not server_allowed(store, record, bot_id):
         raise StoreError("That server is not on the allow list. It was not saved.", 400)
 
 
@@ -277,7 +294,7 @@ def add_connector(
         raise StoreError("A streamable HTTP connector needs an http or https address.", 400)
     if kind == "stdio" and not argv:
         raise StoreError("A stdio connector needs a command.", 400)
-    require_allowed(store, command=argv, url=address if kind == "http" else "")
+    require_allowed(store, command=argv, url=address if kind == "http" else "", bot_id=bot_id)
     secret_map = {str(key).strip(): value for key, value in (secrets or {}).items() if str(key).strip() and value}
     _reject_secret_in_launch(argv, address, secret_map)
     if kind == "stdio" and _is_package_manager(argv) and not pinned_version(argv, version):
@@ -459,7 +476,7 @@ def finish_install(card_id: str, decision: str) -> dict | None:
     command = list(pending["command"] or [])
     url = pending["url"] if pending["transport"] == "http" else ""
     # Approving the card is the allow. A custom server is not dropped after that.
-    grant_server(pending["store"], command=command, url=url)
+    grant_server(pending["store"], command=command, url=url, bot_id=pending["bot_id"])
     row = add_connector(
         pending["store"],
         pending["bot_id"],

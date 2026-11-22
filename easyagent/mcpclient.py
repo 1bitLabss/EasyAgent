@@ -397,7 +397,7 @@ def session_for(
     if store is not None:
         from easyagent.connectors import server_allowed
 
-        if not server_allowed(store, record):
+        if not server_allowed(store, record, bot_id):
             raise McpError("That server is not on the allow list. It was not started.")
     if record.get("transport") == "http":
         return HttpClient(str(record.get("url") or ""), headers)

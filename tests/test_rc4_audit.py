@@ -272,7 +272,7 @@ def test_approving_a_custom_connector_installs_it_or_shows_the_error(tmp_path, m
     assert "not listed" in approved.json()["warning"]
     listed = client.get(f"/api/bots/{bot_id}/connectors").json()
     assert [row["name"] for row in listed] == ["Kiln"]
-    assert any("kiln-tools@1.2.3" in " ".join(row.get("command") or []) for row in list_grants(_app_obj.state.store))
+    assert any("kiln-tools@1.2.3" in " ".join(row.get("command") or []) for row in list_grants(_app_obj.state.store, bot_id))
 
     def blocked(*_args, **_kwargs):
         raise StoreError("That server is not on the allow list. It was not saved.", 400)

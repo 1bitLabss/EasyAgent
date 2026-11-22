@@ -2608,6 +2608,10 @@ class Store:
         """A bot's own direction file. When it exists it replaces the shared note for that bot."""
         return self._bot_dir(bot_id) / "DIRECTION.md"
 
+    def bot_mcp_allow_path(self, bot_id: str) -> Path:
+        """A bot's own MCP allow list. When it exists its grants are added to the shared list for that bot."""
+        return self._bot_dir(bot_id) / "mcp-allow.json"
+
     def read_direction(self, bot_id: str | None = None) -> str:
         if bot_id:
             bot_file = self.bot_direction_path(bot_id)

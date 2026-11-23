@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.3.61
+- **Every bot gets its own kit.** A bot can carry its own direction note that replaces the shared one, hide shared skills it does not want to see, keep its own web sign-ins (the shared one stays as fallback), and hold its own list of allowed connectors. Today's token count now keeps a per-bot split, and a bot's connectors can be handed to other tools as a standard mcp.json.
+- **Voice notes can be typed out.** When the browser cannot listen, a transcription service writes the voice note as text so the bot can read it.
+- **Appearance settings.** Pick an accent color and a text size.
+- **Removing a connection names the bots that were using it**, so you know who will need to pick a new one before they answer.
+
 ## 0.3.60
 - **A judge can decide when the goal is done.** A chat can arm its keep-going run with a judge: after each turn a second look at the work decides — done, stuck, keep going, or wait — and the judge's one-sentence reason shows in the chat. "Done" needs the deliverable to actually exist; "stuck" pauses with the reason instead of pretending; waiting for a background worker costs nothing. If the judge itself keeps failing to answer, the run pauses honestly and says so. The plain counter keeps working as the default — nothing changes until you arm the judge.
 - **Bots can drive the desktop.** A bot can look at the screen, read the controls on it, click them by number, type, scroll, and drag — and after each action it checks whether the screen actually changed instead of guessing. Risky key combos are blocked even in YOLO mode, and each kind of action asks for its own permission the first time.

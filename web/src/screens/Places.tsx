@@ -168,7 +168,7 @@ export function ConnectionsScreen() {
             <li key={endpoint.id} className="flex items-center justify-between gap-2 rounded-md border border-border px-3 py-2">
               <button type="button" data-testid="endpoint-row" className="min-w-0 text-left" onClick={() => openForm(endpoint)}>
                 <strong className="block">{endpoint.name}</strong>
-                <span className="block truncate text-xs text-muted">{endpoint.base_url} · {endpoint.max_parallel} at a time</span>
+                <span className="block truncate text-xs text-muted">{endpoint.base_url} · {endpoint.max_parallel} at a time{endpoint.used_by?.length ? ` · Used by ${endpoint.used_by.join(", ")}` : ""}</span>
               </button>
               <span className="flex shrink-0 items-center gap-1">
                 <Button variant="ghost" size="sm" disabled={testing === endpoint.id} onClick={() => {
@@ -182,7 +182,11 @@ export function ConnectionsScreen() {
                 <Button variant="ghost" size="sm" onClick={() => openForm(endpoint)}>Edit</Button>
                 <Button variant="ghost" size="sm" onClick={() => askConfirm({
                 title: `Remove ${endpoint.name}?`,
-                copy: "This deletes only this connection. Bots and chats stay until you point a bot somewhere else.",
+                copy: endpoint.used_by?.length
+                  ? (endpoint.used_by.length === 1
+                      ? `${endpoint.used_by[0]} uses this connection. They will pick a new one before they answer.`
+                      : `${endpoint.used_by.join(" and ")} use this connection. They will pick a new one before they answer.`)
+                  : "This deletes only this connection. Bots and chats stay until you point a bot somewhere else.",
                 name: endpoint.name,
                 submit: "Remove connection",
                 run: async () => {

@@ -1115,7 +1115,13 @@ def create_app(data_dir: str | Path | None = None) -> FastAPI:
 
     @app.get("/api/endpoints")
     def list_endpoints():
-        return [public_endpoint(item) for item in store.list_endpoints()]
+        usage = store.endpoint_usage()
+        rows = []
+        for item in store.list_endpoints():
+            row = public_endpoint(item)
+            row["used_by"] = [user["name"] for user in usage.get(item["id"], [])]
+            rows.append(row)
+        return rows
 
     @app.post("/api/endpoints")
     def create_endpoint(body: EndpointIn):
@@ -1172,11 +1178,11 @@ def create_app(data_dir: str | Path | None = None) -> FastAPI:
     @app.delete("/api/endpoints/{endpoint_id}")
     def remove_endpoint(endpoint_id: str, body: ConfirmIn):
         before_bots = _snapshot_bots(store)
-        store.delete_endpoint(endpoint_id, body.confirm_name)
+        result = store.delete_endpoint(endpoint_id, body.confirm_name)
         after_bots = _snapshot_bots(store)
         if before_bots != after_bots:
             raise HTTPException(500, "Endpoint removal touched bot data. This should not happen.")
-        return {"deleted": endpoint_id}
+        return {"deleted": endpoint_id, "used_by": result["used_by"]}
 
     @app.post("/api/endpoints/{endpoint_id}/test")
     async def test_endpoint(endpoint_id: str):

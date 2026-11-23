@@ -9,6 +9,7 @@ export type Endpoint = {
   stall_seconds?: number;
   first_token_seconds?: number;
   vision?: boolean;
+  used_by?: string[];
 };
 
 export type Bot = {

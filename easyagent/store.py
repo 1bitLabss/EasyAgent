@@ -672,8 +672,40 @@ class Store:
         self._pin_endpoint_key(shown)
         return shown
 
-    def delete_endpoint(self, endpoint_id: str, confirm_name: str) -> None:
-        """Remove one endpoint record. Bots and chats are not touched."""
+    def endpoint_usage(self) -> dict[str, list[dict]]:
+        """Which bots use each saved connection, keyed by endpoint id.
+
+        Reads each bot file only. No strict-mode upgrade, no chat reads, nothing
+        is written. Callers that hold the lock may call this inside it; this
+        method does not take the lock itself.
+        """
+        usage: dict[str, list[dict]] = {}
+        if not self.bots_dir.exists():
+            return usage
+        for path in self.bots_dir.iterdir():
+            if not path.is_dir() or path.is_symlink():
+                continue
+            if not ID_RE.fullmatch(path.name):
+                continue
+            meta = path / "bot.json"
+            if not meta.is_file():
+                continue
+            bot = read_json(meta)
+            if not isinstance(bot, dict):
+                continue
+            endpoint_id = str(bot.get("endpoint_id") or "")
+            if not endpoint_id:
+                continue
+            usage.setdefault(endpoint_id, []).append(
+                {"id": str(bot.get("id") or path.name), "name": str(bot.get("name") or "")}
+            )
+        for users in usage.values():
+            users.sort(key=lambda user: user["name"])
+        return usage
+
+    def delete_endpoint(self, endpoint_id: str, confirm_name: str) -> dict:
+        """Remove one endpoint record. Bots and chats are not touched; the answer
+        names the bots that were using the connection."""
         endpoint_id = self._parse_id(endpoint_id)
         with self._lock:
             endpoints = self.list_endpoints()
@@ -682,12 +714,14 @@ class Store:
                 raise StoreError("Endpoint not found.", 404)
             if not names_match(confirm_name, match.get("name") or ""):
                 raise StoreError("Type the connection's name to remove it.", 400)
+            used_by = self.endpoint_usage().get(endpoint_id, [])
             kept = [item for item in endpoints if item.get("id") != endpoint_id]
             atomic_write_json(self.endpoints_path, kept)
             self._store_endpoint_key(endpoint_id, "", clear=True)
             from easyagent.providers import forget
 
             forget(endpoint_id)
+        return {"used_by": used_by}
 
     def update_endpoint(
         self,

@@ -119,6 +119,42 @@ describe("Connections list", () => {
     fireEvent.click(getByText("Edit"));
     await findByText("This model can see pictures");
   });
+
+  it("names the bots using a connection in the Remove confirmation and the row", async () => {
+    const previous = mocked.getMockImplementation();
+    mocked.mockImplementation(async (path: string) => {
+      if (path === "/api/endpoints") {
+        return [{ id: "e1", name: "Home server", base_url: "http://localhost:8080/v1", has_api_key: false, model: "m", max_parallel: 1, used_by: ["Bob", "Ada"] }];
+      }
+      return {};
+    });
+    try {
+      const { findByText, getByText } = render(
+        <QueryClientProvider client={queryClient}>
+          <ConnectionsScreen />
+        </QueryClientProvider>,
+      );
+      await findByText("Home server");
+      expect(screen.getByText(/Used by Bob, Ada/)).toBeTruthy();
+      fireEvent.click(getByText("Remove"));
+      expect(useApp.getState().confirm?.copy).toBe("Bob and Ada use this connection. They will pick a new one before they answer.");
+    } finally {
+      useApp.setState({ confirm: null });
+      if (previous) mocked.mockImplementation(previous);
+    }
+  });
+
+  it("keeps the plain Remove copy when no bot uses the connection", async () => {
+    const { findByText, getByText } = render(
+      <QueryClientProvider client={queryClient}>
+        <ConnectionsScreen />
+      </QueryClientProvider>,
+    );
+    await findByText("Home server");
+    fireEvent.click(getByText("Remove"));
+    expect(useApp.getState().confirm?.copy).toBe("This deletes only this connection. Bots and chats stay until you point a bot somewhere else.");
+    useApp.setState({ confirm: null });
+  });
 });
 
 describe("Rooms list", () => {

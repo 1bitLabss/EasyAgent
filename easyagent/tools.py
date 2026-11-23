@@ -2387,21 +2387,45 @@ def _scrub_spill_read(path: Path, text: str) -> str:
     return redact_leaks(text)
 
 
+_DOCUMENT_SUFFIXES = {".pdf", ".docx"}
+# Documents are compressed binary; the 200_000 text cap is far too tight for them.
+_DOCUMENT_RAW_CAP = 10_000_000
+
+
+def _document_text(path: Path) -> str:
+    """The text a PDF or Word file on disk carries. Raises ToolError when there is none."""
+    try:
+        size = path.stat().st_size
+    except OSError as exc:
+        raise ToolError(f"Could not read {path}. {exc}") from exc
+    if size > _DOCUMENT_RAW_CAP:
+        raise ToolError(f"{path} is too large to read into the chat.")
+    from easyagent.docextract import extract_document_text
+
+    text = extract_document_text(path)
+    if not text:
+        raise ToolError(f"Could not read {path}: no text could be read from that file.")
+    return text
+
+
 def _read_path(path: Path) -> str:
     if not path.exists():
         raise ToolError(f"Could not read {path}: that file is not there.")
     if path.is_dir():
         raise ToolError(f"{path} is a folder. Ask to list it.")
-    try:
-        size = path.stat().st_size
-    except OSError as exc:
-        raise ToolError(f"Could not read {path}. {exc}") from exc
-    if size > 200_000:
-        raise ToolError(f"{path} is too large to read into the chat.")
-    try:
-        text = path.read_text(encoding="utf-8", errors="replace")
-    except OSError as exc:
-        raise ToolError(f"Could not read {path}. {exc}") from exc
+    if path.suffix.lower() in _DOCUMENT_SUFFIXES:
+        text = _document_text(path)
+    else:
+        try:
+            size = path.stat().st_size
+        except OSError as exc:
+            raise ToolError(f"Could not read {path}. {exc}") from exc
+        if size > 200_000:
+            raise ToolError(f"{path} is too large to read into the chat.")
+        try:
+            text = path.read_text(encoding="utf-8", errors="replace")
+        except OSError as exc:
+            raise ToolError(f"Could not read {path}. {exc}") from exc
     if len(text) > _READ_CAP:
         from easyagent.truncate import truncate_head_tail
 
@@ -2648,7 +2672,10 @@ def _run_files(store: Store, request: ToolRequest) -> str:
         return _list_path(path)
     if request.action == "read":
         if request.offset or request.limit:
-            text = _read_window(path, request.offset or 1, request.limit or 2000)
+            if path.suffix.lower() in _DOCUMENT_SUFFIXES:
+                text = _document_window(path, request.offset or 1, request.limit or 2000)
+            else:
+                text = _read_window(path, request.offset or 1, request.limit or 2000)
         else:
             text = _read_path(path)
         return _scrub_spill_read(path, text)
@@ -2675,6 +2702,28 @@ def _read_window(path: Path, offset: int, limit: int) -> str:
     if not text.startswith("BLOCKED:") and not text.startswith("File unchanged"):
         _remember_read(path, partial=partial)
     return text
+
+
+def _document_window(path: Path, offset: int, limit: int) -> str:
+    """A line window over the extracted text of a PDF or Word file.
+
+    The binary must not reach the line-based read_window; extract first, then
+    number and slice the extracted lines the way the text window does.
+    """
+    text = _document_text(path)
+    lines = text.splitlines()
+    total = len(lines)
+    start = offset - 1
+    if start >= total and total:
+        raise ToolError(f"{path} has {total} lines. offset {offset} is past the end.")
+    window = lines[start : start + limit]
+    end_line = start + len(window)
+    numbered = "\n".join(f"{start + index + 1}|{line}" for index, line in enumerate(window))
+    footer = f"lines {offset}-{end_line} of {total}"
+    if end_line < total:
+        footer += f". next_offset={end_line + 1}"
+    _remember_read(path, partial=offset > 1 or end_line < total)
+    return numbered + ("\n" + footer if numbered else footer)
 
 
 def _run_patch(path: Path, request: ToolRequest) -> str:

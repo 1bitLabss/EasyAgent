@@ -554,7 +554,7 @@ NATIVE_TOOLS = [
     _tool("list_dir", "List a folder on this computer.", {"path": _STRING}, ["path"]),
     _tool(
         "read_file",
-        "Read a file. offset and limit return N|text lines.",
+        "Read a file. offset and limit return N|text lines. PDF and Word documents are read as text.",
         {"path": _STRING, "offset": {"type": "integer"}, "limit": {"type": "integer"}},
         ["path"],
     ),

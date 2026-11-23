@@ -102,7 +102,8 @@ def test_meter_warns_at_80_and_fills_at_90_without_a_fake_call():
     # The batched question tool (questions array, 0374) pushed it past 4100.
     # The computer tool (Wave 2: capture modes, verdict-ladder guidance,
     # right_click and capture_after fields) pushed it past 4200.
-    assert 2000 <= tools <= 4260
+    # The read_file PDF/Word copy (0.3.61) brought it to 4241.
+    assert 2000 <= tools <= 4245
     refused = apply_meter({"context_tokens": 10, "context_overflow": 1}, 1000, 10)
     assert refused["context_level"] == 0
     assert refused["offer_compact"] == 1

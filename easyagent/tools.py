@@ -1315,9 +1315,11 @@ def _request_from_call(data: dict) -> ToolRequest:
         title = str(raw_args.get("title") or "").strip()
         steps = raw_args.get("steps")
         plan_body = content
-        if action not in {"read", "set", "step", "clear", "keep", "judge"}:
+        if action not in {"read", "set", "step", "clear", "keep", "judge", "gate"}:
             action = "set" if (plan_body.strip() or title or isinstance(steps, list)) else "read"
         if action == "keep" and not state.strip() and plan_body.strip():
+            state = plan_body.strip()
+        if action == "gate" and not state.strip() and plan_body.strip():
             state = plan_body.strip()
         if action == "set" and not plan_body.strip():
             plan_body = json.dumps({"title": title, "steps": steps if isinstance(steps, list) else []})
@@ -3970,8 +3972,17 @@ async def execute(store: Store, request: ToolRequest, bot_id: str | None = None)
     """
     turn_mod.raise_if_cancelled()
     if request.kind == "plan":
-        from easyagent.plan import PlanError, apply_plan
+        from easyagent.plan import PlanError, apply_plan, gate_add_command
 
+        command = gate_add_command(request)
+        if command:
+            # gate add runs the shell at every boundary without later approval,
+            # so the command passes the same guard a shell call meets right now.
+            from easyagent.safety import guard
+
+            _guarded, early = await guard(store, ToolRequest(kind="shell", command=command), _caller_bot(bot_id))
+            if early is not None:
+                return early
         try:
             return apply_plan(store, _caller_bot(bot_id), request)
         except PlanError as exc:

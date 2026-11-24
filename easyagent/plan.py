@@ -593,7 +593,7 @@ def apply_plan(store: Store, bot_id: str, request) -> str:
         raise PlanError("This turn has no chat, so the checklist was not saved.")
     store.get_chat(bot_id, chat_id)
     action = (getattr(request, "action", "") or "read").strip().lower()
-    if action not in {"read", "set", "step", "clear", "keep", "judge"}:
+    if action not in {"read", "set", "step", "clear", "keep", "judge", "gate"}:
         action = "read"
     if action == "read":
         return describe(load_plan(store, bot_id, chat_id))
@@ -604,6 +604,8 @@ def apply_plan(store: Store, bot_id: str, request) -> str:
         return _apply_keep(store, bot_id, chat_id, request)
     if action == "judge":
         return _apply_judge(store, bot_id, chat_id, request)
+    if action == "gate":
+        return _apply_gate(store, bot_id, chat_id, request)
     if action == "step":
         return _apply_step(store, bot_id, chat_id, request)
     plan = _parse_set_body(store, getattr(request, "body", "") or "")
@@ -735,6 +737,75 @@ def _apply_judge(store: Store, bot_id: str, chat_id: str, request) -> str:
     )
 
 
+def _apply_gate(store: Store, bot_id: str, chat_id: str, request) -> str:
+    """Add, remove, clear, or list quality gates on this chat's plan.
+
+    A gate is a shell command that must pass before the judge may call the
+    goal done. gate add runs the shell at every boundary without later
+    approval, so tools.execute sends the command through the shell guard
+    first; remove, clear, and list change only the checklist and stay free.
+    """
+    from easyagent import qualitygate
+
+    rest = str(getattr(request, "command", "") or "").strip()
+    if not rest:
+        rest = str(getattr(request, "body", "") or "").strip()
+    verb, _, arg = rest.partition(" ")
+    verb = verb.strip().lower()
+    plan = load_plan(store, bot_id, chat_id)
+    if not plan or not plan.get("steps"):
+        raise PlanError("There is no checklist for a gate to watch. Nothing was changed.")
+    if verb == "add":
+        command = arg.strip()
+        if not command:
+            raise PlanError("gate add needs a shell command. Nothing was changed.")
+        gate = qualitygate.add_gate(plan, command)
+        plan["updated_at"] = now_iso()
+        _write_plan(store, bot_id, chat_id, plan)
+        return (
+            f"Gate added: $ {command}. It runs before every judge call and must pass. "
+            f"It gets {gate['max_retries']} retries across turns and {gate['timeout_seconds']} seconds each."
+        )
+    if verb == "remove":
+        try:
+            removed = qualitygate.remove_gate(plan, int(arg.strip()))
+        except (ValueError, TypeError):
+            raise PlanError("gate remove takes the gate number from gate list. Nothing was changed.")
+        plan["updated_at"] = now_iso()
+        _write_plan(store, bot_id, chat_id, plan)
+        return f"Gate removed: $ {removed}."
+    if verb == "clear":
+        count = qualitygate.clear_gates(plan)
+        plan["updated_at"] = now_iso()
+        _write_plan(store, bot_id, chat_id, plan)
+        if not count:
+            return "There were no quality gates to clear."
+        return f"Cleared {count} quality gates."
+    if verb == "list":
+        return qualitygate.render_gates(plan)
+    raise PlanError("A gate action is add, remove, clear, or list. Nothing was changed.")
+
+
+def gate_add_command(request) -> str:
+    """The shell command a gate-add carries, or "" for any other call.
+
+    gate add runs the shell at every boundary without later approval, so the
+    command must pass the same guard a shell call meets at the moment it is
+    added (Hermes requires explicit authorization for gate add).
+    """
+    if (getattr(request, "kind", "") or "") != "plan":
+        return ""
+    if (getattr(request, "action", "") or "").strip().lower() != "gate":
+        return ""
+    rest = str(getattr(request, "command", "") or "").strip()
+    if not rest:
+        rest = str(getattr(request, "body", "") or "").strip()
+    verb, _, arg = rest.partition(" ")
+    if verb.strip().lower() != "add":
+        return ""
+    return arg.strip()
+
+
 def request_from_fence(body: str):
     from easyagent.tools import ToolRequest
 
@@ -752,6 +823,14 @@ def request_from_fence(body: str):
         if not rest:
             rest = next((line.strip().lower() for line in lines[1:] if line.strip()), "")
         return ToolRequest(kind="plan", action="judge", command=rest)
+    if first == "gate" or first.startswith("gate "):
+        # The command keeps its case: only the verb is read from the lowered line.
+        rest = lines[0].strip()[5:].strip()
+        verb, _, arg = rest.partition(" ")
+        if not rest or (not arg.strip() and verb.strip().lower() in {"add", "remove"}):
+            # The argument sits on the next fence line (gate add \n pytest -q).
+            rest = (rest + " " + next((line.strip() for line in lines[1:] if line.strip()), "")).strip()
+        return ToolRequest(kind="plan", action="gate", command=rest)
     if first == "step":
         parts = [line.strip() for line in lines[1:] if line.strip()]
         return ToolRequest(

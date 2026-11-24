@@ -197,12 +197,42 @@ def build_user_prompt(
     )
 
 
+def resolve_judge_endpoint(store, bot: dict) -> tuple[dict | None, dict]:
+    """``(endpoint, route)`` for the goal judge call. An explicit task route wins.
+
+    ``bot["task_routes"]["goal_judge"]`` may name its own connection (and
+    optionally a model, output budget, and timeout). An empty or missing route
+    inherits the bot's main connection — Hermes' provider:auto semantics. An
+    unknown route endpoint falls back to the main connection with a note in
+    the judge log; it never crashes the call.
+    """
+    routes = bot.get("task_routes")
+    route = routes.get("goal_judge") if isinstance(routes, dict) else None
+    route = route if isinstance(route, dict) else {}
+    wanted = str(route.get("endpoint_id") or "").strip()
+    if wanted:
+        try:
+            endpoint = store.get_endpoint(wanted)
+        except Exception:
+            endpoint = None
+        if endpoint is None:
+            logger.info(
+                "goal judge: route connection %s is not a saved connection — using the bot's main connection",
+                wanted,
+            )
+        else:
+            return endpoint, route
+    return store.get_endpoint(bot.get("endpoint_id")), {}
+
+
 async def call_judge(store, bot_id: str, *, goal: str, answer: str, plan: dict, children: int):
-    """Ask the bot's own model for a verdict. Returns (verdict, reason, parse_failed, wait, transport_failed).
+    """Ask the judge model for a verdict. Returns (verdict, reason, parse_failed, wait, transport_failed).
 
     Runs on the existing connection path (llm.complete): temperature 0, 4096
-    output tokens, 30 s. A transport error fails open to continue and counts
-    as a transport failure; unusable output counts as a parse failure.
+    output tokens, 30 s, unless the bot's goal_judge task route overrides the
+    connection, model, output budget, or timeout. A transport error fails open
+    to continue and counts as a transport failure; unusable output counts as a
+    parse failure.
     """
     if not (goal or "").strip():
         return "skipped", "empty goal", False, None, False
@@ -218,20 +248,40 @@ async def call_judge(store, bot_id: str, *, goal: str, answer: str, plan: dict, 
     ]
     try:
         bot = store.get_bot(bot_id)
-        endpoint = store.get_endpoint(bot.get("endpoint_id"))
+        endpoint, route = resolve_judge_endpoint(store, bot)
         if not endpoint:
             return "continue", "no connection for this bot", False, None, True
         from easyagent.app import chosen_model
 
+        route_model = str(route.get("model") or "").strip()
+        if route_model:
+            model = route_model
+        elif route and str(endpoint.get("id") or "") != str(bot.get("endpoint_id") or ""):
+            # A different connection answers with its own saved model: the
+            # bot's model may not exist there (Hermes' provider:auto semantics).
+            model = str(endpoint.get("model") or "").strip() or None
+        else:
+            model = chosen_model(bot, endpoint)
+        max_tokens = int(route.get("max_tokens") or JUDGE_MAX_TOKENS)
+        timeout = float(route.get("timeout_seconds") or JUDGE_TIMEOUT)
+        fallbacks = None
+        if route and endpoint.get("fallback_ids"):
+            # The route's own saved fallbacks, tried in order after it (the
+            # same plumbing the main calls use). Total failure still fails
+            # open to continue through the transport-failure counter.
+            from easyagent import providers
+
+            fallbacks = providers.chain_for(store, endpoint)[1:] or None
         raw = await llm.complete(
             base_url=endpoint["base_url"],
             api_key=endpoint.get("api_key") or None,
-            model=chosen_model(bot, endpoint),
+            model=model,
             messages=messages,
-            timeout=JUDGE_TIMEOUT,
+            timeout=timeout,
             temperature=0,
-            max_tokens=JUDGE_MAX_TOKENS,
+            max_tokens=max_tokens,
             tools=False,
+            fallbacks=fallbacks,
         )
     except (asyncio.CancelledError, turn_mod.TurnCancelled):
         raise  # a Stop is not a transport failure; let the turn unwind

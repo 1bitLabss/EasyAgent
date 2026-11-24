@@ -1109,6 +1109,29 @@ class Store:
         atomic_write_json(self._bot_dir(bot["id"]) / "bot.json", bot)
         return bot
 
+    def set_task_route(self, bot_id: str, task: str, route: dict | None) -> dict:
+        """Point one internal task (e.g. goal_judge) at its own connection.
+
+        ``route`` is a small record — endpoint id and optional model, output
+        budget, and timeout. None clears the task's route; the task then
+        inherits the bot's main connection.
+        """
+        with self._lock:
+            bot = self.get_bot(bot_id)
+            routes = bot.get("task_routes")
+            if not isinstance(routes, dict):
+                routes = {}
+            if route is None:
+                routes.pop(task, None)
+            else:
+                routes[task] = route
+            if routes:
+                bot["task_routes"] = routes
+            else:
+                bot.pop("task_routes", None)
+            atomic_write_json(self._bot_dir(bot["id"]) / "bot.json", bot)
+            return bot
+
     def save_browser_settings(self, bot_id: str, *, headless: bool, allow: list[str], deny: list[str]) -> dict:
         """This bot's browser window and the sites it may open. Chats are not rewritten."""
         with self._lock:

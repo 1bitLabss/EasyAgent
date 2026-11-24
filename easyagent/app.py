@@ -3064,6 +3064,58 @@ def create_app(data_dir: str | Path | None = None) -> FastAPI:
             raise HTTPException(400, "The hidden skills must be a list of names.")
         return {"names": store.write_skills_hidden(bot_id, names)}
 
+    @app.get("/api/bots/{bot_id}/judge-route")
+    def get_judge_route(bot_id: str):
+        """Where this bot's goal judge points. An empty route means the main connection."""
+        bot = store.get_bot(bot_id)
+        routes = bot.get("task_routes")
+        route = routes.get("goal_judge") if isinstance(routes, dict) else None
+        return {"route": route if isinstance(route, dict) else {}}
+
+    @app.put("/api/bots/{bot_id}/judge-route")
+    def put_judge_route(bot_id: str, body: dict):
+        """Point the goal judge at its own (usually cheaper) connection.
+
+        An empty route clears it: the judge inherits the bot's main connection
+        again. The judge call itself also tolerates a stale route id by falling
+        back to the main connection with a note in the judge log.
+        """
+        store.get_bot(bot_id)
+        route = body.get("route") if isinstance(body, dict) else None
+        if route is None or route == {}:
+            store.set_task_route(bot_id, "goal_judge", None)
+            return {"route": {}}
+        if not isinstance(route, dict):
+            raise HTTPException(400, "The judge route must be an object or empty.")
+        endpoint_id = str(route.get("endpoint_id") or "").strip()
+        if not endpoint_id:
+            raise HTTPException(400, "The judge route needs a saved connection.")
+        try:
+            known = store.get_endpoint(endpoint_id) is not None
+        except Exception:
+            known = False
+        if not known:
+            raise HTTPException(400, "Pick a saved connection.")
+        saved: dict = {"endpoint_id": endpoint_id}
+        model = str(route.get("model") or "").strip()
+        if model:
+            saved["model"] = model
+        try:
+            if route.get("max_tokens") is not None:
+                number = int(route["max_tokens"])
+                if number < 1:
+                    raise ValueError
+                saved["max_tokens"] = number
+            if route.get("timeout_seconds") is not None:
+                seconds = float(route["timeout_seconds"])
+                if seconds < 1:
+                    raise ValueError
+                saved["timeout_seconds"] = seconds
+        except (TypeError, ValueError):
+            raise HTTPException(400, "Judge output length and timeout must be positive numbers.") from None
+        store.set_task_route(bot_id, "goal_judge", saved)
+        return {"route": saved}
+
     @app.get("/api/bots/{bot_id}/learning")
     def get_learning(bot_id: str):
         return learning_panel(store, store.get_bot(bot_id))
@@ -7015,6 +7067,53 @@ async def _judge_continuation(store: Store, bot_id: str, chat_id: str) -> str:
             # Armed before the task line existed (or by an older plan): the
             # goal is whatever the person last asked for, not a nudge.
             plan = plan_mod.capture_goal(store, bot_id, chat_id, plan)
+        # Quality gates run BEFORE the judge: a failing gate is deterministic
+        # evidence the goal is not done, so the judge is skipped entirely — no
+        # tokens, no health counters — and the gate's output drives the next
+        # turn. Every boundary re-executes the gate; nothing is replayed.
+        from easyagent import qualitygate
+
+        if plan.get("gates"):
+            gate_cwd = None
+            try:
+                from easyagent.workspace import bot_workspace
+
+                gate_cwd = str(bot_workspace(store, bot_id, create=True))
+            except Exception:
+                pass
+            decision = qualitygate.check_gates(
+                plan, goal=str(plan.get("goal") or ""), cwd=gate_cwd
+            )
+            plan_mod._write_plan(store, bot_id, chat_id, plan)
+            if decision is not None:
+                if decision["kind"] == "exhausted":
+                    plan_mod.set_keep_going(store, bot_id, chat_id, on=False)
+                    _finish_reply(store, bot_id, chat_id, decision["pause_line"], [])
+                    return ""
+                # A gate-failed continuation still counts against the cap.
+                cap = int(plan.get("budget") or plan_mod.KEEP_GOING_HARD_CAP)
+                n = int(plan.get("continued") or 0) + 1
+                plan_mod.note_continuation(store, bot_id, chat_id, mark=plan_mod.plan_digest(plan), stuck=0)
+                if n >= cap:
+                    plan_mod.set_keep_going(store, bot_id, chat_id, on=False)
+                    _finish_reply(
+                        store,
+                        bot_id,
+                        chat_id,
+                        f"Stopped after {cap} goes: {left} steps left. Say continue."
+                        " (a quality gate is still failing)",
+                        [],
+                    )
+                    return ""
+                _finish_reply(
+                    store,
+                    bot_id,
+                    chat_id,
+                    f"Quality gate failed ({n}/{cap} turns, attempt {decision['attempts']}"
+                    f"/{decision['max_retries']}): $ {decision['command']}",
+                    [],
+                )
+                return decision["prompt"]
         answer = ""
         try:
             for message in reversed(store.get_chat(bot_id, chat_id).get("messages") or []):

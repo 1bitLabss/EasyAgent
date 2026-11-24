@@ -649,6 +649,7 @@ class BridgeIn(BaseModel):
     mail_imap_host: str = ""
     mail_smtp_host: str = ""
     post_url: str = ""
+    default_user_id: str = ""
 
 
 class WebhookIn(BaseModel):
@@ -668,6 +669,8 @@ class BridgePatch(BaseModel):
     mail_imap_host: str | None = None
     mail_smtp_host: str | None = None
     post_url: str | None = None
+    default_user_id: str | None = None
+    default_chat_id: str | None = None
 
 
 class MemoryIn(BaseModel):
@@ -1480,6 +1483,7 @@ def create_app(data_dir: str | Path | None = None) -> FastAPI:
                 mail_imap_host=body.mail_imap_host,
                 mail_smtp_host=body.mail_smtp_host,
                 post_url=body.post_url,
+                default_user_id=body.default_user_id,
             )
         except StoreError as exc:
             raise HTTPException(exc.status, exc.message) from exc
@@ -1500,6 +1504,8 @@ def create_app(data_dir: str | Path | None = None) -> FastAPI:
                 mail_imap_host=body.mail_imap_host,
                 mail_smtp_host=body.mail_smtp_host,
                 post_url=body.post_url,
+                default_user_id=body.default_user_id,
+                default_chat_id=body.default_chat_id,
             )
         except StoreError as exc:
             raise HTTPException(exc.status, exc.message) from exc

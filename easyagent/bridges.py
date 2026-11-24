@@ -77,6 +77,8 @@ def public_record(row: dict) -> dict:
         "allow_ids": [str(item) for item in (row.get("allow_ids") or [])],
         "has_token": bool(row.get("has_token")),
         "last_user_id": str(row.get("last_user_id") or ""),
+        "default_user_id": str(row.get("default_user_id") or ""),
+        "default_chat_id": str(row.get("default_chat_id") or ""),
         "mail_user": str(row.get("mail_user") or ""),
         "mail_imap_host": str(row.get("mail_imap_host") or ""),
         "mail_smtp_host": str(row.get("mail_smtp_host") or ""),
@@ -113,6 +115,8 @@ def add_bridge(
     mail_imap_host: str = "",
     mail_smtp_host: str = "",
     post_url: str = "",
+    default_user_id: str = "",
+    default_chat_id: str = "",
 ) -> dict:
     platform = kind if kind in _KINDS else ""
     if not platform:
@@ -131,6 +135,12 @@ def add_bridge(
         ids = [item.lower() for item in ids]
     if not ids:
         raise StoreError("Add your own user id. An empty list would ignore you too.", 400)
+    default_user = (default_user_id or "").strip()
+    if platform == "email":
+        default_user = default_user.lower()
+    default_chat = (default_chat_id or "").strip()
+    if default_user and default_user not in ids:
+        raise StoreError("That default user is not on the allow list, so their replies would be ignored.", 400)
     secret = (token or "").strip()
     if not secret:
         raise StoreError("The token goes in the keychain field.", 400)
@@ -147,6 +157,8 @@ def add_bridge(
         "update_offset": 0,
         "last_user_id": "",
         "last_chat_id": "",
+        "default_user_id": default_user,
+        "default_chat_id": default_chat,
         "mail_user": mail_user,
         "mail_imap_host": mail_imap_host,
         "mail_smtp_host": mail_smtp_host,
@@ -173,6 +185,8 @@ def update_bridge(
     mail_imap_host: str | None = None,
     mail_smtp_host: str | None = None,
     post_url: str | None = None,
+    default_user_id: str | None = None,
+    default_chat_id: str | None = None,
 ) -> dict:
     rows = list_records(store)
     row = next((item for item in rows if item.get("id") == bridge_id), None)
@@ -187,6 +201,15 @@ def update_bridge(
         if not ids:
             raise StoreError("Add your own user id. An empty list would ignore you too.", 400)
         row["allow_ids"] = ids
+    if default_user_id is not None:
+        wanted = (default_user_id or "").strip()
+        if str(row.get("kind") or "") == "email":
+            wanted = wanted.lower()
+        if wanted and wanted not in [str(item) for item in (row.get("allow_ids") or [])]:
+            raise StoreError("That default user is not on the allow list, so their replies would be ignored.", 400)
+        row["default_user_id"] = wanted
+    if default_chat_id is not None:
+        row["default_chat_id"] = (default_chat_id or "").strip()
     if mail_user is not None and str(row.get("kind") or "") == "email":
         row["mail_user"] = mail_user.strip().lower()
     if mail_imap_host is not None and str(row.get("kind") or "") == "email":
@@ -498,8 +521,8 @@ async def _send_card(store: Store, bot_id: str, card) -> None:
     for row in list_records(store):
         if row.get("enabled") is False or row.get("bot_id") != bot_id:
             continue
-        user_id = str(row.get("last_user_id") or "")
-        chat_id = str(row.get("last_chat_id") or "")
+        user_id = str(row.get("last_user_id") or row.get("default_user_id") or "")
+        chat_id = str(row.get("last_chat_id") or row.get("default_chat_id") or "") or user_id
         if not user_id or not admitted(row, user_id) or not chat_id:
             continue
         token = get_secret(secret_account(row["id"]), store)
